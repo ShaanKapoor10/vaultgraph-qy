@@ -1,12 +1,15 @@
 import type { RelationType } from "./ontology"
 
-/** Categorical cluster palette (maps to --chart-* tokens). */
+/** Categorical cluster palette (literal values, self-contained for SVG). */
 export const CLUSTER_COLORS = [
-  "var(--chart-1)",
-  "var(--chart-2)",
-  "var(--chart-3)",
-  "var(--chart-4)",
-  "var(--chart-5)",
+  "oklch(0.8 0.15 78)", // amber
+  "oklch(0.72 0.12 200)", // cyan
+  "oklch(0.7 0.13 145)", // green
+  "oklch(0.68 0.16 15)", // rose
+  "oklch(0.7 0.1 255)", // blue
+  "oklch(0.74 0.14 330)", // magenta
+  "oklch(0.78 0.13 110)", // lime
+  "oklch(0.72 0.11 40)", // orange
 ]
 
 export function clusterColor(clusterId: number): string {

@@ -4,6 +4,8 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Brahmastra theme v2 */
+
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: var(--font-geist-sans), 'Geist Fallback';
