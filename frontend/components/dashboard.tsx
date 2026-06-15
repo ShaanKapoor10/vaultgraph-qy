@@ -1,7 +1,7 @@
 "use client"
 
 import { useMemo, useState } from "react"
-import type { Note, RawTriple } from "@/lib/types"
+import type { Note, RawTriple, PipelineResult } from "@/lib/types"
 import { runPipeline } from "@/lib/pipeline"
 import { noteTitleMap } from "@/lib/viz"
 import { GraphView } from "@/components/graph-view"
@@ -30,17 +30,26 @@ interface Props {
   initialNotes: Note[]
   initialTriples: RawTriple[]
   backendAvailable?: boolean
+  /** Precomputed PipelineResult from the Python backend. Used on first render;
+   *  falls back to running the TS pipeline once the user adds notes locally. */
+  initialResult?: PipelineResult | null
 }
 
-export function Dashboard({ initialNotes, initialTriples, backendAvailable = false }: Props) {
+export function Dashboard({ initialNotes, initialTriples, backendAvailable = false, initialResult = null }: Props) {
   const [notes, setNotes] = useState<Note[]>(initialNotes)
   const [triples, setTriples] = useState<RawTriple[]>(initialTriples)
   const [pipelineRunning, setPipelineRunning] = useState(false)
   const [pipelineStatus, setPipelineStatus] = useState<string | null>(null)
   const [view, setView] = useState<View>("graph")
   const [selected, setSelected] = useState<string | null>(null)
+  // Track whether the user has added local notes (which invalidates the backend result)
+  const [localNotesAdded, setLocalNotesAdded] = useState(false)
 
-  const result = useMemo(() => runPipeline(notes, triples), [notes, triples])
+  // Use the precomputed backend result unless the user has added notes locally.
+  const result = useMemo(() => {
+    if (initialResult && !localNotesAdded) return initialResult
+    return runPipeline(notes, triples)
+  }, [notes, triples, initialResult, localNotesAdded])
   const noteTitles = useMemo(() => noteTitleMap(notes), [notes])
 
   const select = (id: string) => setSelected(id)
@@ -53,9 +62,17 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
       const res = await fetch("/api/pipeline/run", { method: "POST" })
       const data = await res.json()
       if (res.ok) {
-        setPipelineStatus(`Pipeline complete: ${JSON.stringify(data)}`)
-        // Reload page to pick up fresh data from backend
-        window.location.reload()
+        const g = data?.stages?.graph ?? {}
+        const e = data?.stages?.extract ?? {}
+        const r = data?.stages?.resolve ?? {}
+        setPipelineStatus(
+          `Pipeline complete — extracted ${e.triples_added ?? 0} triples, ` +
+          `${r.clusters ?? 0} entity clusters, ` +
+          `${g.nodes ?? 0} nodes / ${g.edges ?? 0} edges, ` +
+          `${g.contradictions ?? 0} contradictions. Reloading…`
+        )
+        setLocalNotesAdded(false)
+        setTimeout(() => window.location.reload(), 1200)
       } else {
         setPipelineStatus(`Error: ${data.detail ?? "unknown"}`)
       }
@@ -69,6 +86,7 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
   const addNote = (note: Note, newTriples: RawTriple[]) => {
     setNotes((n) => [note, ...n])
     setTriples((t) => [...t, ...newTriples])
+    setLocalNotesAdded(true)
   }
 
   const stats = [

@@ -1,22 +1,27 @@
 import { Dashboard } from "@/components/dashboard"
 import { SAMPLE_NOTES, SAMPLE_TRIPLES } from "@/lib/sample-notes"
-import type { Note, RawTriple } from "@/lib/types"
+import type { Note, RawTriple, PipelineResult } from "@/lib/types"
+import { adaptBackendGraph } from "@/lib/backend-adapter"
+import type { BackendGraphResponse } from "@/lib/backend-adapter"
 
 /**
- * Try to load notes + triples from the Python backend.
+ * Try to load notes, triples, and the precomputed graph from the Python backend.
  * Falls back to the seeded sample data if the backend is unavailable
  * (e.g. running without `vercel dev`, or first launch before any pipeline run).
  */
-async function loadFromBackend(): Promise<{ notes: Note[]; triples: RawTriple[] } | null> {
+async function loadFromBackend(): Promise<{
+  notes: Note[]
+  triples: RawTriple[]
+  result: PipelineResult | null
+} | null> {
   try {
-    // In the Vercel Services setup the backend is reachable at /api/*.
-    // In a standalone Next.js dev server the next.config rewrites handle it.
     const base = process.env.BACKEND_URL ?? "http://localhost:8000"
-    const [notesRes, triplesRes] = await Promise.all([
+    const [notesRes, triplesRes, graphRes] = await Promise.all([
       fetch(`${base}/notes`, { cache: "no-store" }),
       fetch(`${base}/graph/triples`, { cache: "no-store" }),
+      fetch(`${base}/graph`, { cache: "no-store" }),
     ])
-    if (!notesRes.ok || !triplesRes.ok) return null
+    if (!notesRes.ok || !triplesRes.ok || !graphRes.ok) return null
 
     const backendNotes: Array<{
       id: string
@@ -39,6 +44,8 @@ async function loadFromBackend(): Promise<{ notes: Note[]; triples: RawTriple[] 
       extracted_at: string
     }> = await triplesRes.json()
 
+    const graphPayload: BackendGraphResponse = await graphRes.json()
+
     // No data yet — let the seed data show
     if (backendNotes.length === 0) return null
 
@@ -56,12 +63,18 @@ async function loadFromBackend(): Promise<{ notes: Note[]; triples: RawTriple[] 
       relation: t.relation as RawTriple["relation"],
       objectText: t.object_text,
       confidence: t.confidence,
-      sourceQuote: t.source_quote ?? undefined,
-      sourceNoteId: t.source_note_id ?? undefined,
+      sourceQuote: t.source_quote ?? "",
+      sourceNoteId: t.source_note_id ?? "",
       extractedAt: t.extracted_at,
     }))
 
-    return { notes, triples }
+    // Use the precomputed graph if the backend has built one (nodes > 0)
+    const result =
+      graphPayload.graph.nodes.length > 0
+        ? adaptBackendGraph(graphPayload, notes, triples)
+        : null
+
+    return { notes, triples, result }
   } catch {
     // Backend not reachable — silently fall back
     return null
@@ -72,12 +85,14 @@ export default async function Page() {
   const backend = await loadFromBackend()
   const notes = backend?.notes ?? SAMPLE_NOTES
   const triples = backend?.triples ?? SAMPLE_TRIPLES
+  const initialResult = backend?.result ?? null
 
   return (
     <Dashboard
       initialNotes={notes}
       initialTriples={triples}
       backendAvailable={backend !== null}
+      initialResult={initialResult}
     />
   )
 }
