@@ -12,7 +12,7 @@ import { Contradictions } from "@/components/panels/contradictions"
 import { PredictedLinks } from "@/components/panels/predicted-links"
 import { EntityResolution } from "@/components/panels/entity-resolution"
 import { NotesPanel } from "@/components/panels/notes-panel"
-import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText } from "lucide-react"
+import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText, Play, Loader2 } from "lucide-react"
 
 type View = "graph" | "central" | "clusters" | "contradictions" | "links" | "resolution" | "notes"
 
@@ -45,6 +45,27 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
 
   const select = (id: string) => setSelected(id)
 
+  const runPipelineNow = async () => {
+    if (!backendAvailable) return
+    setPipelineRunning(true)
+    setPipelineStatus(null)
+    try {
+      const res = await fetch("/api/pipeline/run", { method: "POST" })
+      const data = await res.json()
+      if (res.ok) {
+        setPipelineStatus(`Pipeline complete: ${JSON.stringify(data)}`)
+        // Reload page to pick up fresh data from backend
+        window.location.reload()
+      } else {
+        setPipelineStatus(`Error: ${data.detail ?? "unknown"}`)
+      }
+    } catch (e) {
+      setPipelineStatus(`Error: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setPipelineRunning(false)
+    }
+  }
+
   const addNote = (note: Note, newTriples: RawTriple[]) => {
     setNotes((n) => [note, ...n])
     setTriples((t) => [...t, ...newTriples])
@@ -74,13 +95,42 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
             </div>
           </div>
 
-          <div className="ml-auto hidden items-center gap-1.5 font-mono text-[11px] text-muted-foreground md:flex">
-            {["sync", "extract", "resolve", "graph", "analyze"].map((s, i) => (
-              <span key={s} className="flex items-center gap-1.5">
-                {i > 0 && <span className="text-border">→</span>}
-                <span className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">{s}</span>
-              </span>
-            ))}
+          <div className="ml-auto flex items-center gap-2">
+            <div className="hidden items-center gap-1.5 font-mono text-[11px] text-muted-foreground md:flex">
+              {["sync", "extract", "resolve", "graph", "analyze"].map((s, i) => (
+                <span key={s} className="flex items-center gap-1.5">
+                  {i > 0 && <span className="text-border">→</span>}
+                  <span className="rounded bg-secondary px-1.5 py-0.5 text-secondary-foreground">{s}</span>
+                </span>
+              ))}
+            </div>
+
+            {/* Backend status + run button */}
+            <div
+              className={`hidden items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] md:flex ${
+                backendAvailable
+                  ? "border-green-500/30 bg-green-500/10 text-green-400"
+                  : "border-border bg-secondary text-muted-foreground"
+              }`}
+            >
+              <span className={`h-1.5 w-1.5 rounded-full ${backendAvailable ? "bg-green-400" : "bg-muted-foreground"}`} />
+              {backendAvailable ? "backend live" : "seed data"}
+            </div>
+
+            {backendAvailable && (
+              <button
+                onClick={runPipelineNow}
+                disabled={pipelineRunning}
+                className="flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1 font-mono text-[11px] text-primary transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {pipelineRunning ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Play className="h-3 w-3" />
+                )}
+                {pipelineRunning ? "running…" : "run pipeline"}
+              </button>
+            )}
           </div>
         </div>
 
@@ -123,6 +173,13 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
           })}
         </nav>
       </header>
+
+      {/* Pipeline status bar */}
+      {pipelineStatus && (
+        <div className="border-b border-border bg-secondary px-4 py-2 font-mono text-[11px] text-muted-foreground sm:px-6">
+          {pipelineStatus}
+        </div>
+      )}
 
       {/* Body */}
       <div className="flex min-h-0 flex-1">

@@ -4,7 +4,7 @@ Notes router — CRUD for notes in SQLite.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -17,7 +17,7 @@ class NoteCreate(BaseModel):
     id: str
     title: str
     content: str
-    last_edited: str | None = None
+    last_edited: Optional[str] = None
 
 
 @router.get("")

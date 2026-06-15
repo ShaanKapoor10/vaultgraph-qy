@@ -2,10 +2,11 @@
 
 # dependencies
 /node_modules
+/frontend/node_modules
 
 # next.js
-/.next/
-/out/
+/frontend/.next/
+/frontend/out/
 
 # production
 /build
@@ -18,10 +19,28 @@ yarn-error.log*
 
 # env files
 .env*
+backend/.env
 
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
-next-env.d.ts
+frontend/next-env.d.ts
+
+# Python venv
+backend/.venv/
+.venv/
+*.py[cod]
+*.pyo
+.venv/
+backend/.venv/
+*.egg-info/
+dist/
+
+# SQLite database (local data, never commit)
+backend/data/concept_graph.db
+backend/data/*.db
+
+# sentence-transformers model cache
+backend/.cache/
