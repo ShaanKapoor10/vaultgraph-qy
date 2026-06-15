@@ -29,11 +29,14 @@ const TABS: { id: View; label: string; icon: React.ElementType }[] = [
 interface Props {
   initialNotes: Note[]
   initialTriples: RawTriple[]
+  backendAvailable?: boolean
 }
 
-export function Dashboard({ initialNotes, initialTriples }: Props) {
+export function Dashboard({ initialNotes, initialTriples, backendAvailable = false }: Props) {
   const [notes, setNotes] = useState<Note[]>(initialNotes)
   const [triples, setTriples] = useState<RawTriple[]>(initialTriples)
+  const [pipelineRunning, setPipelineRunning] = useState(false)
+  const [pipelineStatus, setPipelineStatus] = useState<string | null>(null)
   const [view, setView] = useState<View>("graph")
   const [selected, setSelected] = useState<string | null>(null)
 

@@ -1,0 +1,3 @@
+"""
+Brahmastra package init.
+"""
