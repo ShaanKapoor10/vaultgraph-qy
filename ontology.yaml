@@ -1,0 +1,105 @@
+version: "1.0"
+name: "Brahmastra Concept Graph Ontology"
+description: "Domain-agnostic semantic relation types for knowledge graphs"
+
+relations:
+  - name: "reports_to"
+    domain: "person"
+    range: "person"
+    description: "Organizational hierarchy — X reports to Y"
+    examples: ["Alice reports to Bob"]
+
+  - name: "owns"
+    domain: "person"
+    range: ["project", "entity"]
+    description: "Ownership or responsibility — X owns Y"
+    examples: ["Sarah owns the search revamp"]
+
+  - name: "depends_on"
+    domain: ["project", "entity"]
+    range: ["project", "entity"]
+    description: "Dependency relationship — X depends on Y"
+    examples: ["Search revamp depends on auth migration"]
+
+  - name: "scheduled_for"
+    domain: ["project", "entity", "event"]
+    range: "date"
+    description: "Temporal planning — X is scheduled for date Y"
+    examples: ["Auth migration scheduled for March 15"]
+
+  - name: "has_status"
+    domain: ["project", "entity", "task"]
+    range: "status"
+    description: "Current state — X has status Y"
+    examples: ["Project is in progress"]
+
+  - name: "related_to"
+    domain: "entity"
+    range: "entity"
+    description: "Generic semantic relation — catch-all for untyped edges"
+    examples: ["Microservices related to scalability"]
+
+  - name: "located_in"
+    domain: ["person", "organization"]
+    range: "location"
+    description: "Geographic/organizational location — X is in Y"
+    examples: ["Team is located in San Francisco"]
+
+  - name: "uses"
+    domain: ["person", "project"]
+    range: ["technology", "tool", "service"]
+    description: "Tool or technology usage — X uses Y"
+    examples: ["We use PostgreSQL for persistence"]
+
+  - name: "created_by"
+    domain: ["document", "project", "entity"]
+    range: "person"
+    description: "Authorship — X was created by Y"
+    examples: ["This architecture was designed by Priya"]
+
+  - name: "mentions"
+    domain: ["document", "text"]
+    range: "entity"
+    description: "Textual reference — X mentions Y"
+    examples: ["The RFC mentions the new consensus protocol"]
+
+  - name: "contradicts"
+    domain: "statement"
+    range: "statement"
+    description: "Logical conflict — X contradicts Y (filled by contradiction detector)"
+    examples: ["Statement A contradicts Statement B"]
+
+entity_types:
+  - name: "person"
+    description: "Individual human"
+  - name: "project"
+    description: "Work initiative or deliverable"
+  - name: "organization"
+    description: "Team, group, or company"
+  - name: "technology"
+    description: "Programming language, framework, tool"
+  - name: "service"
+    description: "API, database, or system service"
+  - name: "location"
+    description: "Geographic place or venue"
+  - name: "date"
+    description: "Calendar date or date range"
+  - name: "status"
+    description: "Project or task state (e.g. 'planned', 'in progress', 'done')"
+  - name: "document"
+    description: "Written artifact (RFC, design doc, note)"
+  - name: "entity"
+    description: "Generic entity when type is unknown"
+  - name: "event"
+    description: "Named occurrence or milestone"
+  - name: "statement"
+    description: "Claim or assertion (for contradiction tracking)"
+
+validation:
+  confidence_threshold: 0.4
+  allow_custom_relations: false
+  entity_type_enforcement: "soft"
+  description: |
+    - confidence_threshold: Triples with confidence < 0.4 are filtered out during pipeline.
+    - allow_custom_relations: If true, unlisted relations are accepted as 'related_to'.
+    - entity_type_enforcement: 'soft' = warnings, 'strict' = rejection, 'none' = skip validation.

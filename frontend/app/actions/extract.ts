@@ -39,6 +39,7 @@ export interface ExtractResult {
 /**
  * Ontology-constrained extraction. Sends the note to an LLM via the Vercel AI
  * Gateway and returns typed, validated triples with confidence + source quotes.
+ * Automatically persists the note and triples to the backend if available.
  */
 export async function extractTriples(noteId: string, content: string): Promise<ExtractResult> {
   try {
@@ -63,6 +64,42 @@ export async function extractTriples(noteId: string, content: string): Promise<E
         extractedAt: now,
       }))
       .filter((t) => t.subjectText && t.objectText)
+
+    // Persist to backend if available
+    try {
+      const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000"
+      await fetch(`${backendUrl}/api/notes`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id: noteId,
+          title: "Extracted from web",
+          content: content.slice(0, 500),
+          extraction_status: "done",
+        }),
+      }).catch(() => {}) // silently ignore backend errors
+
+      if (triples.length > 0) {
+        await fetch(`${backendUrl}/api/graph/triples`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            triples: triples.map((t) => ({
+              subject_text: t.subjectText,
+              subject_type: "entity",
+              relation: t.relation,
+              object_text: t.objectText,
+              object_type: "entity",
+              confidence: t.confidence,
+              source_quote: t.sourceQuote,
+              source_note_id: t.sourceNoteId,
+            })),
+          }),
+        }).catch(() => {}) // silently ignore backend errors
+      }
+    } catch {
+      // Backend not reachable — continue anyway
+    }
 
     return { ok: true, triples }
   } catch (err) {
