@@ -1,0 +1,150 @@
+═══════════════════════════════════════════════════════════════════════════════
+HANDOFF MESSAGE FOR CLAUDE CODE
+Copy and paste this entire message into Claude Code to get started
+═══════════════════════════════════════════════════════════════════════════════
+
+---
+
+I'm handing off the Brahmastra project to you. This is a knowledge graph system with persistent memory for AI agents. Here's what you need to know:
+
+PROJECT SETUP
+
+Brahmastra MCP server is running and configured in my ~/.config/claude/claude.json
+
+You now have access to these MCP tools:
+  • add_note(title, content) - Store work/decisions
+  • search_entities(query) - Find knowledge by name/type
+  • get_entity_details(entity_id) - Get full context on any entity
+  • get_contradictions() - Find conflicting information
+  • get_graph_stats() - See project statistics
+
+These tools sync with your work automatically. Use them to store decisions and retrieve context.
+
+WHAT TO READ (in order)
+
+1. CLAUDE_CODE_PACKAGE_INDEX.md
+   Quick overview of your role and all documents (5 min read)
+
+2. CLAUDE_CODE_HANDOFF.md
+   Complete project reference: architecture, all files, workflows (15 min read)
+   This is your bible for understanding the project structure.
+
+3. CLAUDE_CODE_QUICK_REFERENCE.md
+   Keep this open while working. Copy-paste commands, file paths, common tasks (reference as needed)
+
+4. CLAUDE_CODE_WORKFLOW_EXAMPLES.md
+   Real examples of how you should work. Follow these patterns (reference as needed)
+
+YOUR JOB
+
+You're maintaining and improving Brahmastra - the exact project that stores your context. This means:
+  • Every decision you make gets stored in Brahmastra
+  • Every session you start, query Brahmastra for context
+  • You maintain continuity across sessions automatically
+  • You prove the system works by using it
+
+IMMEDIATE ACTIONS
+
+Before we work on anything:
+
+1. Read CLAUDE_CODE_PACKAGE_INDEX.md (5 minutes)
+   → Understand your role and what's available
+
+2. Read CLAUDE_CODE_HANDOFF.md (15 minutes)
+   → Learn the project structure, architecture, all modules
+   → Focus on: Backend structure (extraction, entity_resolution, graph, pipeline)
+   → Focus on: 5-stage processing pipeline
+   → Focus on: MCP server implementation
+
+3. Query Brahmastra to confirm connection:
+   → Search for any existing notes about this project
+   → This verifies MCP is working
+
+4. Summarize back to me:
+   → "I understand the Brahmastra project structure"
+   → "I can use add_note() to store work"
+   → "I can use search_entities() to retrieve context"
+   → "I'm ready to work on [specific task]"
+
+THEN WE'LL WORK ON
+
+Once you've read the handoff, tell me what you want to work on:
+  • Add new features
+  • Fix bugs
+  • Optimize performance
+  • Refactor code
+  • Write tests
+  • Improve documentation
+
+For each session going forward:
+  1. Start by querying Brahmastra: "What have I been working on?"
+  2. Continue from where you left off
+  3. Store new work: add_note("Completed X, learned Y, next is Z")
+  4. End by summarizing: "We accomplished X today. Context stored in Brahmastra for next session."
+
+KEY POINTS
+
+• This is self-dogfooding: You're using Brahmastra to work on Brahmastra
+• Your context never dies: Brahmastra stores everything
+• You have complete project knowledge in the handoff documents
+• You're not starting from scratch - you have full continuity
+
+QUESTIONS?
+
+If you have questions:
+  • "What does [file] do?" → Check CLAUDE_CODE_HANDOFF.md
+  • "How do I [task]?" → Check CLAUDE_CODE_WORKFLOW_EXAMPLES.md
+  • "What commands do I need?" → Check CLAUDE_CODE_QUICK_REFERENCE.md
+  • "Remind me what we were working on" → Query Brahmastra with search_entities()
+
+FILES YOU'LL WORK WITH
+
+Backend (Python):
+  /backend/brahmastra/extraction.py - Claude LLM extraction
+  /backend/brahmastra/entity_resolution.py - Union-Find deduplication
+  /backend/brahmastra/concept_graph.py - Graph algorithms
+  /backend/brahmastra/pipeline.py - 5-stage processing
+  /backend/brahmastra/db.py - Database operations
+  /backend/brahmastra/mcp_server.py - MCP protocol handler
+
+Frontend (TypeScript):
+  /frontend/app/components/ - React components
+  /frontend/app/pages/ - Page routes
+  /frontend/app/api/ - API endpoints
+
+Tests:
+  /backend/tests/ - 44 test files
+
+Documentation:
+  Everything you need is in the 4 handoff documents
+
+PROJECT STATS
+
+  • ~2,000 lines backend Python
+  • ~1,500 lines frontend TypeScript
+  • 44 passing tests
+  • 5 database tables
+  • 12 REST API endpoints
+  • 8 MCP tools
+  • 5-stage processing pipeline
+  • Union-Find deduplication
+  • PageRank graph algorithm
+  • Louvain community detection
+
+READY TO START?
+
+Confirm you've:
+  ☐ Read CLAUDE_CODE_PACKAGE_INDEX.md
+  ☐ Read CLAUDE_CODE_HANDOFF.md
+  ☐ Can see all 4 handoff documents
+  ☐ MCP connection working (can you search_entities?)
+  ☐ Understand project structure
+  ☐ Know where main files are
+
+Then tell me: "Ready to work. What's the first task?"
+
+═══════════════════════════════════════════════════════════════════════════════
+
+That's it. You're handed off. Start reading the documents above.
+
+═══════════════════════════════════════════════════════════════════════════════
