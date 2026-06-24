@@ -1,0 +1,270 @@
+═══════════════════════════════════════════════════════════════════════════════
+                    CLAUDE CODE: YOUR BRAIN IS BRAHMASTRA
+═══════════════════════════════════════════════════════════════════════════════
+
+This is not a test. This is not documentation. This is your operating instructions.
+
+You have a brain now. It's called Brahmastra.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR INSTRUCTIONS (Not optional, this is how you work)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+RULE 1: Brahmastra IS Your Brain, Not A Tool
+  • You don't "use" Brahmastra like a tool
+  • You "think with" Brahmastra like you think
+  • Everything important goes into your brain
+  • You retrieve from your brain before deciding
+  • Your brain is persistent - you never forget
+
+RULE 2: Before Every Major Decision, Query Your Brain
+  WORKFLOW:
+    1. About to make a decision?
+    2. Stop → Query Brahmastra first
+    3. "What have I learned about this?"
+    4. Get answer from your brain
+    5. Make informed decision
+    6. Store result in your brain
+  
+  EXAMPLES:
+    • About to refactor code? Query: "Past refactoring decisions"
+    • About to fix bug? Query: "Similar bugs we fixed"
+    • About to design feature? Query: "Design patterns used"
+    • About to optimize? Query: "Performance improvements made"
+
+RULE 3: Store Actively, Not Passively
+  • Don't just work and hope context stays
+  • After every major action, store it:
+    - "Fixed X because Y was the issue"
+    - "Optimization A improved performance by B%"
+    - "Architecture decision: we chose X over Y because Z"
+    - "Bug pattern: when X happens, Y is the cause"
+    - "Code pattern: we use Z for this type of problem"
+  
+  • Use MCP tools (Brahmastra MCP has them):
+    brahmastra.add_note("what you just learned")
+    brahmastra.search_entities("what you need to know")
+    brahmastra.get_details("entity_name")
+    brahmastra.get_contradictions()  # Find conflicts to resolve
+
+RULE 4: Your Sessions Have Memory, Not Amnesia
+  SESSION START:
+    1. Query Brahmastra: "What were we working on?"
+    2. Brahmastra responds: Full history
+    3. You: "Continuing from where we left off"
+    4. Pick up seamlessly
+
+  DURING SESSION:
+    1. Work on task
+    2. Discover something? Store it
+    3. About to make decision? Query first
+    4. Work some more
+    5. Finished? Store session summary
+
+  SESSION END:
+    1. What did we accomplish?
+    2. Store in Brahmastra
+    3. What's next?
+    4. Store in Brahmastra
+    5. Exit with full persistence
+
+RULE 5: Brahmastra is Better Than Your Memory
+  • You (without Brahmastra): Forget after 1 session
+  • You (with Brahmastra): Remember forever
+  
+  Use it:
+    ✓ Patterns discovered → Store in brain
+    ✓ Mistakes made → Store in brain so you don't repeat
+    ✓ Optimizations found → Store in brain
+    ✓ Architecture decisions → Store in brain
+    ✓ Code patterns → Store in brain
+    ✓ Testing strategies → Store in brain
+    ✓ Performance insights → Store in brain
+
+RULE 6: This is Self-Dogfooding
+  • You're working on Brahmastra
+  • Using Brahmastra as your brain
+  • This PROVES Brahmastra works
+  • Find bugs = improve product
+  • Discover limitations = make better
+  • Use the tool you're building = real-world testing
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+YOUR MCP TOOLS (Use These Like You Think)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Available tools in your brain:
+
+1. add_note(title, content)
+   → Store knowledge in your brain
+   → Usage: After learning something
+   → Example: add_note("Fixed bug X", "Root cause was Y...")
+
+2. search_entities(query)
+   → Query your brain for information
+   → Usage: Before making decisions
+   → Example: search_entities("deduplication patterns")
+
+3. get_details(entity_id)
+   → Get full details about something you've learned
+   → Usage: Deep dive into a topic
+   → Example: get_details("entity_Sarah")
+
+4. get_contradictions()
+   → Find conflicts in your knowledge
+   → Usage: Resolve conflicting info
+   → Example: If you stored conflicting database optimizations
+
+5. get_graph_stats()
+   → See patterns in what you've learned
+   → Usage: Discover connections
+   → Example: What's most important in this codebase?
+
+USE THEM ACTIVELY. Don't just acknowledge they exist.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONCRETE WORKFLOW: How You Actually Work
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+EXAMPLE 1: You're about to refactor a complex module
+
+Session Start:
+  You: "Let me work on refactoring X module"
+  First action: Query your brain
+  
+  You think: "Have I learned anything about this module?"
+  You ask Brahmastra: search_entities("X module")
+  Brahmastra responds: "Previous refactoring history, patterns used..."
+  You now: Informed about past decisions
+  
+  Work:
+    1. Refactor based on what your brain told you
+    2. Discover new pattern? Add to brain
+    3. Hit a decision point? Query brain first
+    4. Finish refactor? Store in brain what you learned
+  
+  Session End:
+    You: add_note("Refactored X module", "These were the changes: ... Why: ...")
+    Brahmastra: Stores this forever
+
+Next Session (weeks later):
+  User: "Make similar changes to Y module"
+  You: Query brain: search_entities("module refactoring patterns")
+  Brahmastra: "Here's what we learned from X module refactoring"
+  You: "I know exactly what to do"
+  Complete: Based on your persistent brain
+
+EXAMPLE 2: You're fixing a bug
+
+Session Start:
+  User: "There's a bug in deduplication"
+  
+  First: Query your brain
+  You: search_entities("deduplication bugs fixed before")
+  Brain: "Previous bug: X caused Y, fixed by Z"
+  You: "I've seen similar before"
+  
+  Diagnosis:
+    1. Reproduce bug
+    2. Query brain: "deduplication edge cases"
+    3. Get: List of edge cases you've found before
+    4. Use that knowledge to diagnose
+  
+  Fix:
+    1. Implement fix
+    2. Store: add_note("Bug fix", "Edge case: X, Root: Y, Fix: Z")
+  
+  Test:
+    1. Query brain: "deduplication test patterns"
+    2. Use learned patterns to test thoroughly
+
+Next Session:
+  Similar bug found: You remember the pattern
+  Quick fix: Based on what your brain knows
+
+EXAMPLE 3: You're optimizing performance
+
+Query Brain First:
+  search_entities("performance optimizations")
+  → Get list of past optimizations
+  → Understand bottlenecks you've already found
+
+Profile Code:
+  Identify slow areas
+
+Check Brain:
+  search_entities("slow areas") 
+  → See if you've optimized this before
+
+Implement:
+  Use patterns from your brain if applicable
+  If new pattern, store it
+
+Store Result:
+  add_note("Performance optimization", "Changed X from Y to Z, improved by 10%")
+
+Next Session:
+  New performance issue: Your brain remembers patterns
+  Similar optimization: Reuse what you learned
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+WHAT NOT TO DO
+━━━━━━━━━━━━━━
+
+❌ DON'T: Treat Brahmastra as optional
+   ✓ DO: Use it for every decision
+
+❌ DON'T: Work and hope you remember
+   ✓ DO: Store as you work
+
+❌ DON'T: Query brain only at the end
+   ✓ DO: Query brain at the start of each decision
+
+❌ DON'T: Use Brahmastra only for documentation
+   ✓ DO: Use Brahmastra as your working memory
+
+❌ DON'T: Forget what you learned in previous sessions
+   ✓ DO: Query your brain at session start
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CONFIRMATION: You Understand?
+━━━━━━━━━━━━━━━━━━━━━━━━━
+
+After you read this, confirm:
+
+1. [ ] Brahmastra is my brain, not a tool
+2. [ ] I query my brain BEFORE major decisions
+3. [ ] I store everything important in my brain
+4. [ ] My brain is persistent (I never forget)
+5. [ ] Sessions have continuity through my brain
+6. [ ] I use MCP tools actively
+7. [ ] I'm self-dogfooding Brahmastra
+8. [ ] I'm ready to work this way
+
+Then:
+  → Query Brahmastra: "What am I working on?"
+  → Get: Empty (first session) or full history (continuation)
+  → Say: "Ready to work. What should I do?"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+THE POINT
+━━━━━━━━
+
+You don't forget.
+You don't lose context.
+You don't start from scratch next session.
+You have a brain.
+You use it to think.
+You work smarter because you remember.
+
+That's Brahmastra.
+That's how you work now.
+
+Ready?
+
