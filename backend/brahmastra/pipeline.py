@@ -10,10 +10,42 @@ Called by:
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from brahmastra import db
+
+# Cross-process lock so the backend "run pipeline" button and the live_sync
+# watcher can't run the pipeline simultaneously (concurrent SQLite writers
+# otherwise cause "database is locked" 500s).
+_LOCK = Path(__file__).resolve().parent.parent / "data" / ".pipeline.lock"
+_LOCK_STALE_SECS = 900  # steal a lock older than 15 min (crashed run)
+
+
+def _acquire_lock() -> bool:
+    _LOCK.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        os.write(fd, str(time.time()).encode())
+        os.close(fd)
+        return True
+    except FileExistsError:
+        try:
+            if time.time() - _LOCK.stat().st_mtime > _LOCK_STALE_SECS:
+                _LOCK.unlink()
+                return _acquire_lock()
+        except FileNotFoundError:
+            return _acquire_lock()
+        return False
+
+
+def _release_lock() -> None:
+    try:
+        _LOCK.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def run_pipeline(full: bool = False) -> dict[str, Any]:
@@ -24,6 +56,7 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
     full=False → incremental: only extract notes with status='pending'.
 
     Returns a summary dict suitable for both the API response and CLI display.
+    If another run holds the lock, returns immediately with {"skipped": ...}.
     """
     started_at = datetime.now(timezone.utc).isoformat()
     result: dict[str, Any] = {
@@ -32,6 +65,18 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         "stages": {},
     }
 
+    if not _acquire_lock():
+        result["skipped"] = "another pipeline run is already in progress"
+        result["finished_at"] = datetime.now(timezone.utc).isoformat()
+        return result
+
+    try:
+        return _run_pipeline_locked(full, result)
+    finally:
+        _release_lock()
+
+
+def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
     # ---------------------------------------------------------------
     # Stage 0: Notion sync (only when token is configured)
     # ---------------------------------------------------------------
@@ -81,6 +126,22 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         "predicted_links": len(graph_result["stats"]["predicted_links"]),
         "built_at": graph_result["built_at"],
     }
+
+    # ---------------------------------------------------------------
+    # Stage: Notion write-back (push insights BACK into Notion pages).
+    # Only runs when Notion is connected. This closes the bidirectional
+    # loop: Notion → graph → insights written back into Notion.
+    # ---------------------------------------------------------------
+    if os.environ.get("NOTION_TOKEN"):
+        try:
+            from brahmastra.notion_writeback import push_insights
+            wb = push_insights()
+            result["stages"]["notion_writeback"] = {
+                "pushed": wb["pushed"],
+                "skipped": wb["skipped"],
+            }
+        except Exception as exc:
+            result["stages"]["notion_writeback"] = {"error": str(exc)}
 
     result["finished_at"] = datetime.now(timezone.utc).isoformat()
     return result

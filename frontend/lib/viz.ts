@@ -16,17 +16,23 @@ export function clusterColor(clusterId: number): string {
   return CLUSTER_COLORS[clusterId % CLUSTER_COLORS.length]
 }
 
-/** Short human label per relation. */
+/** Short human label per relation. Keep in sync with lib/ontology.ts. */
 export const RELATION_LABEL: Record<RelationType, string> = {
   owns: "owns",
+  created_by: "created by",
+  reports_to: "reports to",
   works_on: "works on",
-  depends_on: "depends on",
-  blocks: "blocks",
   part_of: "part of",
+  has_component: "has component",
+  depends_on: "depends on",
+  implements: "implements",
+  uses: "uses",
+  provides: "provides",
+  integrates_with: "integrates with",
+  has_status: "has status",
   scheduled_for: "scheduled for",
   located_in: "located in",
-  reports_to: "reports to",
-  uses: "uses",
+  blocks: "blocks",
   related_to: "related to",
 }
 

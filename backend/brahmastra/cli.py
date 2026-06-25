@@ -28,7 +28,7 @@ from rich.text import Text
 from rich import box
 
 # Load .env from backend directory
-_HERE = Path(__file__).resolve().parent
+_HERE = Path(__file__).resolve().parent.parent
 _ENV_FILE = _HERE / ".env"
 if _ENV_FILE.exists():
     from dotenv import load_dotenv

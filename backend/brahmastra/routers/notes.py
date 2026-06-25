@@ -18,6 +18,7 @@ class NoteCreate(BaseModel):
     title: str
     content: str
     last_edited: Optional[str] = None
+    extraction_status: Optional[str] = None  # "pending" | "done" | "error"
 
 
 @router.get("")
@@ -35,12 +36,15 @@ async def get_note(note_id: str) -> dict[str, Any]:
 
 @router.post("", status_code=201)
 async def create_note(body: NoteCreate) -> dict[str, Any]:
+    # Honor the caller's extraction_status if provided; default to pending
+    # so the pipeline picks it up for LLM extraction.
+    mark_pending = body.extraction_status != "done"
     db.upsert_note(
         id=body.id,
         title=body.title,
         content=body.content,
         last_edited=body.last_edited,
-        mark_pending=True,
+        mark_pending=mark_pending,
     )
     return db.get_note(body.id)  # type: ignore[return-value]
 

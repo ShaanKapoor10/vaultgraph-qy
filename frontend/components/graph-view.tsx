@@ -35,14 +35,27 @@ interface GraphViewProps {
   onSelect: (id: string | null) => void
 }
 
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v))
+
 export function GraphView({ graph, clusters, central, selected, onSelect }: GraphViewProps) {
   const wrapRef = useRef<HTMLDivElement>(null)
+  const svgRef = useRef<SVGSVGElement>(null)
   const [size, setSize] = useState({ w: 800, h: 560 })
   const [, force] = useState(0) // re-render trigger
   const simRef = useRef<Simulation<SimNode, SimLink> | null>(null)
   const nodesRef = useRef<SimNode[]>([])
   const linksRef = useRef<SimLink[]>([])
   const draggingRef = useRef<string | null>(null)
+
+  // viewport transform (pan + zoom)
+  const [view, setView] = useState({ x: 0, y: 0, k: 1 })
+  const viewRef = useRef(view)
+  useEffect(() => {
+    viewRef.current = view
+  }, [view])
+  // background-pan state
+  const panRef = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
+  const movedRef = useRef(false)
 
   // cluster lookup + centrality lookup
   const clusterOf = useMemo(() => {
@@ -143,28 +156,71 @@ export function GraphView({ graph, clusters, central, selected, onSelect }: Grap
     return s
   }, [selected, graph.edges])
 
-  // drag handlers
-  const toLocal = (e: React.PointerEvent) => {
-    const rect = (e.currentTarget as SVGSVGElement).getBoundingClientRect()
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  // screen → world coords (accounting for pan + zoom)
+  const toWorld = (clientX: number, clientY: number) => {
+    const rect = svgRef.current?.getBoundingClientRect()
+    const v = viewRef.current
+    const sx = clientX - (rect?.left ?? 0)
+    const sy = clientY - (rect?.top ?? 0)
+    return { x: (sx - v.x) / v.k, y: (sy - v.y) / v.k }
   }
-  const onPointerDown = (e: React.PointerEvent, id: string) => {
+
+  // Wheel zoom toward cursor — native listener so we can preventDefault (passive:false)
+  useEffect(() => {
+    const svg = svgRef.current
+    if (!svg) return
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault()
+      const rect = svg.getBoundingClientRect()
+      const sx = e.clientX - rect.left
+      const sy = e.clientY - rect.top
+      setView((v) => {
+        const k = clamp(v.k * (1 - e.deltaY * 0.0012), 0.2, 4)
+        const wx = (sx - v.x) / v.k
+        const wy = (sy - v.y) / v.k
+        return { k, x: sx - wx * k, y: sy - wy * k }
+      })
+    }
+    svg.addEventListener("wheel", onWheel, { passive: false })
+    return () => svg.removeEventListener("wheel", onWheel)
+  }, [])
+
+  // node drag start
+  const onNodePointerDown = (e: React.PointerEvent, id: string) => {
     e.stopPropagation()
     draggingRef.current = id
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
     simRef.current?.alphaTarget(0.3).restart()
   }
+
+  // background pan start
+  const onBgPointerDown = (e: React.PointerEvent) => {
+    panRef.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y }
+    movedRef.current = false
+    ;(e.currentTarget as Element).setPointerCapture?.(e.pointerId)
+  }
+
   const onPointerMove = (e: React.PointerEvent) => {
     const id = draggingRef.current
-    if (!id) return
-    const { x, y } = toLocal(e)
-    const n = nodes.find((nn) => nn.id === id)
-    if (n) {
-      n.fx = x
-      n.fy = y
+    if (id) {
+      const { x, y } = toWorld(e.clientX, e.clientY)
+      const n = nodes.find((nn) => nn.id === id)
+      if (n) {
+        n.fx = x
+        n.fy = y
+      }
+      return
+    }
+    const pan = panRef.current
+    if (pan) {
+      const dx = e.clientX - pan.sx
+      const dy = e.clientY - pan.sy
+      if (Math.abs(dx) > 3 || Math.abs(dy) > 3) movedRef.current = true
+      setView((v) => ({ ...v, x: pan.ox + dx, y: pan.oy + dy }))
     }
   }
-  const onPointerUp = (e: React.PointerEvent) => {
+
+  const onPointerUp = () => {
     const id = draggingRef.current
     if (id) {
       const n = nodes.find((nn) => nn.id === id)
@@ -172,18 +228,36 @@ export function GraphView({ graph, clusters, central, selected, onSelect }: Grap
         n.fx = null
         n.fy = null
       }
+      draggingRef.current = null
+      simRef.current?.alphaTarget(0)
+      return
     }
-    draggingRef.current = null
-    simRef.current?.alphaTarget(0)
+    if (panRef.current) {
+      const wasClick = !movedRef.current
+      panRef.current = null
+      if (wasClick) onSelect(null) // click on empty space deselects
+    }
   }
+
+  const resetView = () => setView({ x: 0, y: 0, k: 1 })
+  const zoomBy = (factor: number) =>
+    setView((v) => {
+      const k = clamp(v.k * factor, 0.2, 4)
+      const cx = size.w / 2
+      const cy = size.h / 2
+      const wx = (cx - v.x) / v.k
+      const wy = (cy - v.y) / v.k
+      return { k, x: cx - wx * k, y: cy - wy * k }
+    })
 
   return (
     <div ref={wrapRef} className="relative h-full w-full">
       <svg
+        ref={svgRef}
         width={size.w}
         height={size.h}
-        className="block cursor-default touch-none"
-        onClick={() => onSelect(null)}
+        className={`block touch-none ${panRef.current ? "cursor-grabbing" : "cursor-grab"}`}
+        onPointerDown={onBgPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerLeave={onPointerUp}
@@ -194,6 +268,7 @@ export function GraphView({ graph, clusters, central, selected, onSelect }: Grap
           </marker>
         </defs>
 
+        <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
         {/* edges */}
         <g>
           {links.map((l, i) => {
@@ -228,7 +303,7 @@ export function GraphView({ graph, clusters, central, selected, onSelect }: Grap
                 transform={`translate(${n.x},${n.y})`}
                 className="cursor-pointer"
                 opacity={dimmed ? 0.25 : 1}
-                onPointerDown={(e) => onPointerDown(e, n.id)}
+                onPointerDown={(e) => onNodePointerDown(e, n.id)}
                 onClick={(e) => {
                   e.stopPropagation()
                   onSelect(n.id === selected ? null : n.id)
@@ -251,7 +326,33 @@ export function GraphView({ graph, clusters, central, selected, onSelect }: Grap
             )
           })}
         </g>
+        </g>
       </svg>
+
+      {/* zoom / pan controls */}
+      <div className="absolute right-3 top-3 flex flex-col gap-1">
+        <button
+          onClick={() => zoomBy(1.25)}
+          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card/80 font-mono text-sm text-foreground/80 backdrop-blur hover:bg-card"
+          title="Zoom in"
+        >
+          +
+        </button>
+        <button
+          onClick={() => zoomBy(0.8)}
+          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card/80 font-mono text-sm text-foreground/80 backdrop-blur hover:bg-card"
+          title="Zoom out"
+        >
+          −
+        </button>
+        <button
+          onClick={resetView}
+          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-card/80 font-mono text-[9px] uppercase text-foreground/80 backdrop-blur hover:bg-card"
+          title="Reset view"
+        >
+          ⟳
+        </button>
+      </div>
 
       {/* legend */}
       <div className="pointer-events-none absolute bottom-3 left-3 flex flex-col gap-1 rounded-md border border-border bg-card/80 p-2.5 backdrop-blur">

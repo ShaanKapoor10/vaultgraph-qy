@@ -20,8 +20,18 @@ before the model downloads), heuristics-only mode is used automatically.
 
 from __future__ import annotations
 
+import logging
+import os
 import re
 from typing import Any
+
+# Quiet the noisy HF / transformers output ("unauthenticated requests to HF Hub",
+# "Loading weights 100%") emitted when the sentence-transformers model loads.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
+for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
 
 from brahmastra import db
 
@@ -47,6 +57,43 @@ def _normalise(text: str) -> str:
 
 def _tokens(text: str) -> set[str]:
     return set(_normalise(text).split())
+
+
+# ---------------------------------------------------------------------------
+# Contrast guard — block merging entities distinguished only by antonym tokens
+# (e.g. "Brahmastra backend" vs "Brahmastra frontend" embed at ~0.94 but are
+#  distinct entities). Without this, embedding similarity over-merges them.
+# ---------------------------------------------------------------------------
+
+_CONTRAST_GROUPS: list[set[str]] = [
+    {"backend", "frontend"},
+    {"client", "server"},
+    {"input", "output"},
+    {"read", "write"},
+    {"source", "target"},
+    {"public", "private"},
+    {"internal", "external"},
+    {"dev", "development", "prod", "production", "staging", "test"},
+    {"request", "response"},
+    {"get", "set", "post", "put", "delete", "patch"},
+    {"open", "close"},
+    {"start", "stop", "end"},
+    {"min", "max"},
+    {"upload", "download"},
+    {"encode", "decode"},
+]
+
+
+def _is_contrasting(a: str, b: str) -> bool:
+    """True if a and b differ only by tokens that are known contrasts/antonyms."""
+    ta, tb = _tokens(a), _tokens(b)
+    only_a, only_b = ta - tb, tb - ta
+    if len(only_a) == 1 and len(only_b) == 1:
+        x, y = next(iter(only_a)), next(iter(only_b))
+        for grp in _CONTRAST_GROUPS:
+            if x in grp and y in grp:
+                return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -261,8 +308,12 @@ def run_resolution() -> dict[str, Any]:
                 uf.union(mentions[i], mentions[j])
                 heuristic_merged.append((mentions[i], mentions[j], sim, method))
 
-    # 3. Embedding pairs
-    embedding_pairs = _embedding_sim(mentions)
+    # 3. Embedding pairs (skip antonym/contrast pairs that embed deceptively high)
+    raw_embedding_pairs = _embedding_sim(mentions)
+    embedding_pairs = {
+        (a, b): sim for (a, b), sim in raw_embedding_pairs.items()
+        if not _is_contrasting(a, b)
+    }
     embedding_used = bool(embedding_pairs)
     for (a, b), sim in embedding_pairs.items():
         uf.union(a, b)

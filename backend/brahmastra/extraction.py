@@ -13,27 +13,66 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any
 
+# Load backend/.env on import so LLM_PROVIDER / keys are set no matter which
+# entrypoint runs extraction (pipeline, CLI, fresh `python -c`, tests).
+# Without this, a bare `python -c "run_pipeline()"` would miss the config and
+# fall through to the flaky auto-detect path.
+_ENV = Path(__file__).resolve().parent.parent / ".env"
+if _ENV.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_ENV)
+    except ImportError:
+        pass
+
 from brahmastra import db
-from brahmastra.ontology import ENTITY_TYPES, RELATION_NAMES, is_valid_triple
+from brahmastra.ontology import ENTITY_TYPES, RELATION_NAMES, RELATIONS, is_valid_triple
 
 # ---------------------------------------------------------------------------
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-SYSTEM_PROMPT = f"""You are an expert knowledge graph extractor.
-Given a note, extract factual (subject, relation, object) triples.
+def _build_relation_guide() -> str:
+    lines = []
+    for r in RELATIONS:
+        lines.append(f"  - {r.name}: {r.description}")
+    return "\n".join(lines)
 
-Rules:
-- Subject and object must be named entities (people, projects, tools, concepts, organisations, events, dates).
-- Relation must be EXACTLY one of: {", ".join(RELATION_NAMES)}
-- Subject and object type must be EXACTLY one of: {", ".join(ENTITY_TYPES)}
-- Only extract triples that are clearly stated in the text — no inference.
-- confidence: 0.0–1.0 (how certain you are this is stated in the text).
-- source_quote: the shortest phrase from the note that supports this triple (verbatim).
 
-Return ONLY a JSON object with this shape (no markdown, no extra text):
+SYSTEM_PROMPT = f"""You are an expert knowledge graph extractor for a personal knowledge base.
+Given a note, extract rich (subject, relation, object) triples that capture every meaningful
+relationship, fact, dependency, and connection in the text.
+
+━━ ENTITY TYPES ━━
+{", ".join(ENTITY_TYPES)}
+
+━━ RELATIONS (pick the MOST SPECIFIC one that fits) ━━
+{_build_relation_guide()}
+
+━━ RULES ━━
+1. Subject and object must be NAMED entities — specific names, not generic words.
+2. Relation must be EXACTLY one word from the list above.
+3. Entity types must be EXACTLY one from the entity types list.
+4. DO NOT default to "uses" or "related_to" — only use them when no specific relation fits.
+   Prefer: has_component, depends_on, implements, provides, integrates_with, created_by, works_on.
+5. Extract what is clearly stated OR strongly implied by the text.
+6. Aim for 8–20 triples per note. Cover all major entities and relationships mentioned.
+7. confidence: 0.0–1.0 based on how directly the text supports this triple.
+8. source_quote: shortest verbatim phrase from the note that supports this triple.
+
+━━ ANTI-PATTERNS TO AVOID ━━
+✗ BAD:  ("Brahmastra", "uses", "Python")           ← too vague, use has_component or depends_on
+✓ GOOD: ("Brahmastra", "has_component", "Python backend")
+✓ GOOD: ("Brahmastra backend", "depends_on", "FastAPI")
+✓ GOOD: ("Brahmastra", "implements", "knowledge graph")
+✓ GOOD: ("pipeline.py", "part_of", "Brahmastra backend")
+✓ GOOD: ("Claude 3.5 Haiku", "provides", "entity extraction")
+✓ GOOD: ("Brahmastra", "created_by", "Shaan Kapoor")
+
+Return ONLY a JSON object (no markdown, no extra text):
 {{
   "triples": [
     {{
@@ -55,43 +94,145 @@ def _build_user_message(title: str, content: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Anthropic call
+# LLM provider selection
 # ---------------------------------------------------------------------------
+#
+# Priority (configurable via LLM_PROVIDER env var: "ollama" | "groq" | "anthropic"):
+#   1. Ollama  — local, free, no rate limits (default if reachable)
+#   2. Groq    — fast cloud, but free tier is rate limited (~12k TPM)
+#   3. Anthropic
+#
+# Ollama config:
+#   OLLAMA_MODEL  (default "qwen2.5:7b-instruct")
+#   OLLAMA_HOST   (default "http://localhost:11434")
+
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
+
+
+def _ollama_available() -> bool:
+    """Return True if a local Ollama server is reachable."""
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{OLLAMA_HOST}/api/tags", timeout=5) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+
 
 def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
-    """Call Anthropic and return a list of raw triple dicts."""
+    """Dispatch to the configured/available LLM provider and return raw triple dicts."""
+    provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
+    groq_key = os.environ.get("GROQ_API_KEY")
+    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+
+    # Explicit provider override
+    if provider == "ollama":
+        return _extract_with_ollama(title, content)
+    if provider == "groq" and groq_key:
+        return _extract_with_groq(title, content, groq_key)
+    if provider == "anthropic" and anthropic_key:
+        return _extract_with_anthropic(title, content, anthropic_key)
+
+    # Auto: prefer local Ollama, then cloud providers
+    if _ollama_available():
+        return _extract_with_ollama(title, content)
+    if groq_key:
+        return _extract_with_groq(title, content, groq_key)
+    if anthropic_key:
+        return _extract_with_anthropic(title, content, anthropic_key)
+
+    raise RuntimeError(
+        "No LLM provider available — start Ollama (ollama serve) or set "
+        "GROQ_API_KEY / ANTHROPIC_API_KEY in backend/.env"
+    )
+
+
+def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:
+    """Call a local Ollama model with native JSON mode for reliable structured output."""
+    import json as _json
+    import urllib.request
+
+    payload = {
+        "model": OLLAMA_MODEL,
+        "format": "json",  # force valid JSON output — no markdown fences, no prose
+        "stream": False,
+        "options": {"temperature": 0.1, "num_ctx": 8192},
+        "messages": [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_message(title, content)},
+        ],
+    }
+    # Retry to survive transient drops (Ollama can close a connection while
+    # loading the model into VRAM or under concurrent load).
+    last_err: Exception | None = None
+    for attempt in range(3):
+        req = urllib.request.Request(
+            f"{OLLAMA_HOST}/api/chat",
+            data=_json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=240) as resp:
+                data = _json.loads(resp.read().decode("utf-8"))
+            return _parse_llm_response(data["message"]["content"])
+        except Exception as e:
+            last_err = e
+            import time
+            time.sleep(2 * (attempt + 1))  # 2s, 4s backoff
+
+    raise RuntimeError(
+        f"Ollama request failed after 3 attempts ({OLLAMA_MODEL} @ {OLLAMA_HOST}): {last_err}"
+    )
+
+
+def _parse_llm_response(raw_text: str) -> list[dict[str, Any]]:
+    raw_text = raw_text.strip()
+    if raw_text.startswith("```"):
+        raw_text = raw_text.split("```")[1]
+        if raw_text.startswith("json"):
+            raw_text = raw_text[4:]
+        raw_text = raw_text.strip()
+    try:
+        data = json.loads(raw_text)
+        return data.get("triples", [])
+    except json.JSONDecodeError as e:
+        raise ValueError(f"LLM returned invalid JSON: {e}\nRaw: {raw_text[:300]}") from e
+
+
+def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str, Any]]:
+    try:
+        from groq import Groq
+    except ImportError as e:
+        raise RuntimeError("groq package not installed — run: uv pip install groq") from e
+
+    client = Groq(api_key=api_key)
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        max_tokens=2048,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": _build_user_message(title, content)},
+        ],
+    )
+    return _parse_llm_response(response.choices[0].message.content)
+
+
+def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict[str, Any]]:
     try:
         import anthropic
     except ImportError as e:
         raise RuntimeError("anthropic package not installed — run: uv pip install anthropic") from e
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise RuntimeError("ANTHROPIC_API_KEY env var not set")
-
     client = anthropic.Anthropic(api_key=api_key)
-
     message = client.messages.create(
         model="claude-3-5-haiku-20241022",
         max_tokens=2048,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_message(title, content)}],
     )
-
-    raw_text = message.content[0].text.strip()
-
-    # Strip any accidental markdown fences
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
-
-    try:
-        data = json.loads(raw_text)
-        return data.get("triples", [])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"LLM returned invalid JSON: {e}\nRaw: {raw_text[:300]}") from e
+    return _parse_llm_response(message.content[0].text)
 
 
 # ---------------------------------------------------------------------------

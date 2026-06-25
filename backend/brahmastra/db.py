@@ -27,9 +27,13 @@ DB_PATH = Path(os.environ.get("BRAHMASTRA_DB", str(_HERE / "data" / "concept_gra
 
 def _connect() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
+    # timeout + busy_timeout: if another process holds a write lock, WAIT up to
+    # 10s for it to clear instead of instantly raising "database is locked".
+    # This makes concurrent writers (backend pipeline + live_sync watcher) safe.
+    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
     return conn
 
@@ -116,6 +120,7 @@ def upsert_note(
                 last_edited = excluded.last_edited,
                 last_synced = excluded.last_synced,
                 extraction_status = CASE
+                    WHEN excluded.extraction_status = 'pending' THEN 'pending'
                     WHEN excluded.last_edited != notes.last_edited THEN 'pending'
                     ELSE notes.extraction_status
                 END

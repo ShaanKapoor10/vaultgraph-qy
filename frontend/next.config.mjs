@@ -9,7 +9,7 @@ const nextConfig = {
   // In local dev (outside Vercel), proxy /api/* to the FastAPI backend.
   // On Vercel, experimentalServices handles the routing automatically.
   async rewrites() {
-    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8000"
+    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8001"
     return [
       {
         source: "/api/:path*",

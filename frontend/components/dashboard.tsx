@@ -60,8 +60,23 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
     setPipelineStatus(null)
     try {
       const res = await fetch("/api/pipeline/run", { method: "POST" })
-      const data = await res.json()
-      if (res.ok) {
+      // Read as text first — on a proxy/backend error the body may be plain
+      // text like "Internal Server Error", which is NOT valid JSON.
+      const raw = await res.text()
+      let data: any = null
+      try {
+        data = raw ? JSON.parse(raw) : null
+      } catch {
+        data = null
+      }
+
+      if (!res.ok) {
+        const msg = data?.detail ?? raw?.slice(0, 140) ?? res.statusText
+        setPipelineStatus(`Error (${res.status}): ${msg || "pipeline failed"}`)
+      } else if (data?.skipped) {
+        // another run (e.g. the live watcher) holds the lock
+        setPipelineStatus(`Busy: ${data.skipped}. Try again in a moment.`)
+      } else if (data) {
         const g = data?.stages?.graph ?? {}
         const e = data?.stages?.extract ?? {}
         const r = data?.stages?.resolve ?? {}
@@ -74,7 +89,7 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
         setLocalNotesAdded(false)
         setTimeout(() => window.location.reload(), 1200)
       } else {
-        setPipelineStatus(`Error: ${data.detail ?? "unknown"}`)
+        setPipelineStatus("Pipeline returned an unexpected response.")
       }
     } catch (e) {
       setPipelineStatus(`Error: ${e instanceof Error ? e.message : String(e)}`)

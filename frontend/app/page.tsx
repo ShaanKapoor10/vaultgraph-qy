@@ -15,7 +15,7 @@ async function loadFromBackend(): Promise<{
   result: PipelineResult | null
 } | null> {
   try {
-    const base = process.env.BACKEND_URL ?? "http://localhost:8000"
+    const base = process.env.BACKEND_URL ?? "http://localhost:8001"
     const [notesRes, triplesRes, graphRes] = await Promise.all([
       fetch(`${base}/notes`, { cache: "no-store" }),
       fetch(`${base}/graph/triples`, { cache: "no-store" }),

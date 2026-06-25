@@ -1,105 +1,173 @@
-version: "1.0"
+version: "2.0"
 name: "Brahmastra Concept Graph Ontology"
-description: "Domain-agnostic semantic relation types for knowledge graphs"
-
-relations:
-  - name: "reports_to"
-    domain: "person"
-    range: "person"
-    description: "Organizational hierarchy — X reports to Y"
-    examples: ["Alice reports to Bob"]
-
-  - name: "owns"
-    domain: "person"
-    range: ["project", "entity"]
-    description: "Ownership or responsibility — X owns Y"
-    examples: ["Sarah owns the search revamp"]
-
-  - name: "depends_on"
-    domain: ["project", "entity"]
-    range: ["project", "entity"]
-    description: "Dependency relationship — X depends on Y"
-    examples: ["Search revamp depends on auth migration"]
-
-  - name: "scheduled_for"
-    domain: ["project", "entity", "event"]
-    range: "date"
-    description: "Temporal planning — X is scheduled for date Y"
-    examples: ["Auth migration scheduled for March 15"]
-
-  - name: "has_status"
-    domain: ["project", "entity", "task"]
-    range: "status"
-    description: "Current state — X has status Y"
-    examples: ["Project is in progress"]
-
-  - name: "related_to"
-    domain: "entity"
-    range: "entity"
-    description: "Generic semantic relation — catch-all for untyped edges"
-    examples: ["Microservices related to scalability"]
-
-  - name: "located_in"
-    domain: ["person", "organization"]
-    range: "location"
-    description: "Geographic/organizational location — X is in Y"
-    examples: ["Team is located in San Francisco"]
-
-  - name: "uses"
-    domain: ["person", "project"]
-    range: ["technology", "tool", "service"]
-    description: "Tool or technology usage — X uses Y"
-    examples: ["We use PostgreSQL for persistence"]
-
-  - name: "created_by"
-    domain: ["document", "project", "entity"]
-    range: "person"
-    description: "Authorship — X was created by Y"
-    examples: ["This architecture was designed by Priya"]
-
-  - name: "mentions"
-    domain: ["document", "text"]
-    range: "entity"
-    description: "Textual reference — X mentions Y"
-    examples: ["The RFC mentions the new consensus protocol"]
-
-  - name: "contradicts"
-    domain: "statement"
-    range: "statement"
-    description: "Logical conflict — X contradicts Y (filled by contradiction detector)"
-    examples: ["Statement A contradicts Statement B"]
+description: "Domain-agnostic semantic relation types for personal knowledge graphs"
 
 entity_types:
   - name: "person"
     description: "Individual human"
   - name: "project"
-    description: "Work initiative or deliverable"
-  - name: "organization"
-    description: "Team, group, or company"
-  - name: "technology"
-    description: "Programming language, framework, tool"
-  - name: "service"
-    description: "API, database, or system service"
-  - name: "location"
-    description: "Geographic place or venue"
-  - name: "date"
-    description: "Calendar date or date range"
-  - name: "status"
-    description: "Project or task state (e.g. 'planned', 'in progress', 'done')"
-  - name: "document"
-    description: "Written artifact (RFC, design doc, note)"
-  - name: "entity"
-    description: "Generic entity when type is unknown"
+    description: "Work initiative, product, or deliverable"
+  - name: "concept"
+    description: "Abstract idea, algorithm, pattern, or methodology"
+  - name: "tool"
+    description: "Programming language, framework, library, or software tool"
+  - name: "organisation"
+    description: "Team, company, or group"
   - name: "event"
     description: "Named occurrence or milestone"
-  - name: "statement"
-    description: "Claim or assertion (for contradiction tracking)"
+  - name: "date"
+    description: "Calendar date or date range"
+  - name: "location"
+    description: "Geographic place, region, or logical environment"
+  - name: "feature"
+    description: "Product capability or functional characteristic"
+  - name: "file"
+    description: "Source file, module, or document"
+  - name: "status"
+    description: "State value (e.g. complete, in progress, blocked)"
+  - name: "unknown"
+    description: "Entity whose type cannot be determined"
+
+relations:
+  - name: "owns"
+    domain: ["person", "organisation"]
+    range: ["project", "concept", "tool", "unknown"]
+    functional: false
+    description: "person or org owns/is responsible for project/tool/concept"
+    examples:
+      - "Shaan owns vaultgraph-qy"
+      - "The platform team owns the auth service"
+
+  - name: "created_by"
+    domain: ["*"]
+    range: ["person", "organisation"]
+    functional: false
+    description: "X was created or authored by a person/org"
+    examples:
+      - "Brahmastra was created by Shaan Kapoor"
+      - "This architecture was designed by the core team"
+
+  - name: "reports_to"
+    domain: ["person"]
+    range: ["person", "organisation"]
+    functional: true
+    description: "person's manager or reporting line"
+    examples:
+      - "Alice reports to Bob"
+
+  - name: "works_on"
+    domain: ["person", "organisation"]
+    range: ["project", "concept", "tool", "feature"]
+    functional: false
+    description: "person or org is actively contributing to X"
+    examples:
+      - "Shaan works on the pipeline refactor"
+
+  - name: "part_of"
+    domain: ["*"]
+    range: ["*"]
+    functional: false
+    description: "X is a sub-component or member of Y"
+    examples:
+      - "extraction.py is part of the Brahmastra backend"
+      - "Louvain algorithm is part of the graph build stage"
+
+  - name: "has_component"
+    domain: ["project", "concept", "tool", "organisation"]
+    range: ["*"]
+    functional: false
+    description: "X contains or is composed of Y (use when X is the whole)"
+    examples:
+      - "Brahmastra has_component FastAPI backend"
+      - "The pipeline has_component entity resolution stage"
+
+  - name: "depends_on"
+    domain: ["*"]
+    range: ["*"]
+    functional: false
+    description: "X requires Y to work; Y is a prerequisite"
+    examples:
+      - "graph build depends_on entity resolution"
+      - "extraction depends_on GROQ_API_KEY"
+
+  - name: "implements"
+    domain: ["project", "person", "tool"]
+    range: ["concept", "tool", "feature", "unknown"]
+    functional: false
+    description: "X implements a concept, standard, algorithm, or pattern"
+    examples:
+      - "entity_resolution.py implements Union-Find"
+      - "Brahmastra implements knowledge graph"
+
+  - name: "uses"
+    domain: ["*"]
+    range: ["*"]
+    functional: false
+    description: "X uses/utilises Y — use ONLY when no more specific relation fits"
+    examples:
+      - "Brahmastra uses NetworkX"
+
+  - name: "provides"
+    domain: ["project", "tool", "person", "organisation"]
+    range: ["feature", "concept", "tool", "unknown"]
+    functional: false
+    description: "X exposes or offers Y as a capability or service"
+    examples:
+      - "Groq provides fast LLM inference"
+      - "Brahmastra provides graph visualization"
+
+  - name: "integrates_with"
+    domain: ["project", "tool"]
+    range: ["project", "tool", "unknown"]
+    functional: false
+    description: "X connects to or interfaces with Y"
+    examples:
+      - "Brahmastra integrates_with Notion"
+      - "Next.js integrates_with FastAPI via rewrites"
+
+  - name: "has_status"
+    domain: ["*"]
+    range: ["status", "concept", "unknown"]
+    functional: true
+    description: "X's current state (e.g. complete, in progress, blocked)"
+    examples:
+      - "auth migration has_status in progress"
+      - "Brahmastra has_status production-ready"
+
+  - name: "scheduled_for"
+    domain: ["project", "event", "unknown"]
+    range: ["date"]
+    functional: true
+    description: "X is planned for date Y"
+    examples:
+      - "release scheduled_for Q3 2025"
+
+  - name: "located_in"
+    domain: ["*"]
+    range: ["location", "organisation", "unknown"]
+    functional: true
+    description: "X is physically or logically located/hosted in Y"
+    examples:
+      - "backend located_in Vercel"
+      - "team located_in San Francisco"
+
+  - name: "blocks"
+    domain: ["project", "event", "concept", "unknown"]
+    range: ["project", "event", "concept", "unknown"]
+    functional: false
+    description: "X prevents Y from progressing"
+    examples:
+      - "auth migration blocks search revamp"
+
+  - name: "related_to"
+    domain: ["*"]
+    range: ["*"]
+    functional: false
+    description: "general topical link — use ONLY when no specific relation fits"
+    examples:
+      - "vector search related_to semantic similarity"
 
 validation:
   confidence_threshold: 0.4
   allow_custom_relations: false
   entity_type_enforcement: "soft"
-  description: |
-    - confidence_threshold: Triples with confidence < 0.4 are filtered out during pipeline.
-    - allow_custom_relations: If true, unlisted relations are accepted as 'related_to'.
-    - entity_type_enforcement: 'soft' = warnings, 'strict' = rejection, 'none' = skip validation.
