@@ -98,6 +98,33 @@ def brahmastra_search_entities(query: str = "", entity_type: str = "", limit: in
 
 
 @mcp.tool()
+def brahmastra_search_notes(query: str, limit: int = 10) -> str:
+    """
+    Search the FULL TEXT of stored notes (title + content), not just the entity graph.
+
+    Use this to recall what was written about a topic — decisions, bug fixes, changes —
+    when entity search comes up empty. Entity search only matches entity names; this
+    matches the actual prose of every note, so it surfaces content even when the LLM
+    extraction produced few triples for it.
+    """
+    db.init_db()
+    notes = db.search_notes(query, limit=limit)
+    if not notes:
+        return f"No notes matching '{query}'."
+    out = []
+    for n in notes:
+        content = n.get("content", "")
+        snippet = content if len(content) <= 400 else content[:400] + "…"
+        out.append({
+            "id": n["id"],
+            "title": n["title"],
+            "status": n.get("extraction_status"),
+            "snippet": snippet,
+        })
+    return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
 def brahmastra_get_entity_details(entity_name: str) -> str:
     """Return full details for a named entity: aliases, PageRank, cluster, and all relations."""
     db.init_db()

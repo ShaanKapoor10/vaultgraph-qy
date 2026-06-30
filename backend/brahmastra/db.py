@@ -143,6 +143,35 @@ def get_notes(status: str | None = None) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def search_notes(query: str, limit: int = 10) -> list[dict[str, Any]]:
+    """Term-based search over note title + content (case-insensitive).
+
+    Splits the query into words and ranks notes by how many terms appear in the
+    title+content. Prefers notes containing ALL terms; falls back to ANY. This
+    complements entity-graph search: it finds notes by what they actually SAY,
+    even when the LLM extraction produced few/weak triples for them.
+    """
+    terms = [t for t in query.lower().split() if t]
+    if not terms:
+        return []
+    with _connect() as conn:
+        rows = conn.execute("SELECT * FROM notes ORDER BY last_edited DESC").fetchall()
+
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for r in rows:
+        d = dict(r)
+        hay = f"{d.get('title','')} {d.get('content','')}".lower()
+        matched = sum(1 for t in terms if t in hay)
+        if matched:
+            scored.append((matched, d))
+
+    # Prefer notes that contain ALL terms; otherwise rank by # of terms matched.
+    all_terms = [s for s in scored if s[0] == len(terms)]
+    pool = all_terms if all_terms else scored
+    pool.sort(key=lambda x: x[0], reverse=True)
+    return [d for _, d in pool[:limit]]
+
+
 def get_note(id: str) -> dict[str, Any] | None:
     with _connect() as conn:
         row = conn.execute("SELECT * FROM notes WHERE id = ?", (id,)).fetchone()
