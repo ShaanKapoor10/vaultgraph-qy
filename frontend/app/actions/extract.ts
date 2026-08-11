@@ -37,12 +37,28 @@ export async function extractTriples(noteId: string, content: string): Promise<E
 
     // 2. Run the incremental pipeline: extract → resolve → build-graph.
     //    The backend uses GROQ_API_KEY or ANTHROPIC_API_KEY from its .env.
+    //    /pipeline/run kicks the run off in the background and returns
+    //    immediately (a run can take minutes, longer than a request should
+    //    stay open), so poll /pipeline/status until it finishes.
     const pipelineRes = await fetch(`${backendUrl}/pipeline/run`, {
       method: "POST",
     })
     if (!pipelineRes.ok) {
       const text = await pipelineRes.text().catch(() => "")
       throw new Error(`Pipeline /pipeline/run returned ${pipelineRes.status}: ${text}`)
+    }
+
+    const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000
+    const deadline = Date.now() + PIPELINE_TIMEOUT_MS
+    for (;;) {
+      const statusRes = await fetch(`${backendUrl}/pipeline/status`, { cache: "no-store" })
+      if (statusRes.ok) {
+        const status = await statusRes.json()
+        if (status.state === "done" || status.state === "skipped") break
+        if (status.state === "error") throw new Error(`Pipeline failed: ${status.error}`)
+      }
+      if (Date.now() > deadline) throw new Error("Pipeline timed out waiting for /pipeline/status")
+      await new Promise((r) => setTimeout(r, 1000))
     }
 
     // 3. Fetch all triples and return those belonging to this note.

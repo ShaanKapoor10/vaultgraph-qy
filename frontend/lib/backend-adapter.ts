@@ -77,6 +77,7 @@ export interface BackendConceptCluster {
   id: number
   members: string[]
   size: number
+  summary?: string
 }
 
 export interface BackendEntityCluster {
@@ -162,6 +163,7 @@ export function adaptBackendGraph(
   const clusters: ConceptCluster[] = stats.concept_clusters.map((c) => ({
     id: c.id,
     members: c.members,
+    summary: c.summary ?? "",
   }))
 
   // -- Contradictions -------------------------------------------------------

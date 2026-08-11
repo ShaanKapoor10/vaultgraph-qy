@@ -67,6 +67,8 @@ export interface CentralEntity {
 export interface ConceptCluster {
   id: number
   members: string[]
+  /** One-line LLM-generated theme for the cluster. Empty if not yet summarised. */
+  summary?: string
 }
 
 export interface Contradiction {

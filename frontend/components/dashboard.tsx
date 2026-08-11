@@ -12,12 +12,14 @@ import { Contradictions } from "@/components/panels/contradictions"
 import { PredictedLinks } from "@/components/panels/predicted-links"
 import { EntityResolution } from "@/components/panels/entity-resolution"
 import { NotesPanel } from "@/components/panels/notes-panel"
-import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText, Play, Loader2 } from "lucide-react"
+import { AskPanel } from "@/components/panels/ask-panel"
+import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText, Play, Loader2, MessageCircleQuestion } from "lucide-react"
 
-type View = "graph" | "central" | "clusters" | "contradictions" | "links" | "resolution" | "notes"
+type View = "graph" | "ask" | "central" | "clusters" | "contradictions" | "links" | "resolution" | "notes"
 
 const TABS: { id: View; label: string; icon: React.ElementType }[] = [
   { id: "graph", label: "Graph", icon: Network },
+  { id: "ask", label: "Ask", icon: MessageCircleQuestion },
   { id: "central", label: "Central", icon: TrendingUp },
   { id: "clusters", label: "Clusters", icon: Boxes },
   { id: "contradictions", label: "Contradictions", icon: TriangleAlert },
@@ -57,39 +59,61 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
   const runPipelineNow = async () => {
     if (!backendAvailable) return
     setPipelineRunning(true)
-    setPipelineStatus(null)
+    setPipelineStatus("Starting…")
     try {
-      const res = await fetch("/api/pipeline/run", { method: "POST" })
-      // Read as text first — on a proxy/backend error the body may be plain
-      // text like "Internal Server Error", which is NOT valid JSON.
-      const raw = await res.text()
-      let data: any = null
+      // Kick off the run — the backend runs it in the background and returns
+      // immediately, since a full run (Ollama extraction + embeddings + graph
+      // build) can take minutes, longer than the dev proxy holds a request open.
+      const startRes = await fetch("/api/pipeline/run", { method: "POST" })
+      const startRaw = await startRes.text()
+      let startData: any = null
       try {
-        data = raw ? JSON.parse(raw) : null
+        startData = startRaw ? JSON.parse(startRaw) : null
       } catch {
-        data = null
+        startData = null
+      }
+      if (!startRes.ok) {
+        const msg = startData?.detail ?? startRaw?.slice(0, 140) ?? startRes.statusText
+        setPipelineStatus(`Error (${startRes.status}): ${msg || "pipeline failed to start"}`)
+        return
       }
 
-      if (!res.ok) {
-        const msg = data?.detail ?? raw?.slice(0, 140) ?? res.statusText
-        setPipelineStatus(`Error (${res.status}): ${msg || "pipeline failed"}`)
-      } else if (data?.skipped) {
-        // another run (e.g. the live watcher) holds the lock
-        setPipelineStatus(`Busy: ${data.skipped}. Try again in a moment.`)
-      } else if (data) {
-        const g = data?.stages?.graph ?? {}
-        const e = data?.stages?.extract ?? {}
-        const r = data?.stages?.resolve ?? {}
-        setPipelineStatus(
-          `Pipeline complete — extracted ${e.triples_added ?? 0} triples, ` +
-          `${r.clusters ?? 0} entity clusters, ` +
-          `${g.nodes ?? 0} nodes / ${g.edges ?? 0} edges, ` +
-          `${g.contradictions ?? 0} contradictions. Reloading…`
-        )
-        setLocalNotesAdded(false)
-        setTimeout(() => window.location.reload(), 1200)
-      } else {
-        setPipelineStatus("Pipeline returned an unexpected response.")
+      setPipelineStatus("Pipeline running…")
+
+      // Poll for completion.
+      for (;;) {
+        await new Promise((r) => setTimeout(r, 2000))
+        const res = await fetch("/api/pipeline/status")
+        if (!res.ok) continue
+        const status = await res.json()
+
+        if (status.state === "running" || status.state === "started") continue
+
+        if (status.state === "error") {
+          setPipelineStatus(`Error: ${status.error ?? "pipeline failed"}`)
+          break
+        }
+        if (status.state === "skipped") {
+          setPipelineStatus(`Busy: ${status.result?.skipped ?? "another run in progress"}. Try again in a moment.`)
+          break
+        }
+        if (status.state === "done") {
+          const data = status.result
+          const g = data?.stages?.graph ?? {}
+          const e = data?.stages?.extract ?? {}
+          const r = data?.stages?.resolve ?? {}
+          setPipelineStatus(
+            `Pipeline complete — extracted ${e.triples_added ?? 0} triples, ` +
+            `${r.clusters ?? 0} entity clusters, ` +
+            `${g.nodes ?? 0} nodes / ${g.edges ?? 0} edges, ` +
+            `${g.contradictions ?? 0} contradictions. Reloading…`
+          )
+          setLocalNotesAdded(false)
+          setTimeout(() => window.location.reload(), 1200)
+          break
+        }
+        // Unknown/idle state — stop polling rather than looping forever.
+        break
       }
     } catch (e) {
       setPipelineStatus(`Error: ${e instanceof Error ? e.message : String(e)}`)
@@ -228,6 +252,7 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
           ) : (
             <div className="h-full overflow-y-auto px-4 py-5 sm:px-6">
               <div className="mx-auto max-w-3xl">
+                {view === "ask" && <AskPanel backendAvailable={backendAvailable} />}
                 {view === "central" && (
                   <CentralEntities central={result.central} onSelect={select} selected={selected} />
                 )}

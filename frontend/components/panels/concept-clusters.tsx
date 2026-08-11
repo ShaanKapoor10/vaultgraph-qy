@@ -25,6 +25,9 @@ export function ConceptClusters({ clusters, onSelect }: Props) {
                   Cluster {c.id + 1} · {c.members.length}
                 </span>
               </div>
+              {c.summary && (
+                <p className="mb-2 text-sm leading-snug text-foreground/90">{c.summary}</p>
+              )}
               <div className="flex flex-wrap gap-1.5">
                 {c.members.map((m) => (
                   <button

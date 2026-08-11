@@ -128,6 +128,17 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
     }
 
     # ---------------------------------------------------------------
+    # Stage: cluster summaries (label each Louvain cluster via local LLM).
+    # Runs after build-graph and re-caches the graph with summaries merged in.
+    # Fails soft — if Ollama is down, clusters just keep empty summaries.
+    # ---------------------------------------------------------------
+    try:
+        from brahmastra.cluster_summary import run_cluster_summaries
+        result["stages"]["cluster_summaries"] = run_cluster_summaries()
+    except Exception as exc:
+        result["stages"]["cluster_summaries"] = {"error": str(exc)}
+
+    # ---------------------------------------------------------------
     # Stage: Notion write-back (push insights BACK into Notion pages).
     # Only runs when Notion is connected. This closes the bidirectional
     # loop: Notion → graph → insights written back into Notion.

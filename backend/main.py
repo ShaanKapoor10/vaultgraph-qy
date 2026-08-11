@@ -25,7 +25,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from brahmastra.db import init_db
-from brahmastra.routers import notes, pipeline, graph
+from brahmastra.routers import notes, pipeline, graph, ask
 
 
 @asynccontextmanager
@@ -53,6 +53,7 @@ app.add_middleware(
 app.include_router(notes.router)
 app.include_router(pipeline.router)
 app.include_router(graph.router)
+app.include_router(ask.router)
 
 
 @app.get("/health")
