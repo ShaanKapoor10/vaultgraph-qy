@@ -24,7 +24,7 @@ A production-ready **hybrid Python + Next.js knowledge graph system** that extra
 | 9 | pytest suite | ✅ | 42 tests passing in 0.42s (DB, ontology, extraction, resolution, concept graph) |
 | 10 | Frontend integration | ✅ | Backend adapter, precomputed graph caching, "backend live" badge, fallback to seed data |
 | 11 | Extract persistence | ✅ | Frontend extract action POSTs notes+triples to backend, graceful fallback |
-| 12 | Tests + ontology | ✅ | test_pipeline.py (incremental mode), ontology.yaml (10 relations, 12 entity types) |
+| 12 | Tests + ontology | ✅ | test_pipeline.py (incremental mode), ontology.yaml (16 relations, 12 entity types) |
 
 ## Core Features
 
@@ -104,7 +104,7 @@ brahmastra/
 ├── backend/
 │   ├── brahmastra/
 │   │   ├── db.py                     # SQLite CRUD (5 tables, 20 helpers)
-│   │   ├── ontology.py               # 10 relations, 12 entity types, validation
+│   │   ├── ontology.py               # 16 relations, 12 entity types, validation
 │   │   ├── extraction.py             # Claude 3.5 Haiku agent (187 lines)
 │   │   ├── entity_resolution.py      # Union-Find + sentence-transformers (297 lines)
 │   │   ├── concept_graph.py          # networkx algorithms (332 lines)
@@ -164,7 +164,7 @@ brahmastra/
 │   ├── DETAILED_ARCHITECTURE.md      # How the pipeline works
 │   └── ...                           # Integration + agent guides
 │
-├── ontology.yaml                     # Domain spec (10 relations, 12 types, validation)
+├── ontology.yaml                     # Domain spec (16 relations, 12 types, validation)
 ├── vercel.json                       # experimentalServices config
 ├── README.md                         # This file
 └── .gitignore
@@ -386,7 +386,7 @@ cd frontend && pnpm exec tsc --noEmit  # Type-check
 - Full test coverage (42 tests, 0.42s)
 - Interactive dashboard with d3 force graph
 - Graceful fallback to seed data
-- Ontology spec (10 relations, 12 types, validation rules)
+- Ontology spec (16 relations, 12 types, validation rules)
 
 ### 🔜 Natural next steps
 

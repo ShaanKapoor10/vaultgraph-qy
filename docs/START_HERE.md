@@ -209,7 +209,7 @@ START_HERE.md ........................... This file (entry point)
 │      ├─ page.tsx .................. Entry point
 │      └─ actions/extract.ts ........ Claude integration
 │
-├─ ontology.yaml ...................... 10 relations, 12 entity types
+├─ ontology.yaml ...................... 16 relations, 12 entity types
 └─ vercel.json ........................ Deployment config
 ```
 
