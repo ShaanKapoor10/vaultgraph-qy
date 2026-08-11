@@ -290,8 +290,8 @@ brahmastra mcp
 
 # Terminal 2: Start Brahmastra REST server (for testing)
 cd backend
-python -m brahmastra.main
-# Server on http://localhost:8000
+uvicorn main:app --reload --port 8001
+# Server on http://localhost:8001
 
 # Terminal 3: Start frontend dev server
 cd frontend

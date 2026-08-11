@@ -250,7 +250,7 @@ const predictions = await brahmastra.get_predicted_links();
 **Setup:**
 ```bash
 # Terminal 1: Start Brahmastra backend
-cd backend && uvicorn brahmastra.main:app --reload
+cd backend && uvicorn main:app --reload --port 8001
 
 # Terminal 2: Register MCP server in Claude Code
 # ~/.config/claude/claude.json:
@@ -406,7 +406,7 @@ fs.writeFileSync(path.join(vaultPath, sarahFile), updated);
 import { BrahmastraClient } from "@brahmastra/sdk";
 
 const client = new BrahmastraClient({
-  url: "http://localhost:8000",
+  url: "http://localhost:8001",
   apiKey: process.env.BRAHMASTRA_API_KEY
 });
 

@@ -16,7 +16,7 @@ Includes:
 - CLI commands (instant results)
 
 ### 📚 **"I want to UNDERSTAND what it does"** (30 minutes)
-👉 **Read:** [`README.md`](README.md) then [`QUICK_START.md`](QUICK_START.md)
+👉 **Read:** [`README.md`](../README.md) then [`QUICK_START.md`](QUICK_START.md)
 
 Includes:
 - Feature overview
@@ -225,7 +225,7 @@ cd frontend && pnpm install && cd ..
 cd backend && python3 -m venv .venv && source .venv/bin/activate && uv pip install -e .
 
 # Run locally
-vercel dev  # or: pnpm dev + uvicorn brahmastra.main:app --reload
+vercel dev  # or: pnpm dev + uvicorn main:app --reload --port 8001
 
 # View at http://localhost:3000
 

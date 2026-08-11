@@ -236,7 +236,7 @@ CREATE TABLE cached_graph (
 cd backend
 python3 -m venv .venv && source .venv/bin/activate
 uv pip install -e .
-uvicorn brahmastra.main:app --reload --port 8001
+uvicorn main:app --reload --port 8001
 ```
 
 **2. In another terminal, start Next.js frontend:**
@@ -308,7 +308,7 @@ python -m brahmastra.mcp_server > /tmp/brahmastra_mcp.json
 - `NOTION_TOKEN` — Notion auth token
 - `NOTION_DATABASE_ID` — Which Notion DB to sync
 - `BRAHMASTRA_DB` — SQLite path (default: `backend/data/concept_graph.db`)
-- `BACKEND_URL` — For frontend API calls (default: auto-routed on Vercel, `http://localhost:8000` in dev)
+- `BACKEND_URL` — For frontend API calls (default: auto-routed on Vercel, `http://localhost:8001` in dev)
 
 ### Ontology (10 Relations)
 

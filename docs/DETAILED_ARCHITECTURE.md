@@ -1705,7 +1705,7 @@ uv pip install -e .
 # Terminal 1: Backend
 cd backend
 source .venv/bin/activate
-uvicorn brahmastra.main:app --reload --port 8001
+uvicorn main:app --reload --port 8001
 
 # Terminal 2: Frontend
 cd frontend
@@ -1931,7 +1931,7 @@ NOTION_DATABASE_ID=xxxxxxx
 
 # Backend configuration
 BRAHMASTRA_DB=/path/to/concept_graph.db  # SQLite path
-BACKEND_URL=http://localhost:8000        # For frontend API calls (auto on Vercel)
+BACKEND_URL=http://localhost:8001        # For frontend API calls (auto on Vercel)
 
 # Debug
 DEBUG=true  # More verbose output

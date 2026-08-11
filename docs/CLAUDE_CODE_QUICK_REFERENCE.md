@@ -172,9 +172,9 @@ Claude Code:
 
 ## 📈 Important URLs
 
-- **Backend API:** http://localhost:8000
+- **Backend API:** http://localhost:8001
 - **Frontend UI:** http://localhost:3000
-- **API Docs:** http://localhost:8000/docs
+- **API Docs:** http://localhost:8001/docs
 
 ---
 

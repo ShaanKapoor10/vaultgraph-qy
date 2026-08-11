@@ -46,7 +46,7 @@ uv pip install -e .
 ```bash
 cd backend
 source .venv/bin/activate
-uvicorn brahmastra.main:app --reload --port 8001
+uvicorn main:app --reload --port 8001
 ```
 
 ### Start Frontend (new terminal)
@@ -400,7 +400,7 @@ See LICENSE file (MIT or similar).
 ## TL;DR
 
 1. **Install:** `pnpm install` (frontend), `uv pip install -e .` (backend)
-2. **Run:** `vercel dev` or `pnpm dev` + `uvicorn brahmastra.main:app --reload`
+2. **Run:** `vercel dev` or `pnpm dev` + `uvicorn main:app --reload --port 8001`
 3. **Use:** Open `http://localhost:3000`, add notes, see graph
 4. **Deploy:** `git push`, Vercel auto-deploys both services
 5. **Extend:** Add custom relations to `ontology.yaml`, add stages to `pipeline.py`

@@ -496,7 +496,7 @@ class KnowledgeMainteiningAgent {
   
   constructor() {
     this.brahmastra = new BrahmastraClient({
-      url: "http://localhost:8000",
+      url: "http://localhost:8001",
       apiKey: process.env.BRAHMASTRA_API_KEY
     });
   }

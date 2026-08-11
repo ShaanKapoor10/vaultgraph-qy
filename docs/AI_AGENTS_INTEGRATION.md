@@ -109,9 +109,9 @@ Claude can now call:
 **Setup (automatic):**
 ```bash
 cd backend
-uvicorn brahmastra.main:app --reload
-# Server runs on http://localhost:8000
-# Docs at http://localhost:8000/docs (FastAPI Swagger UI)
+uvicorn main:app --reload --port 8001
+# Server runs on http://localhost:8001
+# Docs at http://localhost:8001/docs (FastAPI Swagger UI)
 ```
 
 **Endpoints:**
@@ -123,7 +123,7 @@ from langchain.agents import initialize_agent, Tool
 from langchain.llms import OpenAI
 import requests
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8001"
 
 # Define tools
 def query_graph(entity_name: str):
@@ -294,7 +294,7 @@ import requests
 
 # Define Brahmastra tools for LangChain
 class BrahmastraTools:
-    BASE_URL = "http://localhost:8000"
+    BASE_URL = "http://localhost:8001"
     
     @staticmethod
     def search_entity(query: str) -> str:
@@ -456,7 +456,7 @@ for query in queries:
 ```bash
 cd backend
 source .venv/bin/activate
-uvicorn brahmastra.main:app --reload --port 8000
+uvicorn main:app --reload --port 8001
 ```
 
 ### 2. Create Python Agent File
@@ -467,7 +467,7 @@ from langchain.agents import initialize_agent, AgentType, tool
 from langchain.llms import OpenAI
 import requests
 
-BASE_URL = "http://localhost:8000/api"
+BASE_URL = "http://localhost:8001"
 
 @tool
 def search_knowledge(query: str) -> str:
@@ -541,7 +541,7 @@ const tools = {
   search_entity: {
     description: "Search Brahmastra entities",
     parameters: { /* ... */ },
-    execute: async (params) => fetch("http://localhost:8000/api/entities/search", ...)
+    execute: async (params) => fetch("http://localhost:8001/entities/search", ...)
   }
 };
 ```

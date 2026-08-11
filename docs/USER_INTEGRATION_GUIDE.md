@@ -63,18 +63,18 @@ Done! ✅
 ```
 Step 1: Start Brahmastra
   $ cd backend
-  $ python -m brahmastra.main
-  → Server runs on http://localhost:8000
+  $ uvicorn main:app --reload --port 8001
+  → Server runs on http://localhost:8001
   
 Step 2: Get your LLM to connect
   (depends on your LLM, but usually just one setting)
   
   Example for ChatGPT:
     Add custom action:
-    URL: http://localhost:8000/api
+    URL: http://localhost:8001
     
   Example for LangChain:
-    loader = BrahmastraLoader(url="http://localhost:8000")
+    loader = BrahmastraLoader(url="http://localhost:8001")
     
 Step 3: Use it
   Your LLM can now:
@@ -150,9 +150,9 @@ Done! ✅
 **Steps:**
 
 ```
-1. Start Brahmastra REST API (command: python -m brahmastra.main)
+1. Start Brahmastra REST API (from backend/: uvicorn main:app --reload --port 8001)
 2. In ChatGPT settings → Add custom action
-3. Point to http://localhost:8000/api
+3. Point to http://localhost:8001
 4. Done! ChatGPT can use Brahmastra
 ```
 
@@ -202,7 +202,7 @@ Done! ✅
 2. Add to your agent:
    from langchain_brahmastra import BrahmastraMemory
    
-   memory = BrahmastraMemory(url="http://localhost:8000")
+   memory = BrahmastraMemory(url="http://localhost:8001")
    agent = Agent(..., memory=memory)
    
 3. Done! LangChain agent now uses Brahmastra
@@ -226,7 +226,7 @@ Done! ✅
    brahmastra serve
    
 2. In your agent config, add:
-   knowledge_base_url: "http://localhost:8000"
+   knowledge_base_url: "http://localhost:8001"
    
 3. Agent can now call:
    POST /add-note
@@ -348,9 +348,9 @@ After:
 
 **Option 2: Use ChatGPT with Custom Action**
 ```
-1. Start: python -m brahmastra.main
+1. Start (from backend/): uvicorn main:app --reload --port 8001
 2. In ChatGPT: Settings → Custom Action → Add URL
-3. URL: http://localhost:8000/api
+3. URL: http://localhost:8001
 4. Use ChatGPT normally
 5. It automatically stores your context
 ```
@@ -500,7 +500,7 @@ Result: Permanent research knowledge base with AI assistance
 User says: "I want ChatGPT to remember my product roadmap"
 
 Setup (10 minutes):
-  1. Start: python -m brahmastra.main
+  1. Start (from backend/): uvicorn main:app --reload --port 8001
   2. Add Custom Action in ChatGPT
   
 Usage:
