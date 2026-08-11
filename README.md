@@ -157,6 +157,13 @@ brahmastra/
 │   │   └── viz.ts                    # d3 helpers + colors
 │   └── next.config.mjs               # API rewrites to backend
 │
+├── docs/                             # All guides — start at docs/START_HERE.md
+│   ├── START_HERE.md                 # Entry point: pick a path by goal
+│   ├── DOCUMENTATION_INDEX.md        # Full index of every doc
+│   ├── QUICK_START.md                # Get it running
+│   ├── DETAILED_ARCHITECTURE.md      # How the pipeline works
+│   └── ...                           # Integration + agent guides
+│
 ├── ontology.yaml                     # Domain spec (10 relations, 12 types, validation)
 ├── vercel.json                       # experimentalServices config
 ├── README.md                         # This file
