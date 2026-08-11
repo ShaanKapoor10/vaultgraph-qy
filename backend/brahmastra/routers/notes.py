@@ -54,6 +54,6 @@ async def delete_note(note_id: str) -> None:
     note = db.get_note(note_id)
     if not note:
         raise HTTPException(status_code=404, detail="Note not found")
-    db.delete_triples_for_note(note_id)
-    with db._connect() as conn:
-        conn.execute("DELETE FROM notes WHERE id = ?", (note_id,))
+    # Goes through the store API rather than raw SQL, so this works on any
+    # backend. delete_note removes the note and its derived triples together.
+    db.delete_note(note_id)
