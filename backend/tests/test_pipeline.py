@@ -18,6 +18,16 @@ def test_pipeline_incremental_mode(monkeypatch):
         db_path = os.path.join(tmpdir, "test.db")
         monkeypatch.setenv("BRAHMASTRA_DB", db_path)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        # Never let a test reach the real Notion workspace: the pipeline's
+        # write-back stage fires on NOTION_TOKEN alone, and backend/.env sets it.
+        monkeypatch.delenv("NOTION_TOKEN", raising=False)
+        monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
+        # ...and no real LLM calls. The cluster-summaries stage is not covered
+        # by the _extract_with_llm patch below, so without this it billed Groq
+        # (or spent minutes on local Ollama) on every run.
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
 
         # Initialize DB
         db.init_db()
@@ -46,6 +56,9 @@ def test_pipeline_with_notion_sync_skip(monkeypatch):
         monkeypatch.delenv("NOTION_TOKEN", raising=False)
         monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        # No real LLM calls from the cluster-summaries stage (see test above).
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
 
         # Initialize DB
         db.init_db()

@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -22,20 +24,46 @@ from typing import Any
 # ---------------------------------------------------------------------------
 
 _HERE = Path(__file__).resolve().parent.parent  # backend/
-DB_PATH = Path(os.environ.get("BRAHMASTRA_DB", str(_HERE / "data" / "concept_graph.db")))
+_DEFAULT_DB = _HERE / "data" / "concept_graph.db"
 
 
-def _connect() -> sqlite3.Connection:
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+def db_path() -> Path:
+    """
+    Resolve the DB location at CALL time, not import time.
+
+    Import-time resolution silently ignored any BRAHMASTRA_DB set after the
+    first `import brahmastra.db` — which meant tests that monkeypatch the env
+    var ran against the real production database (and, via the pipeline's
+    write-back stage, the real Notion pages).
+    """
+    return Path(os.environ.get("BRAHMASTRA_DB", str(_DEFAULT_DB)))
+
+
+@contextmanager
+def _connect() -> Iterator[sqlite3.Connection]:
+    """
+    Yield a connection, commit/rollback on exit, then CLOSE it.
+
+    `with sqlite3.connect(...) as conn` only manages the transaction — it never
+    closes the handle. Returning a bare connection therefore leaked one per
+    call, which on Windows keeps the file locked (tests could not delete their
+    own temp DB) and holds WAL sidecars open longer than needed.
+    """
+    path = db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
     # timeout + busy_timeout: if another process holds a write lock, WAIT up to
     # 10s for it to clear instead of instantly raising "database is locked".
     # This makes concurrent writers (backend pipeline + live_sync watcher) safe.
-    conn = sqlite3.connect(str(DB_PATH), timeout=10.0)
+    conn = sqlite3.connect(str(path), timeout=10.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=10000")
     conn.execute("PRAGMA foreign_keys=ON")
-    return conn
+    try:
+        with conn:  # preserve the commit-on-success / rollback-on-error semantics
+            yield conn
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

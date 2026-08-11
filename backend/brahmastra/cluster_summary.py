@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from brahmastra import db
-from brahmastra.llm import ollama_available, ollama_chat
+from brahmastra.llm import chat, llm_available
 
 # Skip clusters smaller than this — a 1-entity "cluster" has no theme worth a
 # round-trip to the LLM.
@@ -54,7 +54,7 @@ def _build_user_message(members: list[str], internal_edges: list[dict[str, Any]]
 
 
 def _summarise_one(members: list[str], internal_edges: list[dict[str, Any]]) -> str:
-    raw = ollama_chat(
+    raw = chat(
         SYSTEM_PROMPT,
         _build_user_message(members, internal_edges),
         temperature=0.2,
@@ -74,7 +74,7 @@ def summarise_clusters(
     Clusters that error out individually are skipped (left without a summary)
     rather than failing the whole batch.
     """
-    if not ollama_available():
+    if not llm_available():
         return {}
 
     # Index edges by endpoint membership once.

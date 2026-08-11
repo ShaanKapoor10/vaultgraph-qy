@@ -121,31 +121,25 @@ def _ollama_available() -> bool:
 
 
 def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
-    """Dispatch to the configured/available LLM provider and return raw triple dicts."""
-    provider = os.environ.get("LLM_PROVIDER", "").lower().strip()
-    groq_key = os.environ.get("GROQ_API_KEY")
-    anthropic_key = os.environ.get("ANTHROPIC_API_KEY")
+    """
+    Dispatch to the configured/available LLM provider and return raw triple dicts.
 
-    # Explicit provider override
+    Provider *selection* lives in llm.py so extraction, GraphRAG and cluster
+    summaries can never disagree about which provider is live. The per-provider
+    calls stay here because this module's JSON-mode prompt is tuned.
+    """
+    from brahmastra.llm import resolve_provider  # local import: avoids a cycle
+
+    provider = resolve_provider()  # raises LLMUnavailable with guidance
+
     if provider == "ollama":
         return _extract_with_ollama(title, content)
-    if provider == "groq" and groq_key:
-        return _extract_with_groq(title, content, groq_key)
-    if provider == "anthropic" and anthropic_key:
-        return _extract_with_anthropic(title, content, anthropic_key)
+    if provider == "groq":
+        return _extract_with_groq(title, content, os.environ["GROQ_API_KEY"])
+    if provider == "anthropic":
+        return _extract_with_anthropic(title, content, os.environ["ANTHROPIC_API_KEY"])
 
-    # Auto: prefer local Ollama, then cloud providers
-    if _ollama_available():
-        return _extract_with_ollama(title, content)
-    if groq_key:
-        return _extract_with_groq(title, content, groq_key)
-    if anthropic_key:
-        return _extract_with_anthropic(title, content, anthropic_key)
-
-    raise RuntimeError(
-        "No LLM provider available — start Ollama (ollama serve) or set "
-        "GROQ_API_KEY / ANTHROPIC_API_KEY in backend/.env"
-    )
+    raise RuntimeError(f"Unknown LLM provider: {provider!r}")
 
 
 def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:

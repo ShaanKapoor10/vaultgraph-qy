@@ -23,7 +23,7 @@ import re
 from typing import Any
 
 from brahmastra import db
-from brahmastra.llm import ollama_available, ollama_chat
+from brahmastra.llm import chat, llm_available
 
 # ---------------------------------------------------------------------------
 # Tunables
@@ -235,7 +235,7 @@ def local_search(question: str, cached: dict[str, Any]) -> dict[str, Any]:
         f"Question: {question}\n\n"
         f"Facts from the knowledge graph:\n" + "\n".join(fact_lines)
     )
-    answer = ollama_chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
+    answer = chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
 
     # Prefer the notes the answer actually cited; fall back to all subgraph
     # notes only if the model emitted no [n:...] tags.
@@ -268,7 +268,7 @@ def global_search(question: str, cached: dict[str, Any]) -> dict[str, Any]:
         f"Question: {question}\n\n"
         f"Cluster summaries of the knowledge graph:\n" + "\n".join(summary_lines)
     )
-    answer = ollama_chat(_GLOBAL_SYSTEM, user, temperature=0.3).strip()
+    answer = chat(_GLOBAL_SYSTEM, user, temperature=0.3).strip()
 
     return {
         "mode": "global",
@@ -289,10 +289,13 @@ def answer_question(question: str, mode: str = "auto") -> dict[str, Any]:
     if not question:
         return {"mode": "none", "answer": "Please ask a question.", "entities": [], "citations": []}
 
-    if not ollama_available():
+    if not llm_available():
         return {
             "mode": "none",
-            "answer": "The local LLM (Ollama) is not reachable, so I can't answer right now.",
+            "answer": (
+                "No LLM provider is reachable, so I can't answer right now. "
+                "Set GROQ_API_KEY in backend/.env or start Ollama locally."
+            ),
             "entities": [],
             "citations": [],
         }
