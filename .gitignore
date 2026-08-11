@@ -28,19 +28,20 @@ backend/.env
 *.tsbuildinfo
 frontend/next-env.d.ts
 
-# Python venv
-backend/.venv/
+# Python venv / build artefacts
 .venv/
+__pycache__/
 *.py[cod]
 *.pyo
-.venv/
-backend/.venv/
 *.egg-info/
 dist/
 
 # SQLite database (local data, never commit)
-backend/data/concept_graph.db
-backend/data/*.db
+# -shm/-wal are the WAL sidecars; they churn on every pipeline run
+*.db
+*.db-shm
+*.db-wal
 
-# sentence-transformers model cache
-backend/.cache/
+# sentence-transformers model cache (~87MB) — matched at any depth,
+# the cache actually lands in backend/backend/.cache/
+.cache/
