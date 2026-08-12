@@ -49,3 +49,7 @@ dist/
 # Pipeline run lock (runtime only)
 *.pipeline.lock
 .pipeline.lock
+
+# Queued session checkpoints — raw conversation transcripts awaiting
+# distillation. Runtime state, and the most sensitive thing on disk after .env.
+backend/data/checkpoints/

@@ -210,6 +210,59 @@ def _process_page(
 
 
 # ---------------------------------------------------------------------------
+# Reading database rows across two generations of the Notion API
+# ---------------------------------------------------------------------------
+
+def _paginate(fetch: Any) -> Any:
+    """Yield every result from a cursor-paginated Notion endpoint."""
+    cursor = None
+    while True:
+        kwargs: dict[str, Any] = {"page_size": 100}
+        if cursor:
+            kwargs["start_cursor"] = cursor
+        resp = fetch(**kwargs)
+        yield from resp.get("results", [])
+        if not resp.get("has_more"):
+            break
+        cursor = resp.get("next_cursor")
+
+
+def _iter_database_rows(client: Any, database_id: str) -> Any:
+    """
+    Yield every row of a Notion database, whichever SDK generation is installed.
+
+    The 2025-09-03 Notion API split a database into one or more *data sources*
+    and moved querying onto them, so notion-client 3.x dropped
+    `databases.query` entirely. Calling it there fails with
+    "'DatabasesEndpoint' object has no attribute 'query'" — which silently
+    reduced the bidirectional Notion loop to write-only.
+
+    Both versions are in play on this machine (2.2.1 globally, 3.1.0 in the
+    backend venv), so branch on the capability rather than on a version number.
+    """
+    try:
+        if hasattr(client.databases, "query"):
+            # notion-client < 3.x: rows hang directly off the database.
+            yield from _paginate(
+                lambda **kw: client.databases.query(database_id=database_id, **kw)
+            )
+            return
+
+        # notion-client >= 3.x: query each data source the database holds. A
+        # database created before the split has exactly one, so the common case
+        # is still a single pass.
+        meta = client.databases.retrieve(database_id)
+        for source in meta.get("data_sources", []):
+            yield from _paginate(
+                lambda source_id=source["id"], **kw: client.data_sources.query(
+                    data_source_id=source_id, **kw
+                )
+            )
+    except Exception as e:
+        raise RuntimeError(f"Notion API error: {e}") from e
+
+
+# ---------------------------------------------------------------------------
 # Main sync function — auto-detects database vs page mode
 # ---------------------------------------------------------------------------
 
@@ -289,26 +342,14 @@ def run_sync() -> dict[str, Any]:
 
     if is_database:
         mode = "database"
-        cursor = None
-        while True:
-            kwargs: dict[str, Any] = {"database_id": target_id, "page_size": 100}
-            if cursor:
-                kwargs["start_cursor"] = cursor
-            try:
-                resp = client.databases.query(**kwargs)
-            except Exception as e:
-                raise RuntimeError(f"Notion API error: {e}") from e
-            for page in resp.get("results", []):
-                _process_page(client, page, existing, counters, errors)
-            if not resp.get("has_more"):
-                break
-            cursor = resp.get("next_cursor")
+        for page in _iter_database_rows(client, target_id):
+            _process_page(client, page, existing, counters, errors)
     else:
         # Page mode: pull every page the integration can access via search.
         mode = "pages"
         cursor = None
         while True:
-            kwargs = {
+            kwargs: dict[str, Any] = {
                 "filter": {"property": "object", "value": "page"},
                 "page_size": 100,
             }

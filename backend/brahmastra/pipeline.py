@@ -141,6 +141,21 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
         result["stages"]["sync"] = {"skipped": f"not set: {', '.join(missing)}"}
 
     # ---------------------------------------------------------------
+    # Stage 0b: drain session checkpoints
+    #
+    # The PreCompact hook queues conversations to disk but can only distil them
+    # if an LLM answers at that moment. Draining here means a checkpoint taken
+    # while Ollama was down and Groq was rate limited still lands, and lands
+    # BEFORE extract so it is graphed in the same run.
+    # ---------------------------------------------------------------
+    try:
+        from brahmastra.checkpoint import drain, pending_count
+        if pending_count():
+            result["stages"]["checkpoints"] = drain()
+    except Exception as exc:
+        result["stages"]["checkpoints"] = {"error": str(exc)}
+
+    # ---------------------------------------------------------------
     # Stage 1: extract
     # ---------------------------------------------------------------
     from brahmastra.extraction import run_extraction
