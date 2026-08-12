@@ -46,7 +46,10 @@ dist/
 # the cache actually lands in backend/backend/.cache/
 .cache/
 
-# Pipeline run lock (runtime only)
+# Pipeline run lock (runtime only). The lock is per store, so the real name is
+# .pipeline-<hash>.lock — the two patterns below never matched it, and one got
+# committed.
+.pipeline-*.lock
 *.pipeline.lock
 .pipeline.lock
 
