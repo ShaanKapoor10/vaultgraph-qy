@@ -45,3 +45,7 @@ dist/
 # sentence-transformers model cache (~87MB) — matched at any depth,
 # the cache actually lands in backend/backend/.cache/
 .cache/
+
+# Pipeline run lock (runtime only)
+*.pipeline.lock
+.pipeline.lock
