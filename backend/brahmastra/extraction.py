@@ -254,6 +254,12 @@ def _is_placeholder(text: str) -> bool:
     return str(text or "").strip().lower() in _PLACEHOLDERS
 
 
+def _is_quota_error(message: str) -> bool:
+    """True if this failure is a provider quota that will not clear this run."""
+    from brahmastra.llm import _is_quota_exhausted
+    return _is_quota_exhausted(Exception(str(message)))
+
+
 def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     """
     Normalise a model-produced triple onto the ontology.
@@ -418,17 +424,31 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
 
     results = []
     errors = []
+    quota_exhausted: str | None = None
     for note in queue:
         r = extract_note(note)
         results.append(r)
         if r["error"]:
             errors.append({"note_id": note["id"], "error": r["error"]})
+            # A spent daily quota fails every remaining note identically, so
+            # continuing burns minutes to accomplish nothing. Stop and say so.
+            # Notes already marked 'error' are picked up by the next run.
+            if _is_quota_error(r["error"]):
+                quota_exhausted = r["error"]
+                break
 
     total_added = sum(r["triples_added"] for r in results)
-    return {
+    out = {
         "extracted": len([r for r in results if not r["error"]]),
         "total_pending": len(queue),
         "retried": len(retried),
         "triples_added": total_added,
         "errors": errors,
     }
+    if quota_exhausted:
+        # Surfaced so the caller can tell "the provider is out of quota until
+        # tomorrow" from "extraction is broken" — very different responses.
+        out["quota_exhausted"] = quota_exhausted
+        out["aborted_after"] = len(results)
+        out["remaining"] = len(queue) - len(results)
+    return out

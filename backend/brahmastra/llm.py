@@ -56,6 +56,33 @@ class LLMUnavailable(RuntimeError):
     """No provider could serve the request. Carries the per-provider reasons."""
 
 
+class LLMQuotaExhausted(LLMUnavailable):
+    """
+    The provider's quota is spent and will not recover within this run.
+
+    Distinct from a transient failure because the response differs: a
+    per-minute limit clears in seconds and is worth retrying, but a per-DAY
+    limit does not. Retrying through it means every remaining call fails too —
+    a run that grinds for ten minutes to accomplish nothing.
+    """
+
+
+def _is_quota_exhausted(exc: Exception) -> bool:
+    """
+    True for a limit that will not clear during this run.
+
+    Groq reports both per-minute and per-day limits as HTTP 429; only the text
+    distinguishes them, so match on the daily wording rather than the status.
+    """
+    text = str(exc).lower()
+    if "429" not in text and "rate_limit" not in text and "rate limit" not in text:
+        return False
+    return any(
+        marker in text
+        for marker in ("per day", "tokens per day", "(tpd)", "requests per day", "rpd")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Provider selection
 # ---------------------------------------------------------------------------
@@ -203,6 +230,10 @@ def _groq_chat(
             return resp.choices[0].message.content or ""
         except Exception as e:
             last_err = e
+            if _is_quota_exhausted(e):
+                # A daily cap will not clear in 2-6 seconds. Backing off here
+                # only wastes ~12s per note and still fails.
+                raise LLMQuotaExhausted(f"Groq daily quota exhausted: {e}") from e
             time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
 
     raise LLMUnavailable(f"Groq request failed after {retries} attempts: {last_err}")

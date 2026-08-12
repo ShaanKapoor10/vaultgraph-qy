@@ -20,7 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 from brahmastra import db
-from brahmastra.llm import chat, llm_available
+from brahmastra.llm import LLMQuotaExhausted, chat, llm_available
 
 # Skip clusters smaller than this — a 1-entity "cluster" has no theme worth a
 # round-trip to the LLM.
@@ -92,6 +92,11 @@ def summarise_clusters(
         ]
         try:
             summaries[cluster["id"]] = _summarise_one(members, internal_edges)
+        except LLMQuotaExhausted:
+            # The provider is out of quota until it resets, so every remaining
+            # cluster would fail the same way. Keep what we have and stop
+            # rather than spending minutes to add nothing.
+            break
         except Exception:
             # Fail soft per-cluster: one bad/empty response shouldn't drop the rest.
             continue

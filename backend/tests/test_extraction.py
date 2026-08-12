@@ -154,3 +154,61 @@ def test_run_extraction_skips_when_nothing_pending(temp_db, monkeypatch):
     result = extraction.run_extraction()
     assert result["extracted"] == 0
     assert result["total_pending"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Provider quota exhaustion
+# ---------------------------------------------------------------------------
+
+def test_daily_quota_is_distinguished_from_a_transient_limit():
+    """
+    Both arrive as HTTP 429; only the wording separates them, and the right
+    response is opposite. A per-minute limit clears in seconds and is worth
+    retrying; a per-day limit does not, and retrying through it makes every
+    remaining call fail too.
+    """
+    from brahmastra.llm import _is_quota_exhausted as spent
+
+    assert spent(Exception(
+        "Error code: 429 - Rate limit reached ... on tokens per day (TPD): "
+        "Limit 100000, Used 99041. Please try again in 34m14s"
+    ))
+    assert spent(Exception("429 requests per day (RPD) exceeded"))
+
+    assert not spent(Exception("Error code: 429 ... tokens per minute (TPM): Limit 12000"))
+    assert not spent(Exception("Connection reset by peer"))
+
+
+def test_extraction_aborts_on_quota_instead_of_grinding(temp_db, monkeypatch):
+    """
+    Observed for real: 15 notes retried against a spent daily quota took over
+    ten minutes and extracted nothing. The run must stop at the first quota
+    error and report what it did not get to.
+    """
+    db = temp_db
+    for i in range(6):
+        db.upsert_note(f"n{i}", f"Note {i}", "content", mark_pending=True)
+
+    from brahmastra import extraction
+    importlib.reload(extraction)
+
+    calls = {"n": 0}
+    quota = ("Error code: 429 - Rate limit reached ... tokens per day (TPD): "
+             "Limit 100000, Used 99041")
+
+    def flaky(title, content):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []          # first note succeeds
+        raise RuntimeError(quota)
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    with patch.object(extraction, "_extract_with_llm", side_effect=flaky):
+        result = extraction.run_extraction(full=False)
+
+    # Stopped at the first quota failure rather than attempting all six.
+    assert calls["n"] == 2, f"kept calling after quota was spent ({calls['n']} calls)"
+    assert result["extracted"] == 1
+    assert result["aborted_after"] == 2
+    assert result["remaining"] == 4
+    assert "per day" in result["quota_exhausted"].lower()
