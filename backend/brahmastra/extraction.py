@@ -301,12 +301,28 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
             )
 
     pending = db.get_notes(status="pending")
-    if not pending:
-        return {"extracted": 0, "total_pending": 0, "errors": []}
+
+    # Notes that previously errored are retried. Selecting only 'pending'
+    # stranded them forever: a transient provider outage (Ollama down, Groq
+    # rate limit) flipped a note to 'error' and no later run ever looked at it
+    # again, so it stayed invisible to search_entities with no way back except
+    # editing the row by hand. Retrying is safe — a note that genuinely cannot
+    # be parsed simply reappears in `errors` every run, which is visible rather
+    # than silent. Set EXTRACT_RETRY_ERRORS=0 to opt out.
+    retried: list[dict[str, Any]] = []
+    if os.environ.get("EXTRACT_RETRY_ERRORS", "1") != "0":
+        retried = db.get_notes(status="error")
+
+    queue = pending + retried
+    if not queue:
+        return {
+            "extracted": 0, "total_pending": 0, "retried": 0,
+            "triples_added": 0, "errors": [],
+        }
 
     results = []
     errors = []
-    for note in pending:
+    for note in queue:
         r = extract_note(note)
         results.append(r)
         if r["error"]:
@@ -315,7 +331,8 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
     total_added = sum(r["triples_added"] for r in results)
     return {
         "extracted": len([r for r in results if not r["error"]]),
-        "total_pending": len(pending),
+        "total_pending": len(queue),
+        "retried": len(retried),
         "triples_added": total_added,
         "errors": errors,
     }

@@ -76,11 +76,30 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         _release_lock()
 
 
+def _missing_notion_config(need_database: bool) -> list[str]:
+    """
+    Which Notion settings are absent.
+
+    Both Notion stages ask this one function so they can never disagree. They
+    used to check different things — sync required TOKEN *and* DATABASE_ID
+    while write-back required only TOKEN — so a run with a token but no
+    database id reported "NOTION_TOKEN / NOTION_DATABASE_ID not set" from sync
+    and then pushed pages from write-back in the same run.
+    """
+    missing = []
+    if not os.environ.get("NOTION_TOKEN"):
+        missing.append("NOTION_TOKEN")
+    if need_database and not os.environ.get("NOTION_DATABASE_ID"):
+        missing.append("NOTION_DATABASE_ID")
+    return missing
+
+
 def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
     # ---------------------------------------------------------------
-    # Stage 0: Notion sync (only when token is configured)
+    # Stage 0: Notion sync (pull needs both the token and a target)
     # ---------------------------------------------------------------
-    if os.environ.get("NOTION_TOKEN") and os.environ.get("NOTION_DATABASE_ID"):
+    missing = _missing_notion_config(need_database=True)
+    if not missing:
         try:
             from brahmastra.sync import run_sync
             sync_result = run_sync()
@@ -88,7 +107,9 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             result["stages"]["sync"] = {"error": str(exc)}
     else:
-        result["stages"]["sync"] = {"skipped": "NOTION_TOKEN / NOTION_DATABASE_ID not set"}
+        # Name only what is actually absent, so the message cannot claim the
+        # token is missing when it is set.
+        result["stages"]["sync"] = {"skipped": f"not set: {', '.join(missing)}"}
 
     # ---------------------------------------------------------------
     # Stage 1: extract
@@ -143,7 +164,21 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
     # Only runs when Notion is connected. This closes the bidirectional
     # loop: Notion → graph → insights written back into Notion.
     # ---------------------------------------------------------------
-    if os.environ.get("NOTION_TOKEN"):
+    extract = result["stages"].get("extract") or {}
+    # "Everything we tried, failed." A partial success still improves the
+    # graph, but if nothing got in then the graph is stale and pushing
+    # insights from it would overwrite good Notion content with old
+    # conclusions — worse than not pushing at all.
+    extraction_collapsed = bool(extract.get("errors")) and not extract.get("extracted")
+
+    missing = _missing_notion_config(need_database=False)
+    if missing:
+        result["stages"]["notion_writeback"] = {"skipped": f"not set: {', '.join(missing)}"}
+    elif extraction_collapsed:
+        result["stages"]["notion_writeback"] = {
+            "skipped": "extraction failed for every note; refusing to push a stale graph"
+        }
+    else:
         try:
             from brahmastra.notion_writeback import push_insights
             wb = push_insights()
@@ -153,6 +188,24 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
             }
         except Exception as exc:
             result["stages"]["notion_writeback"] = {"error": str(exc)}
+
+    # ---------------------------------------------------------------
+    # Run-level verdict. Without this a run exited 0 and looked healthy
+    # while every note had failed to extract — the per-stage `errors` array
+    # held the truth but nothing surfaced it, so callers had to know to
+    # look. Callers can now branch on status alone.
+    # ---------------------------------------------------------------
+    stage_errors = [
+        name for name, stage in result["stages"].items()
+        if isinstance(stage, dict) and (stage.get("error") or stage.get("errors"))
+    ]
+    if extraction_collapsed:
+        result["status"] = "error"
+    elif stage_errors:
+        result["status"] = "partial"
+    else:
+        result["status"] = "ok"
+    result["failed_stages"] = stage_errors
 
     result["finished_at"] = datetime.now(timezone.utc).isoformat()
     return result
