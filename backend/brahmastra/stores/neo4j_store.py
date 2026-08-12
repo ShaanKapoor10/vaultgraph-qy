@@ -79,6 +79,21 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# Characters Lucene treats as operators. A natural-language question routinely
+# contains them ("Sarah's", "what's the +1?"), and an unescaped one is a query
+# parse error rather than zero results — so escape before searching.
+_LUCENE_SPECIAL = r'+-&|!(){}[]^"~*?:\/'
+
+
+def _escape_lucene(term: str) -> str:
+    out = []
+    for ch in term:
+        if ch in _LUCENE_SPECIAL:
+            out.append("\\")
+        out.append(ch)
+    return "".join(out)
+
+
 CONSTRAINTS = [
     "CREATE CONSTRAINT note_id IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE",
     "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
@@ -91,7 +106,29 @@ INDEXES = [
     "CREATE INDEX note_status IF NOT EXISTS FOR (n:Note) ON (n.extractionStatus)",
     "CREATE INDEX entity_pagerank IF NOT EXISTS FOR (e:Entity) ON (e.pagerank)",
     "CREATE FULLTEXT INDEX noteSearch IF NOT EXISTS FOR (n:Note) ON EACH [n.title, n.content]",
+    "CREATE FULLTEXT INDEX entitySearch IF NOT EXISTS FOR (e:Entity) ON EACH [e.name]",
 ]
+
+
+def _vector_indexes(dim: int) -> list[str]:
+    """
+    Vector indexes for semantic search. Dimension must match the embedding
+    model; changing models means dropping and rebuilding these.
+    """
+    return [
+        f"""CREATE VECTOR INDEX noteVectors IF NOT EXISTS
+            FOR (n:Note) ON (n.embedding)
+            OPTIONS {{indexConfig: {{
+                `vector.dimensions`: {dim},
+                `vector.similarity_function`: 'cosine'
+            }}}}""",
+        f"""CREATE VECTOR INDEX entityVectors IF NOT EXISTS
+            FOR (e:Entity) ON (e.embedding)
+            OPTIONS {{indexConfig: {{
+                `vector.dimensions`: {dim},
+                `vector.similarity_function`: 'cosine'
+            }}}}""",
+    ]
 
 
 class Neo4jStore(GraphStore):
@@ -132,11 +169,26 @@ class Neo4jStore(GraphStore):
             from neo4j import GraphDatabase
             # A bare neo4j:// scheme (not neo4j+s://) because the +s schemes
             # lock TLS config and forbid supplying our own ssl_context.
-            self._driver = GraphDatabase.driver(
-                self._uri,
-                auth=(self._user, self._password),
-                ssl_context=self._ssl_context(),
-            )
+            kwargs: dict[str, Any] = {
+                "auth": (self._user, self._password),
+                "ssl_context": self._ssl_context(),
+            }
+            # Silence DEPRECATION notices. 5.27-aura reports
+            # db.index.vector.queryNodes as "replaced by SEARCH", but the
+            # SEARCH clause is a syntax error on this version — the notice is
+            # aimed at a future release. Left unsilenced it prints once per
+            # vector query and drowns real output. Revisit when the server
+            # supports SEARCH; the call sites are _vector_notes and
+            # search_entities.
+            try:
+                self._driver = GraphDatabase.driver(
+                    self._uri,
+                    notifications_disabled_classifications=["DEPRECATION"],
+                    **kwargs,
+                )
+            except TypeError:
+                # Older driver without notification filtering.
+                self._driver = GraphDatabase.driver(self._uri, **kwargs)
         return self._driver
 
     def _run(self, cypher: str, **params) -> list[dict[str, Any]]:
@@ -153,6 +205,15 @@ class Neo4jStore(GraphStore):
     def init_schema(self) -> None:
         for stmt in CONSTRAINTS + INDEXES:
             self._run(stmt)
+        # Vector indexes are created separately: an older server without vector
+        # support should still get a working store, just without semantic
+        # search, rather than failing to initialise at all.
+        from brahmastra.embeddings import DIM
+        for stmt in _vector_indexes(DIM):
+            try:
+                self._run(stmt)
+            except Exception:
+                pass
 
     def describe(self) -> str:
         return f"neo4j:{self._uri}/{self._database or '<home>'}"
@@ -186,6 +247,31 @@ class Neo4jStore(GraphStore):
             id=id, title=title, content=content, lastEdited=last_edited,
             now=_now(), status=("pending" if mark_pending else "done"),
         )
+        self._embed_note(id, title, content)
+
+    def _embed_note(self, note_id: str, title: str, content: str) -> None:
+        """
+        Store the note's embedding for semantic search.
+
+        Fails soft: without sentence-transformers the note is still saved and
+        searchable lexically, just not semantically. Embedding on write keeps
+        the index current without a separate backfill pass.
+        """
+        from brahmastra.embeddings import embed_one
+        vec = embed_one(f"{title}\n\n{content}")
+        if vec is None:
+            return
+        try:
+            self._run(
+                """
+                MATCH (n:Note {id: $id})
+                CALL db.create.setNodeVectorProperty(n, 'embedding', $vec)
+                RETURN n.id
+                """,
+                id=note_id, vec=vec,
+            )
+        except Exception:
+            pass
 
     def _note_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Return notes in the snake_case shape the rest of the codebase expects."""
@@ -213,13 +299,94 @@ class Neo4jStore(GraphStore):
             rows = self._run("MATCH (n:Note) RETURN n ORDER BY n.lastEdited DESC")
         return self._note_rows(rows)
 
+    # Reciprocal Rank Fusion constant. 60 is the value from the original RRF
+    # paper and the usual default; it damps the top ranks so one engine cannot
+    # dominate purely by being confident.
+    RRF_K = 60
+
+    def _fulltext_notes(self, query: str, limit: int) -> list[str]:
+        """Note ids by BM25 relevance. Returns [] if the query is unparseable."""
+        # Lucene syntax: a stray quote or bare AND/OR from a natural-language
+        # question is a parse error, so the terms are escaped and OR-joined.
+        terms = [_escape_lucene(t) for t in (query or "").split() if t.strip()]
+        if not terms:
+            return []
+        lucene = " OR ".join(terms)
+        try:
+            rows = self._run(
+                """
+                CALL db.index.fulltext.queryNodes('noteSearch', $q, {limit: $limit})
+                YIELD node, score
+                RETURN node.id AS id ORDER BY score DESC
+                """,
+                q=lucene, limit=limit,
+            )
+        except Exception:
+            return []
+        return [r["id"] for r in rows]
+
+    def _vector_notes(self, query: str, limit: int) -> list[str]:
+        """Note ids by embedding similarity. [] when embeddings are unavailable."""
+        from brahmastra.embeddings import embed_one
+        vec = embed_one(query)
+        if vec is None:
+            return []
+        try:
+            rows = self._run(
+                """
+                CALL db.index.vector.queryNodes('noteVectors', $limit, $vec)
+                YIELD node, score
+                RETURN node.id AS id ORDER BY score DESC
+                """,
+                limit=limit, vec=vec,
+            )
+        except Exception:
+            return []
+        return [r["id"] for r in rows]
+
     def search_notes(self, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        """
+        Hybrid search: BM25 relevance fused with embedding similarity.
+
+        Lexical search finds exact terms and names; vector search finds notes
+        that mean the same thing in different words ("boss" -> "reports_to").
+        Neither alone is enough, so both run and their rankings are combined
+        with Reciprocal Rank Fusion, which needs no score normalisation —
+        BM25 scores and cosine similarities are not on comparable scales.
+
+        Degrades cleanly: without embeddings this is pure BM25, and if the
+        fulltext index is missing too it falls back to the substring scan.
+        """
+        if not (query or "").strip():
+            return []
+
+        pool = max(limit * 5, 20)  # over-fetch so fusion has room to reorder
+        lexical = self._fulltext_notes(query, pool)
+        semantic = self._vector_notes(query, pool)
+
+        if not lexical and not semantic:
+            return self._search_notes_substring(query, limit)
+
+        scores: dict[str, float] = {}
+        for ranking in (lexical, semantic):
+            for rank, note_id in enumerate(ranking):
+                scores[note_id] = scores.get(note_id, 0.0) + 1.0 / (self.RRF_K + rank + 1)
+
+        ordered = sorted(scores, key=lambda i: scores[i], reverse=True)[:limit]
+        if not ordered:
+            return []
+        rows = self._run(
+            "MATCH (n:Note) WHERE n.id IN $ids RETURN n", ids=ordered
+        )
+        by_id = {r["n"].get("id"): r for r in rows}
+        # Preserve fusion order; the Cypher IN does not guarantee it.
+        return self._note_rows([by_id[i] for i in ordered if i in by_id])
+
+    def _search_notes_substring(self, query: str, limit: int) -> list[dict[str, Any]]:
+        """Last-resort scan, matching the SQLite backend's semantics."""
         terms = [t for t in (query or "").lower().split() if t]
         if not terms:
             return []
-        # Rank by how many terms appear in title+content, preferring notes that
-        # contain ALL terms — same semantics as the SQLite backend, so callers
-        # cannot tell the two apart.
         rows = self._run(
             """
             MATCH (n:Note)
@@ -411,6 +578,11 @@ class Neo4jStore(GraphStore):
                 ],
             )
 
+        # Entity embeddings, for semantic entity matching in GraphRAG. Batched
+        # in one encode call — encoding 200 names individually would dominate
+        # the build time.
+        self._embed_entities([str(n.get("id")) for n in nodes])
+
         # Typed relationships, one Cypher statement per relation type because
         # the type cannot be parameterised. relation_to_type() rejects anything
         # outside the ontology, so nothing unvalidated reaches the query text.
@@ -556,6 +728,160 @@ class Neo4jStore(GraphStore):
             "graph": {"nodes": nodes, "edges": edges},
             "stats": json.loads(meta[0]["statsJson"] or "{}"),
         }
+
+    def _embed_entities(self, names: list[str]) -> None:
+        """Embed entity names in one batch. Fails soft, like note embedding."""
+        from brahmastra.embeddings import embed
+        names = [n for n in names if n]
+        if not names:
+            return
+        vecs = embed(names)
+        if vecs is None:
+            return
+        try:
+            self._run(
+                """
+                UNWIND $rows AS row
+                MATCH (e:Entity {name: row.name})
+                CALL db.create.setNodeVectorProperty(e, 'embedding', row.vec)
+                RETURN count(*)
+                """,
+                rows=[{"name": n, "vec": v} for n, v in zip(names, vecs)],
+            )
+        except Exception:
+            pass
+
+    def search_entities(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
+        """
+        Find entities a question is about, by meaning as well as by spelling.
+
+        Fuses fulltext over entity names with embedding similarity, the same
+        way search_notes does. This replaces token-overlap matching, which
+        could only find an entity whose words literally appeared in the
+        question — so "who is Sarah's boss" missed `reports_to` entirely.
+        """
+        if not (query or "").strip():
+            return []
+        pool = max(limit * 5, 20)
+
+        lexical: list[str] = []
+        terms = [_escape_lucene(t) for t in query.split() if t.strip()]
+        if terms:
+            try:
+                lexical = [
+                    r["name"] for r in self._run(
+                        """
+                        CALL db.index.fulltext.queryNodes('entitySearch', $q, {limit: $limit})
+                        YIELD node, score
+                        RETURN node.name AS name ORDER BY score DESC
+                        """,
+                        q=" OR ".join(terms), limit=pool,
+                    )
+                ]
+            except Exception:
+                lexical = []
+
+        semantic: list[str] = []
+        from brahmastra.embeddings import embed_one
+        vec = embed_one(query)
+        if vec is not None:
+            try:
+                semantic = [
+                    r["name"] for r in self._run(
+                        """
+                        CALL db.index.vector.queryNodes('entityVectors', $limit, $vec)
+                        YIELD node, score
+                        RETURN node.name AS name ORDER BY score DESC
+                        """,
+                        limit=pool, vec=vec,
+                    )
+                ]
+            except Exception:
+                semantic = []
+
+        if not lexical and not semantic:
+            return []
+
+        scores: dict[str, float] = {}
+        for ranking in (lexical, semantic):
+            for rank, name in enumerate(ranking):
+                scores[name] = scores.get(name, 0.0) + 1.0 / (self.RRF_K + rank + 1)
+
+        ordered = sorted(scores, key=lambda n: scores[n], reverse=True)[:limit]
+        rows = self._run(
+            """
+            MATCH (e:Entity) WHERE e.name IN $names
+            RETURN e.name AS id, coalesce(e.label, e.name) AS label,
+                   coalesce(e.type,'unknown') AS type,
+                   coalesce(e.pagerank, 0.0) AS pagerank, e.clusterId AS cluster
+            """,
+            names=ordered,
+        )
+        by_name = {r["id"]: r for r in rows}
+        out = []
+        for name in ordered:
+            r = by_name.get(name)
+            if not r:
+                continue
+            try:
+                cluster = int(r["cluster"]) if r["cluster"] is not None else 0
+            except (TypeError, ValueError):
+                cluster = 0
+            out.append({
+                "id": r["id"], "label": r["label"], "type": r["type"],
+                "pagerank": round(float(r["pagerank"] or 0.0), 6),
+                "cluster": cluster,
+            })
+        return out
+
+    def find_path(
+        self, source: str, target: str, max_hops: int = 5
+    ) -> list[dict[str, Any]]:
+        """
+        Shortest path between two entities, as a list of hops.
+
+        Native shortestPath: the server walks the graph and returns only the
+        path, instead of loading every edge into Python to run a BFS. This is
+        the question "how are these two things connected?", which nothing in
+        the product could previously answer.
+        """
+        h = max(1, min(int(max_hops), 10))
+        rows = self._run(
+            f"""
+            MATCH (a:Entity {{name: $source}}), (b:Entity {{name: $target}})
+            MATCH p = shortestPath((a)-[*..{h}]-(b))
+            WHERE none(r IN relationships(p) WHERE type(r) = 'IN_CLUSTER')
+            RETURN [n IN nodes(p) | n.name] AS names,
+                   [r IN relationships(p) | type(r)] AS rels,
+                   [r IN relationships(p) | coalesce(r.sourceNoteId,'')] AS notes,
+                   [r IN relationships(p) | startNode(r).name] AS starts
+            LIMIT 1
+            """,
+            source=source, target=target,
+        )
+        if not rows:
+            return []
+        r = rows[0]
+        names, rels, notes, starts = r["names"], r["rels"], r["notes"], r["starts"]
+        hops = []
+        for i, rel in enumerate(rels):
+            a, b = names[i], names[i + 1]        # walk order
+            forward = starts[i] == a
+            # from/to always state the fact as stored, so a hop reads as a true
+            # sentence: walking Mei -> Raj across "Raj reports_to Mei" must not
+            # render as "Mei reports_to Raj". walk_from/walk_to keep the
+            # traversal order for anyone drawing the path.
+            subject, obj = (a, b) if forward else (b, a)
+            hops.append({
+                "from": subject,
+                "relation": rel.lower(),
+                "to": obj,
+                "direction": "forward" if forward else "reverse",
+                "walk_from": a,
+                "walk_to": b,
+                "note_id": notes[i],
+            })
+        return hops
 
     def get_entities(self) -> list[dict[str, Any]]:
         """Nodes only — no edge scan, unlike the SQLite backend."""

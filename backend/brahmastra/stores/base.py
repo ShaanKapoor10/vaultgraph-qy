@@ -137,6 +137,30 @@ class GraphStore(ABC):
         """
 
     @abstractmethod
+    def search_entities(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
+        """
+        Entities a question is about, best first, in get_entities() shape.
+
+        Backends differ in quality here on purpose: SQLite can only match
+        entities whose words literally appear in the query, while Neo4j fuses
+        that with embedding similarity so "who is Sarah's boss" can reach
+        `reports_to`. Same shape, better recall.
+        """
+
+    @abstractmethod
+    def find_path(
+        self, source: str, target: str, max_hops: int = 5
+    ) -> list[dict[str, Any]]:
+        """
+        Shortest path between two entities as ordered hops, [] if unconnected.
+
+        Each hop is {from, relation, to, direction, note_id}. Direction is
+        reported because connection-finding ignores edge direction while the
+        underlying fact still has one: "Sarah reports_to Mei" read backwards
+        is not "Mei reports_to Sarah".
+        """
+
+    @abstractmethod
     def neighbourhood(
         self, names: set[str], limit: int = 40, depth: int = 1
     ) -> list[dict[str, Any]]:

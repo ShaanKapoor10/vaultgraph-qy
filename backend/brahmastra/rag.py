@@ -85,9 +85,32 @@ def _match_entities(question: str, nodes: list[dict[str, Any]]) -> list[dict[str
     """
     Return graph nodes the question is about, best first.
 
-    Scoring: a node whose full (normalised) label appears verbatim in the
-    question scores highest; otherwise score by token overlap between the
-    node label and the question. Ties broken by PageRank (more central wins).
+    Asks the store first, which on Neo4j fuses fulltext with embedding
+    similarity and so can match an entity the question never literally names.
+    Falls back to the token-overlap scoring below when the store returns
+    nothing — an empty result is normal before the first graph build, and on
+    SQLite the store's own matching is this same lexical scoring anyway.
+    """
+    try:
+        hits = db.search_entities(question, limit=MAX_MATCHED_ENTITIES)
+        if hits:
+            return hits
+    except Exception:
+        # Never let a search-index problem take down question answering;
+        # the lexical path below always works.
+        pass
+    return _match_entities_lexical(question, nodes)
+
+
+def _match_entities_lexical(
+    question: str, nodes: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """
+    Token-overlap scoring over the node list.
+
+    A node whose full (normalised) label appears verbatim in the question
+    scores highest; otherwise score by token overlap between the node label
+    and the question. Ties broken by PageRank (more central wins).
     """
     q_norm = _normalise(question)
     q_tokens = _content_tokens(question)

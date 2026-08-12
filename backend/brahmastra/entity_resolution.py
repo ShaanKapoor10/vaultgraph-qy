@@ -153,19 +153,14 @@ def _heuristic_sim(a: str, b: str) -> tuple[float, str]:
 # Embedding-based similarity (lazy load)
 # ---------------------------------------------------------------------------
 
-_embedder = None
-
-
 def _get_embedder():
-    global _embedder
-    if _embedder is not None:
-        return _embedder
-    try:
-        from sentence_transformers import SentenceTransformer
-        _embedder = SentenceTransformer("all-MiniLM-L6-v2", cache_folder="backend/.cache")
-        return _embedder
-    except Exception:
-        return None
+    """
+    Shared loader (brahmastra.embeddings) so the weights load once per process
+    rather than once here and again for semantic search. Also fixes the cache
+    path, which used to be relative and landed in backend/backend/.cache.
+    """
+    from brahmastra.embeddings import get_model
+    return get_model()
 
 
 def _embedding_sim(mentions: list[str]) -> dict[tuple[str, str], float]:

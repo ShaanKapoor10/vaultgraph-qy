@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -317,6 +318,109 @@ class SQLiteStore(GraphStore):
         """Nodes come out of the same JSON blob; there is nothing cheaper here."""
         cached = self.load_graph()
         return (cached or {}).get("graph", {}).get("nodes", []) or []
+
+    def search_entities(self, query: str, limit: int = 6) -> list[dict[str, Any]]:
+        """
+        Token-overlap matching over entity names.
+
+        No index and no vectors here, so this stays lexical: an entity is only
+        found when its words appear in the question. The Neo4j backend fuses
+        this with embedding similarity, which is the actual upgrade — this
+        exists so callers get the same shape on either backend.
+        """
+        if not (query or "").strip():
+            return []
+        q = query.lower()
+        q_tokens = {t for t in re.split(r"\W+", q) if len(t) >= 3}
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for n in self.get_entities():
+            label = str(n.get("id", "")).lower()
+            if not label:
+                continue
+            tokens = {t for t in re.split(r"\W+", label) if len(t) >= 3}
+            if not tokens:
+                continue
+            if label in q:
+                score = 1.0 + len(tokens)
+            else:
+                overlap = tokens & q_tokens
+                score = len(overlap) / len(tokens) if overlap else 0.0
+                if score < 0.5:
+                    score = 0.0
+            if score > 0:
+                scored.append((score + float(n.get("pagerank", 0.0)), n))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [n for _, n in scored[:limit]]
+
+    def find_path(
+        self, source: str, target: str, max_hops: int = 5
+    ) -> list[dict[str, Any]]:
+        """
+        Breadth-first shortest path over the serialised edge list.
+
+        Same result as the Neo4j backend, but it must load and walk the whole
+        graph in Python to get there.
+        """
+        cached = self.load_graph()
+        if not cached or not source or not target:
+            return []
+        edges = cached["graph"].get("edges", [])
+        if source == target:
+            return []
+
+        # Undirected adjacency: "how are these connected" does not care which
+        # way an edge points, but the direction is reported back.
+        adj: dict[str, list[tuple[str, dict[str, Any], bool]]] = {}
+        for e in edges:
+            s, t = e["source"], e["target"]
+            adj.setdefault(s, []).append((t, e, True))
+            adj.setdefault(t, []).append((s, e, False))
+
+        h = max(1, min(int(max_hops), 10))
+        prev: dict[str, tuple[str, dict[str, Any], bool]] = {}
+        seen = {source}
+        frontier = [source]
+        for _ in range(h):
+            nxt = []
+            for node in frontier:
+                for neighbour, edge, forward in adj.get(node, []):
+                    if neighbour in seen:
+                        continue
+                    seen.add(neighbour)
+                    prev[neighbour] = (node, edge, forward)
+                    if neighbour == target:
+                        frontier = []
+                        nxt = []
+                        break
+                    nxt.append(neighbour)
+                else:
+                    continue
+                break
+            if target in seen or not nxt:
+                break
+            frontier = nxt
+
+        if target not in prev:
+            return []
+
+        chain = []
+        cur = target
+        while cur != source:
+            node, edge, forward = prev[cur]
+            # from/to state the fact as stored; walk_from/walk_to give the
+            # traversal order. Same convention as the Neo4j backend.
+            chain.append({
+                "from": node if forward else cur,
+                "relation": edge["relation"],
+                "to": cur if forward else node,
+                "direction": "forward" if forward else "reverse",
+                "walk_from": node,
+                "walk_to": cur,
+                "note_id": edge.get("note_id", "") or "",
+            })
+            cur = node
+        chain.reverse()
+        return chain
 
     MAX_DEPTH = 3
 

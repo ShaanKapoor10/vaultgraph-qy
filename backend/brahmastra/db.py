@@ -27,8 +27,8 @@ __all__ = [
     "mark_note_done", "mark_note_error", "set_note_status", "delete_note",
     "delete_triples_for_note", "insert_triples", "get_all_triples",
     "replace_canonical_map", "get_canonical_map", "get_entity_clusters",
-    "cache_graph", "get_cached_graph", "get_entities", "neighbourhood",
-    "get_db_stats",
+    "cache_graph", "get_cached_graph", "get_entities", "search_entities",
+    "find_path", "neighbourhood", "get_db_stats",
 ]
 
 
@@ -140,6 +140,21 @@ def get_cached_graph() -> dict[str, Any] | None:
 def get_entities() -> list[dict[str, Any]]:
     """Graph nodes only, no edges — for entity matching."""
     return get_store().get_entities()
+
+
+def search_entities(query: str, limit: int = 6) -> list[dict[str, Any]]:
+    """
+    Entities a question is about, best first.
+
+    On Neo4j this fuses fulltext with embedding similarity; on SQLite it is
+    token overlap. Same shape either way.
+    """
+    return get_store().search_entities(query, limit)
+
+
+def find_path(source: str, target: str, max_hops: int = 5) -> list[dict[str, Any]]:
+    """Shortest path between two entities as ordered hops; [] if unconnected."""
+    return get_store().find_path(source, target, max_hops)
 
 
 def neighbourhood(

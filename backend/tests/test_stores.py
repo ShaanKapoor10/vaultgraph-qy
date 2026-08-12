@@ -137,6 +137,52 @@ def test_neighbourhood_on_empty_graph():
     assert db.get_entities() == []
 
 
+def test_find_path_returns_hops_stating_facts_truthfully():
+    """
+    A hop must read as a true sentence even when the walk went against the
+    edge. Walking Mei -> Apollo across "Mei owns Apollo" is fine; walking
+    Apollo -> Mei must still say "Mei owns Apollo", not the reverse.
+    """
+    db.cache_graph(GRAPH, STATS)
+    hops = db.find_path("Apollo", "Sarah")
+    assert hops, "Apollo and Sarah are connected"
+    for h in hops:
+        # from/to are the stored fact; walk order lives in walk_from/walk_to.
+        assert (h["from"], h["relation"], h["to"]) in {
+            (e["source"], e["relation"], e["target"]) for e in GRAPH["edges"]
+        }, f"hop {h} does not correspond to a real edge"
+        assert h["direction"] in ("forward", "reverse")
+        assert {h["walk_from"], h["walk_to"]} == {h["from"], h["to"]}
+
+
+def test_find_path_is_shortest_and_contiguous():
+    db.cache_graph(GRAPH, STATS)
+    hops = db.find_path("Sarah", "Apollo")
+    # Sarah works_on Apollo directly — one hop, not routed via Mei.
+    assert len(hops) == 1
+
+    two = db.find_path("Mei", "Sarah")
+    assert two[0]["walk_from"] == "Mei"
+    assert two[-1]["walk_to"] == "Sarah"
+    # Each hop must start where the previous one ended — a path with a gap is
+    # not a path.
+    for a, b in zip(two, two[1:]):
+        assert a["walk_to"] == b["walk_from"], f"gap between {a} and {b}"
+
+
+def test_find_path_absent_or_unconnected_returns_empty():
+    db.cache_graph(GRAPH, STATS)
+    assert db.find_path("Sarah", "NoSuchEntity") == []
+    assert db.find_path("Sarah", "Sarah") == []
+
+
+def test_search_entities_finds_by_name():
+    db.cache_graph(GRAPH, STATS)
+    hits = db.search_entities("what is Apollo about")
+    assert any(h["id"] == "Apollo" for h in hits)
+    assert db.search_entities("") == []
+
+
 def test_delete_note_removes_its_triples():
     db.upsert_note("n1", "T", "C")
     db.insert_triples([{
