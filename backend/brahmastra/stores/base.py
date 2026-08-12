@@ -127,6 +127,29 @@ class GraphStore(ABC):
     def load_graph(self) -> dict[str, Any] | None:
         """Return {built_at, graph, stats} or None if nothing has been built."""
 
+    @abstractmethod
+    def get_entities(self) -> list[dict[str, Any]]:
+        """
+        Graph nodes only — {id, label, type, pagerank, cluster} — no edges.
+
+        Entity matching needs names, not the whole graph. Loading edges for it
+        would undo the point of the traversal below.
+        """
+
+    @abstractmethod
+    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+        """
+        1-hop facts touching any of `names`, highest confidence first.
+
+        Each fact is {text, quote, note_id, confidence} — the shape GraphRAG
+        cites from. This is on the contract rather than done in Python by the
+        caller because it is the one operation a graph backend does natively:
+        SQLite must scan every edge, Neo4j matches an index.
+
+        Facts are deduplicated on (subject, relation, object) so parallel edges
+        asserting the same thing from different notes collapse to one.
+        """
+
     # -- stats -------------------------------------------------------------
 
     @abstractmethod

@@ -125,30 +125,15 @@ def _match_entities(question: str, nodes: list[dict[str, Any]]) -> list[dict[str
 # Subgraph → facts
 # ---------------------------------------------------------------------------
 
-def _subgraph_facts(
-    entity_ids: set[str],
-    edges: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
+def _subgraph_facts(entity_ids: set[str]) -> list[dict[str, Any]]:
     """
-    Collect 1-hop facts touching any matched entity. Each fact carries the
-    note_id so the answer can be cited. Higher-confidence facts first.
+    Collect 1-hop facts touching any matched entity, highest confidence first.
+    Each fact carries the note_id so the answer can be cited.
+
+    Delegated to the store: on Neo4j this is an indexed traversal over just the
+    matched nodes' edges, rather than a Python scan of every edge in the graph.
     """
-    facts: list[dict[str, Any]] = []
-    seen: set[tuple] = set()
-    for e in edges:
-        if e["source"] in entity_ids or e["target"] in entity_ids:
-            key = (e["source"], e["relation"], e["target"])
-            if key in seen:
-                continue
-            seen.add(key)
-            facts.append({
-                "text": f'{e["source"]} {e["relation"]} {e["target"]}',
-                "quote": e.get("source_quote", ""),
-                "note_id": e.get("note_id", ""),
-                "confidence": float(e.get("confidence", 1.0)),
-            })
-    facts.sort(key=lambda f: f["confidence"], reverse=True)
-    return facts[:MAX_FACTS]
+    return db.neighbourhood(entity_ids, limit=MAX_FACTS)
 
 
 _CITE_RE = re.compile(r"\[n:([^\]]+)\]")
@@ -202,10 +187,8 @@ _GLOBAL_SYSTEM = (
 )
 
 
-def local_search(question: str, cached: dict[str, Any]) -> dict[str, Any]:
-    nodes = cached["graph"]["nodes"]
-    edges = cached["graph"]["edges"]
-
+def local_search(question: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
+    """Answer from the 1-hop subgraph around entities named in the question."""
     matched = _match_entities(question, nodes)
     if not matched:
         return {
@@ -216,7 +199,7 @@ def local_search(question: str, cached: dict[str, Any]) -> dict[str, Any]:
         }
 
     entity_ids = {n["id"] for n in matched}
-    facts = _subgraph_facts(entity_ids, edges)
+    facts = _subgraph_facts(entity_ids)
     if not facts:
         return {
             "mode": "local",
@@ -300,8 +283,12 @@ def answer_question(question: str, mode: str = "auto") -> dict[str, Any]:
             "citations": [],
         }
 
-    cached = _load()
-    if not cached:
+    # Nodes only. Local search never needs the edge list — it asks the store
+    # for the 1-hop neighbourhood instead, which is an indexed traversal on a
+    # graph backend. Only global search loads the full projection, for the
+    # cluster summaries in stats.
+    nodes = db.get_entities()
+    if not nodes:
         return {
             "mode": "none",
             "answer": "The knowledge graph is empty. Add notes and run the pipeline first.",
@@ -309,20 +296,31 @@ def answer_question(question: str, mode: str = "auto") -> dict[str, Any]:
             "citations": [],
         }
 
-    # The searches call the LLM, which can fail transiently when Ollama is busy
-    # or cold (e.g. the pipeline/watcher is mid-run saturating it). Catch that so
-    # the caller gets a friendly message instead of an opaque HTTP 500.
+    def _global() -> dict[str, Any]:
+        cached = _load()
+        if not cached:
+            return {
+                "mode": "none",
+                "answer": "The knowledge graph is empty. Add notes and run the pipeline first.",
+                "entities": [],
+                "citations": [],
+            }
+        return global_search(question, cached)
+
+    # The searches call the LLM, which can fail transiently when the provider is
+    # busy or cold. Catch that so the caller gets a friendly message instead of
+    # an opaque HTTP 500.
     try:
         if mode == "global":
-            return global_search(question, cached)
+            return _global()
         if mode == "local":
-            return local_search(question, cached)
+            return local_search(question, nodes)
 
         # auto
-        matched = _match_entities(question, cached["graph"]["nodes"])
+        matched = _match_entities(question, nodes)
         if _is_global(question, matched):
-            return global_search(question, cached)
-        return local_search(question, cached)
+            return _global()
+        return local_search(question, nodes)
     except Exception as e:
         return {
             "mode": "error",

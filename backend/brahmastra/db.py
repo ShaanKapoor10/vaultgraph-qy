@@ -27,7 +27,8 @@ __all__ = [
     "mark_note_done", "mark_note_error", "set_note_status", "delete_note",
     "delete_triples_for_note", "insert_triples", "get_all_triples",
     "replace_canonical_map", "get_canonical_map", "get_entity_clusters",
-    "cache_graph", "get_cached_graph", "get_db_stats",
+    "cache_graph", "get_cached_graph", "get_entities", "neighbourhood",
+    "get_db_stats",
 ]
 
 
@@ -134,6 +135,21 @@ def cache_graph(graph_json: dict[str, Any], stats_json: dict[str, Any]) -> None:
 
 def get_cached_graph() -> dict[str, Any] | None:
     return get_store().load_graph()
+
+
+def get_entities() -> list[dict[str, Any]]:
+    """Graph nodes only, no edges — for entity matching."""
+    return get_store().get_entities()
+
+
+def neighbourhood(names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+    """
+    1-hop facts around the given entities, highest confidence first.
+
+    Backend-dependent by design: SQLite scans every edge, Neo4j runs an
+    indexed traversal. Callers get the same {text, quote, note_id, confidence}.
+    """
+    return get_store().neighbourhood(names, limit)
 
 
 # ---------------------------------------------------------------------------

@@ -155,6 +155,13 @@ edges  = cached["graph"]["edges"]
 facts  = _subgraph_facts(entity_ids, edges)   # linear scan of every edge
 ```
 
+**Implemented.** `rag.py` now calls `db.neighbourhood()`, which the store
+answers natively on Neo4j and by scanning on SQLite. `load_graph()` likewise
+reconstructs the graph from `:Entity` nodes and their relationships rather than
+reading a stored copy, so `graph_cache` is genuinely gone on this backend —
+only the NetworkX analysis output is persisted, since reading the graph back
+cannot re-derive PageRank, Louvain, contradictions or link predictions.
+
 **After** — one indexed traversal:
 
 ```cypher

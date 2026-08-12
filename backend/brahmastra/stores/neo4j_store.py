@@ -16,14 +16,13 @@ Two notes on fidelity to the design doc:
   resolution happens in a later stage. Storing them as :Entity would assert a
   resolution that has not happened yet.
 
-* save_graph() writes the resolved graph natively (:Entity nodes + typed
-  relationships), which is what makes the Cypher traversals in the design doc
-  possible. It ALSO stores the computed projection on a singleton (:GraphMeta)
-  node, and load_graph() reads that back. The frontend expects an exact JSON
-  shape including PageRank and Louvain output that NetworkX computes, so
-  reconstructing it from the native graph is a follow-up, not a prerequisite.
-  The native graph is authoritative for queries; the projection is a render
-  cache. Dropping it is tracked in the design doc's open items.
+* The graph is stored ONCE, natively. save_graph() writes :Entity nodes and
+  typed relationships; load_graph() reconstructs the frontend's JSON shape by
+  reading them back, so the rendered graph and the queried graph cannot drift.
+  Only the ANALYSIS output (stats: PageRank rankings, Louvain groupings,
+  contradictions, link predictions) is stored on a singleton (:GraphMeta)
+  node, because those are NetworkX results that reading the graph back cannot
+  re-derive.
 
 TLS: this machine has a TLS-intercepting root CA in its system trust store, so
 the driver's default verification fails with "self-signed certificate in
@@ -472,28 +471,154 @@ class Neo4jStore(GraphStore):
                 ],
             )
 
-        # Render projection (see module docstring).
+        # Only the ANALYSIS output is stored, not the graph itself. stats holds
+        # PageRank rankings, Louvain groupings, contradictions and link
+        # predictions — results of NetworkX runs that cannot be re-derived by
+        # reading the graph back. The graph structure is no longer duplicated
+        # here; load_graph() reconstructs it from the nodes and edges above.
         self._run(
             """
             MERGE (g:GraphMeta {id: 1})
-            SET g.builtAt = $now, g.graphJson = $graph, g.statsJson = $stats
+            SET g.builtAt = $now, g.statsJson = $stats
+            REMOVE g.graphJson
             """,
-            now=_now(), graph=json.dumps(graph), stats=json.dumps(stats),
+            now=_now(), stats=json.dumps(stats),
         )
 
     def load_graph(self) -> dict[str, Any] | None:
-        rows = self._run(
+        """
+        Rebuild the frontend graph shape from the native graph.
+
+        Reads :Entity nodes and their typed relationships rather than a stored
+        blob, so what the UI renders is the graph itself and the two can no
+        longer drift apart.
+        """
+        meta = self._run(
             "MATCH (g:GraphMeta {id: 1}) RETURN g.builtAt AS builtAt, "
-            "g.graphJson AS graphJson, g.statsJson AS statsJson"
+            "g.statsJson AS statsJson"
         )
-        if not rows:
+        if not meta:
             return None
-        r = rows[0]
+
+        node_rows = self._run(
+            """
+            MATCH (e:Entity)
+            RETURN e.name AS id, coalesce(e.label, e.name) AS label,
+                   coalesce(e.type, 'unknown') AS type,
+                   coalesce(e.pagerank, 0.0) AS pagerank,
+                   e.clusterId AS cluster
+            ORDER BY e.pagerank DESC
+            """
+        )
+        nodes = []
+        for r in node_rows:
+            # cluster is stored as a string; the frontend expects the integer
+            # Louvain id it was built with.
+            raw = r["cluster"]
+            try:
+                cluster = int(raw) if raw is not None else 0
+            except (TypeError, ValueError):
+                cluster = 0
+            nodes.append({
+                "id": r["id"],
+                "label": r["label"],
+                "type": r["type"],
+                "pagerank": round(float(r["pagerank"] or 0.0), 6),
+                "cluster": cluster,
+            })
+
+        edge_rows = self._run(
+            """
+            MATCH (s:Entity)-[r]->(t:Entity)
+            WHERE type(r) <> 'IN_CLUSTER'
+            RETURN s.name AS source, t.name AS target, type(r) AS relation,
+                   coalesce(r.sourceQuote, '') AS source_quote,
+                   coalesce(r.sourceNoteId, '') AS note_id,
+                   coalesce(r.confidence, 1.0) AS confidence
+            """
+        )
+        edges = [
+            {
+                "source": r["source"],
+                "target": r["target"],
+                # Relationship types are UPPER_SNAKE on the wire; the rest of
+                # the app speaks the ontology's lowercase relation names.
+                "relation": r["relation"].lower(),
+                "source_quote": r["source_quote"],
+                "note_id": r["note_id"],
+                "confidence": round(float(r["confidence"] or 1.0), 3),
+            }
+            for r in edge_rows
+        ]
+
         return {
-            "built_at": r["builtAt"],
-            "graph": json.loads(r["graphJson"]),
-            "stats": json.loads(r["statsJson"]),
+            "built_at": meta[0]["builtAt"],
+            "graph": {"nodes": nodes, "edges": edges},
+            "stats": json.loads(meta[0]["statsJson"] or "{}"),
         }
+
+    def get_entities(self) -> list[dict[str, Any]]:
+        """Nodes only — no edge scan, unlike the SQLite backend."""
+        rows = self._run(
+            """
+            MATCH (e:Entity)
+            RETURN e.name AS id, coalesce(e.label, e.name) AS label,
+                   coalesce(e.type, 'unknown') AS type,
+                   coalesce(e.pagerank, 0.0) AS pagerank, e.clusterId AS cluster
+            ORDER BY e.pagerank DESC
+            """
+        )
+        out = []
+        for r in rows:
+            try:
+                cluster = int(r["cluster"]) if r["cluster"] is not None else 0
+            except (TypeError, ValueError):
+                cluster = 0
+            out.append({
+                "id": r["id"], "label": r["label"], "type": r["type"],
+                "pagerank": round(float(r["pagerank"] or 0.0), 6),
+                "cluster": cluster,
+            })
+        return out
+
+    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+        """
+        Native 1-hop traversal — the operation this backend exists for.
+
+        Matches on the :Entity name index and walks only the edges attached to
+        those nodes, instead of scanning every edge in the graph.
+        """
+        if not names:
+            return []
+        rows = self._run(
+            """
+            MATCH (e:Entity)-[r]-(o:Entity)
+            WHERE e.name IN $names AND type(r) <> 'IN_CLUSTER'
+            WITH startNode(r) AS s, endNode(r) AS t, r
+            RETURN DISTINCT s.name AS subject, type(r) AS relation, t.name AS object,
+                   coalesce(r.sourceQuote, '') AS quote,
+                   coalesce(r.sourceNoteId, '') AS note_id,
+                   coalesce(r.confidence, 1.0) AS confidence
+            ORDER BY confidence DESC
+            LIMIT $limit
+            """,
+            names=sorted(names), limit=limit,
+        )
+        facts: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for r in rows:
+            rel = r["relation"].lower()
+            key = (r["subject"], rel, r["object"])
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append({
+                "text": f'{r["subject"]} {rel} {r["object"]}',
+                "quote": r["quote"],
+                "note_id": r["note_id"],
+                "confidence": float(r["confidence"] or 1.0),
+            })
+        return facts
 
     # -- stats -------------------------------------------------------------
 

@@ -313,6 +313,39 @@ class SQLiteStore(GraphStore):
             "stats": json.loads(row["stats_json"]),
         }
 
+    def get_entities(self) -> list[dict[str, Any]]:
+        """Nodes come out of the same JSON blob; there is nothing cheaper here."""
+        cached = self.load_graph()
+        return (cached or {}).get("graph", {}).get("nodes", []) or []
+
+    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+        """
+        Scan the serialised graph's edges in Python.
+
+        There is no index to exploit here — the graph lives as one JSON blob —
+        so this is linear in the number of edges. That cost is exactly what the
+        Neo4j backend removes.
+        """
+        cached = self.load_graph()
+        if not cached:
+            return []
+        facts: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for e in cached["graph"].get("edges", []):
+            if e["source"] in names or e["target"] in names:
+                key = (e["source"], e["relation"], e["target"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                facts.append({
+                    "text": f'{e["source"]} {e["relation"]} {e["target"]}',
+                    "quote": e.get("source_quote", "") or "",
+                    "note_id": e.get("note_id", "") or "",
+                    "confidence": float(e.get("confidence", 1.0)),
+                })
+        facts.sort(key=lambda f: f["confidence"], reverse=True)
+        return facts[:limit]
+
     # -- stats -------------------------------------------------------------
 
     def stats(self) -> dict[str, int]:
