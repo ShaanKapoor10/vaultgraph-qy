@@ -318,32 +318,56 @@ class SQLiteStore(GraphStore):
         cached = self.load_graph()
         return (cached or {}).get("graph", {}).get("nodes", []) or []
 
-    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
-        """
-        Scan the serialised graph's edges in Python.
+    MAX_DEPTH = 3
 
-        There is no index to exploit here — the graph lives as one JSON blob —
-        so this is linear in the number of edges. That cost is exactly what the
-        Neo4j backend removes.
+    def neighbourhood(
+        self, names: set[str], limit: int = 40, depth: int = 1
+    ) -> list[dict[str, Any]]:
+        """
+        Breadth-first walk over the serialised graph's edges, in Python.
+
+        There is no index to exploit — the graph lives as one JSON blob — so
+        each hop rescans every edge. That cost is exactly what the Neo4j
+        backend removes; the behaviour is kept identical so callers cannot
+        tell the two apart.
         """
         cached = self.load_graph()
-        if not cached:
+        if not cached or not names:
             return []
+        edges = cached["graph"].get("edges", [])
+        d = max(1, min(int(depth), self.MAX_DEPTH))
+
         facts: list[dict[str, Any]] = []
         seen: set[tuple] = set()
-        for e in cached["graph"].get("edges", []):
-            if e["source"] in names or e["target"] in names:
-                key = (e["source"], e["relation"], e["target"])
-                if key in seen:
+        frontier = set(names)
+        reached = set(names)
+
+        for hop in range(1, d + 1):
+            next_frontier: set[str] = set()
+            for e in edges:
+                src, tgt = e["source"], e["target"]
+                if src not in frontier and tgt not in frontier:
                     continue
-                seen.add(key)
-                facts.append({
-                    "text": f'{e["source"]} {e["relation"]} {e["target"]}',
-                    "quote": e.get("source_quote", "") or "",
-                    "note_id": e.get("note_id", "") or "",
-                    "confidence": float(e.get("confidence", 1.0)),
-                })
-        facts.sort(key=lambda f: f["confidence"], reverse=True)
+                key = (src, e["relation"], tgt)
+                if key not in seen:
+                    seen.add(key)
+                    facts.append({
+                        "text": f'{src} {e["relation"]} {tgt}',
+                        "quote": e.get("source_quote", "") or "",
+                        "note_id": e.get("note_id", "") or "",
+                        "confidence": float(e.get("confidence", 1.0)),
+                        "hops": hop,
+                    })
+                for end in (src, tgt):
+                    if end not in reached:
+                        next_frontier.add(end)
+                        reached.add(end)
+            if not next_frontier:
+                break
+            frontier = next_frontier
+
+        # Nearest first, then most confident — direct facts outrank context.
+        facts.sort(key=lambda f: (f["hops"], -f["confidence"]))
         return facts[:limit]
 
     # -- stats -------------------------------------------------------------

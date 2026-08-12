@@ -142,14 +142,18 @@ def get_entities() -> list[dict[str, Any]]:
     return get_store().get_entities()
 
 
-def neighbourhood(names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+def neighbourhood(
+    names: set[str], limit: int = 40, depth: int = 1
+) -> list[dict[str, Any]]:
     """
-    1-hop facts around the given entities, highest confidence first.
+    Facts within `depth` hops of the given entities, nearest and most
+    confident first.
 
-    Backend-dependent by design: SQLite scans every edge, Neo4j runs an
-    indexed traversal. Callers get the same {text, quote, note_id, confidence}.
+    Backend-dependent by design: SQLite walks the edge list, Neo4j runs an
+    indexed traversal. Callers get the same
+    {text, quote, note_id, confidence, hops}.
     """
-    return get_store().neighbourhood(names, limit)
+    return get_store().neighbourhood(names, limit, depth)
 
 
 # ---------------------------------------------------------------------------

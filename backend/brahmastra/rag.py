@@ -125,15 +125,36 @@ def _match_entities(question: str, nodes: list[dict[str, Any]]) -> list[dict[str
 # Subgraph → facts
 # ---------------------------------------------------------------------------
 
-def _subgraph_facts(entity_ids: set[str]) -> list[dict[str, Any]]:
+def _subgraph_facts(entity_ids: set[str], depth: int = 1) -> list[dict[str, Any]]:
     """
-    Collect 1-hop facts touching any matched entity, highest confidence first.
+    Collect facts within `depth` hops of any matched entity, nearest first.
     Each fact carries the note_id so the answer can be cited.
 
     Delegated to the store: on Neo4j this is an indexed traversal over just the
-    matched nodes' edges, rather than a Python scan of every edge in the graph.
+    reachable edges, rather than a Python scan of every edge in the graph.
     """
-    return db.neighbourhood(entity_ids, limit=MAX_FACTS)
+    return db.neighbourhood(entity_ids, limit=MAX_FACTS, depth=depth)
+
+
+# Questions whose answer lives further than one relationship away — "Sarah's
+# manager's other reports" is two hops, and at depth 1 the graph simply does
+# not contain it. Detecting the shape is cheap and avoids paying for a wider
+# traversal on questions that do not need one.
+_MULTIHOP_HINTS = (
+    "also", "else", "other", "others", "indirectly", "connected", "connection",
+    "related to", "through", "via", "chain", "path", "between", "colleague",
+    "peer", "peers", "teammate", "sibling", "downstream", "upstream",
+    "depends on", "affected", "impact", "reach",
+)
+
+
+def _wants_multihop(question: str) -> bool:
+    """True when the question implies a chain rather than a direct fact."""
+    q = _normalise(question)
+    if "'s " in question.lower() or "s' " in question.lower():
+        # Possessive chaining: "Sarah's manager", "the project's owner".
+        return True
+    return any(h in q for h in _MULTIHOP_HINTS)
 
 
 _CITE_RE = re.compile(r"\[n:([^\]]+)\]")
@@ -187,8 +208,17 @@ _GLOBAL_SYSTEM = (
 )
 
 
-def local_search(question: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
-    """Answer from the 1-hop subgraph around entities named in the question."""
+def local_search(
+    question: str, nodes: list[dict[str, Any]], depth: int | None = None
+) -> dict[str, Any]:
+    """
+    Answer from the subgraph around entities named in the question.
+
+    Depth defaults to 2 for chained questions and 1 otherwise; an explicit
+    depth from the caller always wins.
+    """
+    if depth is None:
+        depth = 2 if _wants_multihop(question) else 1
     matched = _match_entities(question, nodes)
     if not matched:
         return {
@@ -199,7 +229,7 @@ def local_search(question: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     entity_ids = {n["id"] for n in matched}
-    facts = _subgraph_facts(entity_ids)
+    facts = _subgraph_facts(entity_ids, depth=depth)
     if not facts:
         return {
             "mode": "local",
@@ -212,7 +242,11 @@ def local_search(question: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
     for i, f in enumerate(facts, 1):
         tag = f"[n:{f['note_id']}]" if f["note_id"] else ""
         quote = f'  ("{f["quote"]}")' if f["quote"] else ""
-        fact_lines.append(f"{i}. {f['text']} {tag}{quote}")
+        # Flag indirect facts so the model can tell a stated fact from one
+        # reached by following a chain, and hedge accordingly.
+        hops = f.get("hops", 1)
+        via = f" (indirect, {hops} hops)" if hops > 1 else ""
+        fact_lines.append(f"{i}. {f['text']}{via} {tag}{quote}")
 
     user = (
         f"Question: {question}\n\n"
@@ -229,6 +263,9 @@ def local_search(question: str, nodes: list[dict[str, Any]]) -> dict[str, Any]:
         "answer": answer,
         "entities": sorted(entity_ids),
         "citations": _citations(cited or fact_note_ids),
+        # Surfaced so a caller can see whether the answer used chained facts.
+        "depth": depth,
+        "facts_used": len(facts),
     }
 
 
@@ -261,12 +298,16 @@ def global_search(question: str, cached: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def answer_question(question: str, mode: str = "auto") -> dict[str, Any]:
+def answer_question(
+    question: str, mode: str = "auto", depth: int | None = None
+) -> dict[str, Any]:
     """
     Answer a natural-language question against the graph.
 
-    mode: "auto" (route by heuristic), "local", or "global".
-    Returns {mode, answer, entities, citations}.
+    mode:  "auto" (route by heuristic), "local", or "global".
+    depth: hops to traverse for local search. None picks 2 for chained
+           questions ("Sarah's manager's other reports") and 1 otherwise.
+    Returns {mode, answer, entities, citations} plus depth/facts_used on local.
     """
     question = (question or "").strip()
     if not question:
@@ -314,13 +355,13 @@ def answer_question(question: str, mode: str = "auto") -> dict[str, Any]:
         if mode == "global":
             return _global()
         if mode == "local":
-            return local_search(question, nodes)
+            return local_search(question, nodes, depth)
 
         # auto
         matched = _match_entities(question, nodes)
         if _is_global(question, matched):
             return _global()
-        return local_search(question, nodes)
+        return local_search(question, nodes, depth)
     except Exception as e:
         return {
             "mode": "error",

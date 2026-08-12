@@ -137,17 +137,25 @@ class GraphStore(ABC):
         """
 
     @abstractmethod
-    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
+    def neighbourhood(
+        self, names: set[str], limit: int = 40, depth: int = 1
+    ) -> list[dict[str, Any]]:
         """
-        1-hop facts touching any of `names`, highest confidence first.
+        Facts reachable from `names` within `depth` hops.
 
-        Each fact is {text, quote, note_id, confidence} — the shape GraphRAG
-        cites from. This is on the contract rather than done in Python by the
-        caller because it is the one operation a graph backend does natively:
-        SQLite must scan every edge, Neo4j matches an index.
+        Each fact is {text, quote, note_id, confidence, hops} — the shape
+        GraphRAG cites from. This is on the contract rather than done in Python
+        by the caller because it is the one operation a graph backend does
+        natively: SQLite must scan every edge, Neo4j matches an index.
 
-        Facts are deduplicated on (subject, relation, object) so parallel edges
-        asserting the same thing from different notes collapse to one.
+        depth=1 is the direct neighbourhood. depth>1 follows chains, which is
+        what lets a question like "who does Sarah's manager also manage?" be
+        answered — the answer is two hops away and invisible at depth 1.
+
+        Results are ordered nearest-first then by confidence, so direct facts
+        always outrank inferred context. Deduplicated on
+        (subject, relation, object) so parallel edges asserting the same thing
+        from different notes collapse to one.
         """
 
     # -- stats -------------------------------------------------------------

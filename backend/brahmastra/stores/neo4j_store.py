@@ -581,29 +581,65 @@ class Neo4jStore(GraphStore):
             })
         return out
 
-    def neighbourhood(self, names: set[str], limit: int = 40) -> list[dict[str, Any]]:
-        """
-        Native 1-hop traversal — the operation this backend exists for.
+    MAX_DEPTH = 3
 
-        Matches on the :Entity name index and walks only the edges attached to
-        those nodes, instead of scanning every edge in the graph.
+    def neighbourhood(
+        self, names: set[str], limit: int = 40, depth: int = 1
+    ) -> list[dict[str, Any]]:
+        """
+        Native traversal — the operation this backend exists for.
+
+        Matches on the :Entity name index and walks only the edges reachable
+        from those nodes, instead of scanning every edge in the graph. At
+        depth>1 it follows chains, which is what makes multi-hop questions
+        answerable at all.
         """
         if not names:
             return []
-        rows = self._run(
-            """
-            MATCH (e:Entity)-[r]-(o:Entity)
-            WHERE e.name IN $names AND type(r) <> 'IN_CLUSTER'
-            WITH startNode(r) AS s, endNode(r) AS t, r
-            RETURN DISTINCT s.name AS subject, type(r) AS relation, t.name AS object,
-                   coalesce(r.sourceQuote, '') AS quote,
-                   coalesce(r.sourceNoteId, '') AS note_id,
-                   coalesce(r.confidence, 1.0) AS confidence
-            ORDER BY confidence DESC
-            LIMIT $limit
-            """,
-            names=sorted(names), limit=limit,
-        )
+        # depth is interpolated because Cypher cannot parameterise the bounds of
+        # a variable-length pattern. It is coerced to an int and clamped, so
+        # nothing caller-controlled reaches the query text. MAX_DEPTH exists
+        # because path counts grow sharply per hop.
+        d = max(1, min(int(depth), self.MAX_DEPTH))
+
+        if d == 1:
+            rows = self._run(
+                """
+                MATCH (e:Entity)-[r]-(o:Entity)
+                WHERE e.name IN $names AND type(r) <> 'IN_CLUSTER'
+                WITH startNode(r) AS s, endNode(r) AS t, r
+                RETURN DISTINCT s.name AS subject, type(r) AS relation, t.name AS object,
+                       coalesce(r.sourceQuote, '') AS quote,
+                       coalesce(r.sourceNoteId, '') AS note_id,
+                       coalesce(r.confidence, 1.0) AS confidence,
+                       1 AS hops
+                ORDER BY confidence DESC
+                LIMIT $limit
+                """,
+                names=sorted(names), limit=limit,
+            )
+        else:
+            # Every relationship along any path of length <= d from a seed,
+            # tagged with the shortest path length it appeared on so direct
+            # facts can outrank distant ones.
+            rows = self._run(
+                f"""
+                MATCH p = (e:Entity)-[*1..{d}]-(o:Entity)
+                WHERE e.name IN $names
+                  AND none(rel IN relationships(p) WHERE type(rel) = 'IN_CLUSTER')
+                UNWIND relationships(p) AS r
+                WITH r, startNode(r) AS s, endNode(r) AS t, min(length(p)) AS hops
+                RETURN DISTINCT s.name AS subject, type(r) AS relation, t.name AS object,
+                       coalesce(r.sourceQuote, '') AS quote,
+                       coalesce(r.sourceNoteId, '') AS note_id,
+                       coalesce(r.confidence, 1.0) AS confidence,
+                       hops
+                ORDER BY hops ASC, confidence DESC
+                LIMIT $limit
+                """,
+                names=sorted(names), limit=limit,
+            )
+
         facts: list[dict[str, Any]] = []
         seen: set[tuple] = set()
         for r in rows:
@@ -617,6 +653,7 @@ class Neo4jStore(GraphStore):
                 "quote": r["quote"],
                 "note_id": r["note_id"],
                 "confidence": float(r["confidence"] or 1.0),
+                "hops": int(r["hops"]),
             })
         return facts
 

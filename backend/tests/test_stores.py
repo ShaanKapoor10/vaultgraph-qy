@@ -95,6 +95,37 @@ def test_neighbourhood_is_confidence_ranked_and_carries_citations():
     assert facts[0]["quote"]
 
 
+def test_neighbourhood_depth_2_reaches_what_depth_1_cannot():
+    """The multi-hop case: Mei's other report is invisible one hop from Sarah."""
+    db.cache_graph(GRAPH, STATS)
+    one = {f["text"] for f in db.neighbourhood({"Sarah"}, depth=1)}
+    two = {f["text"] for f in db.neighbourhood({"Sarah"}, depth=2)}
+
+    assert "Mei owns Apollo" not in one, "not reachable in one hop from Sarah"
+    assert "Mei owns Apollo" in two, "reachable via Sarah -> Mei"
+    # Widening must never lose facts, only add.
+    assert one <= two
+
+
+def test_neighbourhood_tags_hop_distance_and_ranks_nearest_first():
+    db.cache_graph(GRAPH, STATS)
+    facts = db.neighbourhood({"Sarah"}, depth=2)
+    by_text = {f["text"]: f for f in facts}
+    assert by_text["Sarah reports_to Mei"]["hops"] == 1
+    assert by_text["Mei owns Apollo"]["hops"] == 2
+    # Direct facts must outrank inferred ones regardless of confidence:
+    # "Mei owns Apollo" has lower confidence AND is further away.
+    hops = [f["hops"] for f in facts]
+    assert hops == sorted(hops), "nearest facts must come first"
+
+
+def test_neighbourhood_depth_is_clamped_not_unbounded():
+    db.cache_graph(GRAPH, STATS)
+    # A caller asking for depth 99 must not trigger an unbounded traversal.
+    deep = db.neighbourhood({"Sarah"}, depth=99)
+    assert all(f["hops"] <= get_store().MAX_DEPTH for f in deep)
+
+
 def test_neighbourhood_respects_limit_and_empty_input():
     db.cache_graph(GRAPH, STATS)
     assert len(db.neighbourhood({"Sarah", "Mei"}, limit=1)) == 1
