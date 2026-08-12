@@ -213,6 +213,24 @@ def _process_page(
 # Main sync function — auto-detects database vs page mode
 # ---------------------------------------------------------------------------
 
+def _notion_target_for_current_workspace() -> str | None:
+    """
+    The Notion source the active workspace syncs from.
+
+    Per-workspace value wins; the global NOTION_DATABASE_ID is the fallback.
+    Never raises: a workspace registry that cannot be read (an older backend,
+    or a store without workspace support) falls back to the global setting
+    rather than failing the sync.
+    """
+    try:
+        ws = db.get_workspace(db.workspace())
+        if ws and ws.get("notion_database_id"):
+            return ws["notion_database_id"]
+    except Exception:
+        pass
+    return os.environ.get("NOTION_DATABASE_ID") or None
+
+
 def run_sync() -> dict[str, Any]:
     """
     Sync notes from Notion into SQLite.
@@ -233,10 +251,14 @@ def run_sync() -> dict[str, Any]:
         ) from e
 
     token = os.environ.get("NOTION_TOKEN")
-    target_id = os.environ.get("NOTION_DATABASE_ID")
-
     if not token:
         raise RuntimeError("NOTION_TOKEN env var not set")
+
+    # Each workspace pulls from its OWN Notion source, so an "office" graph can
+    # sync from the work Notion while a personal one syncs from another. The
+    # global NOTION_DATABASE_ID is the fallback, which keeps single-workspace
+    # setups working with no configuration change.
+    target_id = _notion_target_for_current_workspace()
 
     client = Client(auth=token)
     db.init_db()

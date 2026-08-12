@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import ssl
 from datetime import datetime, timezone
 from pathlib import Path
@@ -80,6 +81,41 @@ def relation_to_type(relation: str) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+class WorkspaceIsolationError(RuntimeError):
+    """A query touched partitioned data without scoping it to a workspace."""
+
+
+# Labels that carry workspaceId. :Workspace itself is the registry and is
+# global by definition, so it is not in this set.
+_PARTITIONED = re.compile(r":(Note|Entity|Mention|Cluster|GraphMeta)\b")
+
+# Schema and admin statements name labels but cannot read or write rows, so a
+# workspace predicate would be meaningless in them.
+_DDL = re.compile(
+    r"^\s*(CREATE\s+(CONSTRAINT|INDEX|VECTOR|FULLTEXT|RANGE)|DROP\s+(CONSTRAINT|INDEX)"
+    r"|SHOW\s+|CALL\s+db\.(index|awaitIndex|create)\b|MERGE\s*\(\s*\w*\s*:Workspace)",
+    re.IGNORECASE,
+)
+
+
+def _requires_workspace_scope(cypher: str) -> bool:
+    """
+    True if this query reads or writes partitioned data without naming
+    workspaceId.
+
+    This is the structural half of the isolation guarantee. Binding the store
+    to a workspace is not enough on its own: property-based partitioning fails
+    OPEN, so a single query that forgets the predicate silently returns — or
+    overwrites — another workspace's data, exactly as happened once here. A
+    forgotten filter now raises instead.
+    """
+    if _DDL.match(cypher):
+        return False
+    if not _PARTITIONED.search(cypher):
+        return False
+    return "workspaceId" not in cypher
 
 
 # Characters Lucene treats as operators. A natural-language question routinely
@@ -219,7 +255,22 @@ class Neo4jStore(GraphStore):
                 self._driver = GraphDatabase.driver(self._uri, **kwargs)
         return self._driver
 
-    def _run(self, cypher: str, **params) -> list[dict[str, Any]]:
+    def _run(self, cypher: str, *, unscoped: bool = False, **params) -> list[dict[str, Any]]:
+        """
+        Run Cypher, refusing anything that touches partitioned data unscoped.
+
+        Pass unscoped=True only for a query that genuinely spans workspaces —
+        cross-workspace search, or the migration that tags untagged nodes.
+        Making that explicit means an accidental omission is an error, while a
+        deliberate one is visible at the call site.
+        """
+        if not unscoped and _requires_workspace_scope(cypher):
+            raise WorkspaceIsolationError(
+                "Refusing to run a query that touches partitioned data without "
+                "a workspaceId predicate — it would read or write across "
+                "workspaces. Add the filter, or pass unscoped=True if crossing "
+                f"workspaces is intended.\n\n{cypher.strip()[:400]}"
+            )
         with self.driver.session(database=self._database) as s:
             return [r.data() for r in s.run(cypher, **params)]
 
@@ -359,7 +410,7 @@ class Neo4jStore(GraphStore):
             ORDER BY matched DESC, n.lastEdited DESC
             LIMIT $limit
             """,
-            terms=terms, wss=workspaces, limit=limit,
+            terms=terms, wss=workspaces, limit=limit, unscoped=True,
         )
         return self._note_rows(rows)
         # Vector indexes are created separately: an older server without vector

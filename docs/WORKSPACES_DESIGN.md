@@ -38,11 +38,30 @@ Chosen over the alternatives because:
 Property-based isolation has one failure mode: **a forgotten filter leaks one
 workspace's data into another.** That is a correctness bug, not a style issue.
 
-Containment: **callers never pass a workspace filter.** The store is bound to a
-workspace at construction, and every query it issues adds the predicate itself.
-There is no code path where a caller can forget, because callers cannot express
-the filter at all. Cross-workspace reads go through separate, explicitly-named
-methods.
+This is not hypothetical — it happened. The store factory built the Neo4j
+store without forwarding the requested workspace, so `for_workspace("office")`
+silently bound to `default` and a write meant for one graph overwrote a note in
+another. Nothing errored.
+
+Containment is therefore in three layers, none of which relies on remembering:
+
+1. **Callers never pass a workspace filter.** The store is bound at
+   construction and every query adds the predicate itself, so a caller cannot
+   express — and therefore cannot forget — the filter. Cross-workspace reads go
+   through separately named methods.
+2. **The factory resolves the workspace and verifies the binding.** It never
+   lets a backend decide what "no workspace" means, and it raises
+   `WorkspaceBindingError` if the constructed store bound to anything other
+   than what was asked for. A backend that drops the argument now fails at
+   construction, before it can write.
+3. **Unscoped queries are refused at runtime.** `Neo4jStore._run` rejects any
+   Cypher that touches a partitioned label without naming `workspaceId`,
+   raising `WorkspaceIsolationError`. Genuinely cross-workspace queries pass
+   `unscoped=True`, which makes the exception visible at the call site. This is
+   what turns a forgotten filter from a silent leak into an error.
+
+Layer 1 is convention; layers 2 and 3 are enforcement. The bug above defeated
+layer 1 alone, which is why the other two exist.
 
 ### Why a single store, not one SQLite file per workspace
 

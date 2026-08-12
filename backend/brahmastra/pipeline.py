@@ -106,9 +106,21 @@ def _missing_notion_config(need_database: bool) -> list[str]:
     missing = []
     if not os.environ.get("NOTION_TOKEN"):
         missing.append("NOTION_TOKEN")
-    if need_database and not os.environ.get("NOTION_DATABASE_ID"):
-        missing.append("NOTION_DATABASE_ID")
+    if need_database and not _notion_source():
+        # Not just the env var: a workspace may carry its own Notion source,
+        # and skipping sync because the GLOBAL one is unset would leave that
+        # workspace never pulling anything.
+        missing.append("NOTION_DATABASE_ID (global or per-workspace)")
     return missing
+
+
+def _notion_source() -> str | None:
+    """This workspace's Notion source, falling back to the global setting."""
+    try:
+        from brahmastra.sync import _notion_target_for_current_workspace
+        return _notion_target_for_current_workspace()
+    except Exception:
+        return os.environ.get("NOTION_DATABASE_ID") or None
 
 
 def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:

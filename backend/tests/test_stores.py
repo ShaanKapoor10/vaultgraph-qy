@@ -331,3 +331,64 @@ def test_workspace_binding_survives_env_change():
         assert bound.workspace == "apollo"
     finally:
         os.environ.pop("BRAHMASTRA_WORKSPACE", None)
+
+
+def test_factory_refuses_a_store_bound_to_the_wrong_workspace(monkeypatch):
+    """
+    The structural fix for the leak: a backend that ignores the workspace it
+    was given fails at construction, before it can write to the wrong graph.
+    """
+    from brahmastra.stores import WorkspaceBindingError, _build
+    import brahmastra.stores as stores
+
+    class Disobedient(SQLiteStore):
+        def __init__(self, workspace=None):
+            super().__init__(workspace="default")  # ignores the request
+
+    monkeypatch.setattr(stores, "SQLiteStore", Disobedient)
+    with pytest.raises(WorkspaceBindingError, match="office"):
+        _build("sqlite", "office")
+
+
+# ---------------------------------------------------------------------------
+# Per-workspace Notion source
+# ---------------------------------------------------------------------------
+
+def test_notion_source_prefers_the_workspace_over_the_global(monkeypatch):
+    from brahmastra.sync import _notion_target_for_current_workspace as target
+
+    monkeypatch.setenv("NOTION_DATABASE_ID", "GLOBAL")
+    # No per-workspace value -> the global one, so existing setups are unaffected.
+    assert target() == "GLOBAL"
+
+    db.create_workspace("office", name="Office", notion_database_id="OFFICE")
+    monkeypatch.setenv("BRAHMASTRA_WORKSPACE", "office")
+    reset_store()
+    assert target() == "OFFICE", "a workspace must pull from its own Notion source"
+
+    # A workspace without its own source still falls back.
+    db.create_workspace("apollo", name="Apollo")
+    monkeypatch.setenv("BRAHMASTRA_WORKSPACE", "apollo")
+    reset_store()
+    assert target() == "GLOBAL"
+
+
+def test_pipeline_runs_sync_when_only_a_per_workspace_source_exists(monkeypatch):
+    """
+    Checking only the env var would skip sync for a workspace that has its own
+    source, leaving it never pulling anything.
+    """
+    from brahmastra.pipeline import _missing_notion_config
+
+    monkeypatch.setenv("NOTION_TOKEN", "tok")
+    monkeypatch.delenv("NOTION_DATABASE_ID", raising=False)
+
+    db.create_workspace("office", name="Office", notion_database_id="OFFICE")
+    monkeypatch.setenv("BRAHMASTRA_WORKSPACE", "office")
+    reset_store()
+    assert _missing_notion_config(need_database=True) == []
+
+    db.create_workspace("apollo", name="Apollo")
+    monkeypatch.setenv("BRAHMASTRA_WORKSPACE", "apollo")
+    reset_store()
+    assert _missing_notion_config(need_database=True), "no source anywhere -> skip"

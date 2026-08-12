@@ -25,21 +25,44 @@ def backend_name() -> str:
     return os.environ.get("GRAPH_BACKEND", "sqlite").lower().strip() or "sqlite"
 
 
-def _build(name: str, workspace: str | None) -> GraphStore:
+class WorkspaceBindingError(RuntimeError):
+    """A backend did not bind to the workspace it was given."""
+
+
+def _build(name: str, workspace: str) -> GraphStore:
+    """
+    Construct a store bound to `workspace`, and refuse to return one that is not.
+
+    The workspace is always resolved by the caller and passed explicitly, never
+    left for the backend to default. That defaulting is what made the original
+    leak possible: Neo4jStore was constructed with no argument, quietly fell
+    back to the process default, and writes meant for one graph landed in
+    another — overwriting a real note before a test caught it.
+
+    The post-check turns that failure from silent to loud. A backend that
+    ignores or mishandles the argument now fails at construction, before it can
+    write anything, rather than corrupting another workspace's data.
+    """
     if name == "sqlite":
-        return SQLiteStore(workspace=workspace)
-    if name == "neo4j":
+        store: GraphStore = SQLiteStore(workspace=workspace)
+    elif name == "neo4j":
         # Imported lazily: the neo4j driver is an optional dependency, so a
         # sqlite-only install must not need it present.
         from brahmastra.stores.neo4j_store import Neo4jStore
-        # The workspace MUST be forwarded. Dropping it here silently bound
-        # every requested workspace to the process default, so writes meant
-        # for one graph landed in another — the exact leak property-based
-        # partitioning is vulnerable to.
-        return Neo4jStore(workspace=workspace)
-    raise ValueError(
-        f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
-    )
+        store = Neo4jStore(workspace=workspace)
+    else:
+        raise ValueError(
+            f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
+        )
+
+    bound = getattr(store, "workspace", None)
+    if bound != workspace:
+        raise WorkspaceBindingError(
+            f"{type(store).__name__} was asked for workspace {workspace!r} but "
+            f"bound to {bound!r}. Refusing to return a store that would write "
+            f"to the wrong graph."
+        )
+    return store
 
 
 def get_store(workspace: str | None = None) -> GraphStore:
@@ -55,17 +78,20 @@ def get_store(workspace: str | None = None) -> GraphStore:
     (which tests do) rebuilds rather than silently returning the previous one.
     """
     global _store, _store_backend
+    from brahmastra.workspace import current_workspace
+
     name = backend_name()
+    # Resolve here so a backend never has to decide what "no workspace" means.
+    target = workspace if workspace is not None else current_workspace()
 
     if workspace is not None:
-        return _build(name, workspace)
+        return _build(name, target)
 
-    from brahmastra.workspace import current_workspace
-    key = (name, current_workspace())
+    key = (name, target)
     if _store is not None and _store_backend == key:
         return _store
 
-    store = _build(name, None)
+    store = _build(name, target)
     _store, _store_backend = store, key
     return store
 
