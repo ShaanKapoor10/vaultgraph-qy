@@ -40,8 +40,28 @@ from pathlib import Path
 from typing import Any
 
 _BACKEND = Path(__file__).resolve().parent.parent
-QUEUE_DIR = _BACKEND / "data" / "checkpoints"
-OFFSETS = QUEUE_DIR / ".offsets.json"
+
+
+def queue_dir() -> Path:
+    """
+    Where captures wait to be distilled.
+
+    Resolved per call, never at import, so a test can redirect it. Binding this
+    at import time is how DB_PATH once let the suite run against the production
+    database: the value was already fixed before any fixture could change it.
+    Here the stakes are the same — a test that drains the real queue distils a
+    genuine conversation into a temp database and then deletes the capture.
+    """
+    override = os.environ.get("BRAHMASTRA_CHECKPOINT_DIR")
+    return Path(override) if override else _BACKEND / "data" / "checkpoints"
+
+
+def _offsets_path() -> Path:
+    return queue_dir() / ".offsets.json"
+
+
+def _log_path() -> Path:
+    return queue_dir() / "checkpoint.log"
 
 # Bound the prompt: a long session can be megabytes, and only the tail is new
 # knowledge anyway. Characters, taken from the END of the unseen turns.
@@ -68,9 +88,6 @@ DISTIL_SYSTEM = (
 )
 
 
-LOG = QUEUE_DIR / "checkpoint.log"
-
-
 def _log(message: str) -> None:
     """
     Record why a checkpoint did not happen.
@@ -80,9 +97,9 @@ def _log(message: str) -> None:
     place that difference is visible, so it must not itself throw.
     """
     try:
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+        queue_dir().mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        with open(LOG, "a", encoding="utf-8") as fh:
+        with open(_log_path(), "a", encoding="utf-8") as fh:
             fh.write(f"{stamp}  {message}\n")
     except OSError:
         pass
@@ -162,14 +179,14 @@ def read_transcript(path: str | Path, start_line: int = 0) -> tuple[str, int]:
 
 def _load_offsets() -> dict[str, int]:
     try:
-        return json.loads(OFFSETS.read_text(encoding="utf-8"))
+        return json.loads(_offsets_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
 
 
 def _save_offsets(offsets: dict[str, int]) -> None:
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    OFFSETS.write_text(json.dumps(offsets, indent=2), encoding="utf-8")
+    queue_dir().mkdir(parents=True, exist_ok=True)
+    _offsets_path().write_text(json.dumps(offsets, indent=2), encoding="utf-8")
 
 
 def capture(payload: dict[str, Any]) -> Path | None:
@@ -193,8 +210,8 @@ def capture(payload: dict[str, Any]) -> Path | None:
     if len(convo) < MIN_TRANSCRIPT_CHARS:
         return None
 
-    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    path = QUEUE_DIR / f"{int(time.time())}-{session[:8]}.json"
+    queue_dir().mkdir(parents=True, exist_ok=True)
+    path = queue_dir() / f"{int(time.time())}-{session[:8]}.json"
     path.write_text(
         json.dumps(
             {
@@ -299,13 +316,14 @@ def drain() -> dict[str, Any]:
     Distil every queued capture into a note. A file is deleted only once its
     note is stored, so an LLM outage delays checkpointing instead of losing it.
     """
-    if not QUEUE_DIR.exists():
-        return {"stored": 0, "queued": 0}
+    queue = queue_dir()
+    if not queue.exists():
+        return {"stored": 0, "skipped": 0, "failed": [], "queued": 0}
 
     from brahmastra import db
 
     stored, skipped, failed = 0, 0, []
-    files = sorted(p for p in QUEUE_DIR.glob("*.json") if p.name != OFFSETS.name)
+    files = sorted(_captures())
 
     for path in files:
         try:
@@ -345,14 +363,21 @@ def drain() -> dict[str, Any]:
         path.unlink(missing_ok=True)
 
     return {"stored": stored, "skipped": skipped, "failed": failed,
-            "queued": len(list(QUEUE_DIR.glob("*.json"))) - (1 if OFFSETS.exists() else 0)}
+            "queued": pending_count()}
+
+
+def _captures() -> list[Path]:
+    """Queue files, excluding the offsets bookkeeping file."""
+    queue = queue_dir()
+    if not queue.exists():
+        return []
+    offsets = _offsets_path().name
+    return [p for p in queue.glob("*.json") if p.name != offsets]
 
 
 def pending_count() -> int:
     """Captures waiting to be distilled."""
-    if not QUEUE_DIR.exists():
-        return 0
-    return sum(1 for p in QUEUE_DIR.glob("*.json") if p.name != OFFSETS.name)
+    return len(_captures())
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +392,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if "--status" in argv:
-        print(json.dumps({"queued": pending_count(), "queue_dir": str(QUEUE_DIR)}, indent=2))
+        print(json.dumps({"queued": pending_count(), "queue_dir": str(queue_dir())}, indent=2))
         return 0
 
     # Hook mode. Claude Code sends the event as JSON on stdin. Nothing here may

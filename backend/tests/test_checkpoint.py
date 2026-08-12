@@ -24,10 +24,7 @@ def cp(monkeypatch, tmp_path):
 
     from brahmastra import checkpoint
     importlib.reload(checkpoint)
-    queue = tmp_path / "checkpoints"
-    monkeypatch.setattr(checkpoint, "QUEUE_DIR", queue)
-    monkeypatch.setattr(checkpoint, "OFFSETS", queue / ".offsets.json")
-    monkeypatch.setattr(checkpoint, "LOG", queue / "checkpoint.log")
+    monkeypatch.setenv("BRAHMASTRA_CHECKPOINT_DIR", str(tmp_path / "checkpoints"))
     return checkpoint
 
 
@@ -160,6 +157,21 @@ def test_hook_never_fails_the_session(cp, tmp_path, capsys):
     monkey(json.dumps({"session_id": "s5", "transcript_path": str(tmp_path / "gone.jsonl")}))
     assert cp.main([]) == 0
 
-    log = (cp.QUEUE_DIR / "checkpoint.log").read_text(encoding="utf-8")
+    log = (cp.queue_dir() / "checkpoint.log").read_text(encoding="utf-8")
     assert "could not parse hook payload" in log
     assert "nothing new to checkpoint" in log
+
+
+def test_queue_location_is_resolved_per_call(cp, tmp_path, monkeypatch):
+    """
+    Regression: the queue path was a module constant fixed at import, so
+    `run_pipeline` inside a test drained the REAL queue — distilling a genuine
+    conversation into a temp database and deleting the capture. Same failure as
+    the DB_PATH bug that once pointed the suite at the production database.
+    """
+    elsewhere = tmp_path / "moved"
+    monkeypatch.setenv("BRAHMASTRA_CHECKPOINT_DIR", str(elsewhere))
+    assert cp.queue_dir() == elsewhere
+
+    monkeypatch.delenv("BRAHMASTRA_CHECKPOINT_DIR")
+    assert cp.queue_dir() == cp._BACKEND / "data" / "checkpoints"
