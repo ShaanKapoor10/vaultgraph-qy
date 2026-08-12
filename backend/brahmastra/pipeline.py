@@ -9,6 +9,7 @@ Called by:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 from datetime import datetime, timezone
@@ -20,11 +21,27 @@ from brahmastra import db
 # Cross-process lock so the backend "run pipeline" button and the live_sync
 # watcher can't run the pipeline simultaneously (concurrent SQLite writers
 # otherwise cause "database is locked" 500s).
-_LOCK = Path(__file__).resolve().parent.parent / "data" / ".pipeline.lock"
+_LOCK_DIR = Path(__file__).resolve().parent.parent / "data"
 _LOCK_STALE_SECS = 900  # steal a lock older than 15 min (crashed run)
 
 
+def _lock_path() -> Path:
+    """
+    One lock per store, resolved at call time.
+
+    A single fixed lock made every pipeline run mutually exclusive regardless
+    of which database it touched: a run against one store blocked an unrelated
+    store, and a test with its own temp DB blocked on a real background run.
+    Keying the lock to the store's identity keeps the guarantee that matters —
+    no two runs against the SAME data — without serialising everything.
+    """
+    from brahmastra import db
+    digest = hashlib.sha1(db.describe().encode("utf-8")).hexdigest()[:12]
+    return _LOCK_DIR / f".pipeline-{digest}.lock"
+
+
 def _acquire_lock() -> bool:
+    _LOCK = _lock_path()
     _LOCK.parent.mkdir(parents=True, exist_ok=True)
     try:
         fd = os.open(str(_LOCK), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -43,7 +60,7 @@ def _acquire_lock() -> bool:
 
 def _release_lock() -> None:
     try:
-        _LOCK.unlink()
+        _lock_path().unlink()
     except FileNotFoundError:
         pass
 

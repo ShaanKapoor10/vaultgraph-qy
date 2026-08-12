@@ -242,6 +242,18 @@ def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict
 # Validation
 # ---------------------------------------------------------------------------
 
+# Words a model uses to mean "I don't know", which must never become entities.
+_PLACEHOLDERS = frozenset({
+    "unknown", "none", "null", "n/a", "na", "nil", "unspecified", "unnamed",
+    "not specified", "not mentioned", "not stated", "tbd", "todo", "-", "?",
+    "someone", "something", "unknown entity", "unknown person",
+})
+
+
+def _is_placeholder(text: str) -> bool:
+    return str(text or "").strip().lower() in _PLACEHOLDERS
+
+
 def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     """
     Normalise a model-produced triple onto the ontology.
@@ -263,6 +275,12 @@ def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None
         return None, "missing_fields"
     if not str(t.get("subject_text", "")).strip() or not str(t.get("object_text", "")).strip():
         return None, "empty_endpoint"
+    # Models emit placeholders when they cannot find a value — "Shaan Kapoor
+    # employed_by Unknown". These are not entities: they create a junk node,
+    # and on a functional relation they read as a second value and so fire a
+    # FALSE contradiction against the real one.
+    if _is_placeholder(t["subject_text"]) or _is_placeholder(t["object_text"]):
+        return None, "placeholder_entity"
 
     try:
         confidence = float(t.get("confidence", 1.0))
