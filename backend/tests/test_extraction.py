@@ -30,6 +30,9 @@ VALID_TRIPLES = [
     }
 ]
 
+# Both of these are coercible: they carry a real subject and object, so the
+# fact survives as `related_to`. Contrast with genuinely unusable input
+# (empty endpoint, sub-threshold confidence), which is still dropped.
 INVALID_TRIPLES = [
     {
         "subject_text": "Alice",
@@ -69,7 +72,16 @@ def test_extract_note_happy_path(temp_db, monkeypatch):
     assert db.get_note("n1")["extraction_status"] == "done"
 
 
-def test_extract_note_filters_invalid_triples(temp_db, monkeypatch):
+def test_extract_note_coerces_rather_than_discarding(temp_db, monkeypatch):
+    """
+    An off-ontology relation must degrade, not delete the fact.
+
+    Both fixtures used to be dropped outright: one has a relation outside the
+    ontology, the other a real relation with an argument type it does not
+    admit. Dropping them lost the connection entirely — the reason
+    "Sapan works at Veraxion" left no Veraxion entity in the graph. They are
+    now kept as `related_to`, which is defined over any types.
+    """
     db = temp_db
     db.upsert_note("n2", "T", "C", mark_pending=True)
     note = db.get_note("n2")
@@ -82,8 +94,20 @@ def test_extract_note_filters_invalid_triples(temp_db, monkeypatch):
     with patch.object(extraction, "_extract_with_llm", return_value=INVALID_TRIPLES):
         result = extraction.extract_note(note)
 
-    assert result["triples_added"] == 0
-    assert result["triples_skipped"] == 2
+    assert result["triples_added"] == 2, "facts must survive, not be discarded"
+    assert result["triples_skipped"] == 0
+
+    stored = db.get_all_triples()
+    assert {t["relation"] for t in stored} == {"related_to"}
+    # The endpoints must be untouched — degrading the relation must not
+    # silently alter who the fact is about.
+    assert {(t["subject_text"], t["object_text"]) for t in stored} == {("Alice", "Bob"), ("X", "Y")}
+
+    # And the coercion is reported, so an ontology gap is visible rather than
+    # silent: a relation that keeps appearing here is evidence to add it.
+    reasons = " ".join(result["coercions"])
+    assert "unmapped_relation:invalid_relation" in reasons
+    assert "domain_range:reports_to" in reasons
 
 
 def test_extract_note_low_confidence_filtered(temp_db, monkeypatch):

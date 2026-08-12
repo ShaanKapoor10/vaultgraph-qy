@@ -29,7 +29,9 @@ if _ENV.exists():
         pass
 
 from brahmastra import db
-from brahmastra.ontology import ENTITY_TYPES, RELATION_NAMES, RELATIONS, is_valid_triple
+from brahmastra.ontology import (
+    ENTITY_TYPES, RELATION_NAMES, RELATIONS, is_valid_triple, normalise_relation,
+)
 
 # ---------------------------------------------------------------------------
 # Prompt construction
@@ -71,6 +73,13 @@ relationship, fact, dependency, and connection in the text.
 ✓ GOOD: ("pipeline.py", "part_of", "Brahmastra backend")
 ✓ GOOD: ("Claude 3.5 Haiku", "provides", "entity extraction")
 ✓ GOOD: ("Brahmastra", "created_by", "Shaan Kapoor")
+
+━━ PEOPLE AND ORGANISATIONS ━━
+✗ BAD:  ("Sapan", "related_to", "Shaan Kapoor")     ← loses where he works
+✓ GOOD: ("Sapan", "employed_by", "Veraxion")        ← name the organisation
+Use employed_by for "works at / works for / is employed by" an organisation.
+Use member_of for belonging to a team, group or body without employment.
+Always emit the organisation as its own entity of type organisation.
 
 Return ONLY a JSON object (no markdown, no extra text):
 {{
@@ -233,23 +242,75 @@ def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict
 # Validation
 # ---------------------------------------------------------------------------
 
-def _validate_triple(t: dict[str, Any]) -> bool:
-    """Return True if the triple passes ontology constraints."""
+def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    Normalise a model-produced triple onto the ontology.
+
+    Returns (triple, coercion_reason). A None triple means genuinely
+    unusable — malformed, or below the confidence floor.
+
+    This replaces a hard validate-and-drop. Dropping meant a relation outside
+    the ontology, or a right relation with the wrong argument types, deleted
+    the fact entirely: "Sapan works at Veraxion" failed and left no Veraxion
+    entity at all. A strict core is worth keeping for domain/range checks and
+    the `functional` flag contradiction detection needs, but it should degrade
+    a fact rather than destroy it. Unmappable relations become `related_to`,
+    which is defined over any types, so the connection survives even when its
+    precise meaning does not.
+    """
     required = {"subject_text", "subject_type", "relation", "object_text", "object_type"}
     if not required.issubset(t.keys()):
-        return False
-    if t["subject_type"] not in ENTITY_TYPES:
-        return False
-    if t["object_type"] not in ENTITY_TYPES:
-        return False
-    if t["relation"] not in RELATION_NAMES:
-        return False
-    if not is_valid_triple(t["subject_type"], t["relation"], t["object_type"]):
-        return False
-    confidence = float(t.get("confidence", 1.0))
-    if confidence < 0.4:   # drop very low confidence triples
-        return False
-    return True
+        return None, "missing_fields"
+    if not str(t.get("subject_text", "")).strip() or not str(t.get("object_text", "")).strip():
+        return None, "empty_endpoint"
+
+    try:
+        confidence = float(t.get("confidence", 1.0))
+    except (TypeError, ValueError):
+        confidence = 1.0
+    if confidence < 0.4:
+        return None, "low_confidence"
+
+    out = dict(t)
+    # An unrecognised entity type becomes 'unknown' rather than voiding the
+    # fact; most relations admit 'unknown' on at least one side.
+    if out["subject_type"] not in ENTITY_TYPES:
+        out["subject_type"] = "unknown"
+    if out["object_type"] not in ENTITY_TYPES:
+        out["object_type"] = "unknown"
+
+    reason: str | None = None
+    canonical, inverted = normalise_relation(out["relation"])
+
+    if canonical is None:
+        reason = f"unmapped_relation:{str(out['relation']).strip().lower()}"
+        out["relation"] = "related_to"
+    else:
+        if canonical != out["relation"]:
+            reason = f"alias:{str(out['relation']).strip().lower()}->{canonical}"
+        out["relation"] = canonical
+        if inverted:
+            # The alias stated the relation backwards; swap so the stored fact
+            # matches the note. "Mei manages Sarah" -> "Sarah reports_to Mei".
+            out["subject_text"], out["object_text"] = out["object_text"], out["subject_text"]
+            out["subject_type"], out["object_type"] = out["object_type"], out["subject_type"]
+
+    if not is_valid_triple(out["subject_type"], out["relation"], out["object_type"]):
+        # Right idea, wrong argument types. Keep the association as a weak
+        # link instead of deleting it.
+        if out["relation"] != "related_to":
+            reason = (
+                f"domain_range:{out['relation']}"
+                f"({out['subject_type']}->{out['object_type']})"
+            )
+            out["relation"] = "related_to"
+    return out, reason
+
+
+def _validate_triple(t: dict[str, Any]) -> bool:
+    """Kept for callers/tests that only need a yes/no verdict."""
+    triple, _ = _coerce_triple(t)
+    return triple is not None
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +332,17 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
     # Delete previous triples for this note before re-inserting
     db.delete_triples_for_note(note_id)
 
-    valid = [t for t in raw if _validate_triple(t)]
+    valid: list[dict[str, Any]] = []
+    coercions: list[str] = []
+    for t in raw:
+        triple, reason = _coerce_triple(t)
+        if triple is None:
+            # Only genuinely unusable facts are dropped now.
+            coercions.append(reason or "dropped")
+            continue
+        if reason:
+            coercions.append(reason)
+        valid.append(triple)
     skipped = len(raw) - len(valid)
 
     # Tag each triple with the source note id
@@ -282,7 +353,14 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
         db.insert_triples(valid)
 
     db.mark_note_done(note_id)
-    return {"triples_added": len(valid), "triples_skipped": skipped, "error": None}
+    return {
+        "triples_added": len(valid),
+        "triples_skipped": skipped,
+        # Surfaced so ontology gaps are visible instead of silent: a relation
+        # that keeps showing up as unmapped is evidence it should be added.
+        "coercions": coercions,
+        "error": None,
+    }
 
 
 def run_extraction(full: bool = False) -> dict[str, Any]:

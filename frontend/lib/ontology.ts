@@ -17,6 +17,8 @@ export type RelationType =
   | "scheduled_for"
   | "located_in"
   | "blocks"
+  | "employed_by"
+  | "member_of"
   | "related_to"
 
 export interface RelationDef {
@@ -40,6 +42,8 @@ export const ONTOLOGY: Record<RelationType, RelationDef> = {
   scheduled_for:   { functional: true,  description: "X is planned for date Y" },
   located_in:      { functional: true,  description: "X is physically or logically located/hosted in Y" },
   blocks:          { functional: false, description: "X prevents Y from progressing" },
+  employed_by:     { functional: true,  description: "person works at / is employed by an organisation" },
+  member_of:       { functional: false, description: "X belongs to a group, team or body (non-employment)" },
   related_to:      { functional: false, description: "general topical link — only when no specific relation fits" },
 }
 

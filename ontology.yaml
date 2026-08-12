@@ -159,6 +159,22 @@ relations:
     examples:
       - "auth migration blocks search revamp"
 
+  - name: "employed_by"
+    domain: ["person"]
+    range: ["organisation", "project", "unknown"]
+    functional: true
+    description: "person works at / is employed by an organisation"
+    examples:
+      - "Sapan employed_by Veraxion"
+
+  - name: "member_of"
+    domain: ["person", "organisation", "project", "tool", "concept"]
+    range: ["organisation", "project", "concept", "event", "unknown"]
+    functional: false
+    description: "X belongs to / is part of a group, team or body (non-employment)"
+    examples:
+      - "Sarah member_of platform team"
+
   - name: "related_to"
     domain: ["*"]
     range: ["*"]

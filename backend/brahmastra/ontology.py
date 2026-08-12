@@ -162,6 +162,25 @@ RELATIONS: list[RelationDef] = [
         description="X prevents Y from progressing",
     ),
 
+    # Membership / affiliation.
+    # Added because employment had no representation at all: works_on excludes
+    # `organisation` from its range, so "Sapan works at Veraxion" failed
+    # validation and was DISCARDED — the Veraxion entity never existed in the
+    # graph. Any note about who works where was silently losing that fact.
+    RelationDef(
+        "employed_by",
+        domain=["person"],
+        range_=["organisation", "project", "unknown"],
+        functional=True,   # one current employer; a change is a contradiction
+        description="person works at / is employed by an organisation",
+    ),
+    RelationDef(
+        "member_of",
+        domain=["person", "organisation", "project", "tool", "concept"],
+        range_=["organisation", "project", "concept", "event", "unknown"],
+        description="X belongs to / is part of a group, team or body (non-employment)",
+    ),
+
     # Catch-all
     RelationDef(
         "related_to",
@@ -171,9 +190,87 @@ RELATIONS: list[RelationDef] = [
     ),
 ]
 
+# ---------------------------------------------------------------------------
+# Surface forms → canonical relations
+# ---------------------------------------------------------------------------
+#
+# An LLM writes the same relation many ways ("works at", "employed by",
+# "works for"). Without normalisation those either fail validation and are
+# dropped, or — in an open-predicate design — become distinct edge types that
+# fragment the graph so "who works at Veraxion" misses most of the answer.
+#
+# This keeps the strict core (domain/range checks and the `functional` flag
+# that contradiction detection depends on) while accepting the phrasings a
+# model actually produces.
+RELATION_ALIASES: dict[str, str] = {
+    "works_at": "employed_by",
+    "works_for": "employed_by",
+    "employed_at": "employed_by",
+    "employee_of": "employed_by",
+    "employer_of": "employed_by",
+    "belongs_to": "member_of",
+    "member": "member_of",
+    "part_of_team": "member_of",
+    "manages": "reports_to",        # inverse; direction is fixed on ingest
+    "managed_by": "reports_to",
+    "reports": "reports_to",
+    "authored_by": "created_by",
+    "written_by": "created_by",
+    "built_by": "created_by",
+    "owned_by": "owns",             # inverse
+    "owner_of": "owns",
+    "requires": "depends_on",
+    "needs": "depends_on",
+    "uses_tool": "uses",
+    "utilises": "uses",
+    "utilizes": "uses",
+    "contains": "has_component",
+    "includes": "has_component",
+    "located_at": "located_in",
+    "based_in": "located_in",
+    "lives_in": "located_in",
+    "status_is": "has_status",
+    "planned_for": "scheduled_for",
+    "due": "scheduled_for",
+    "blocked_by": "blocks",         # inverse
+    "integrates": "integrates_with",
+    "connects_to": "integrates_with",
+    "offers": "provides",
+    "exposes": "provides",
+}
+
+# Aliases that mean the INVERSE of their canonical relation: the subject and
+# object must be swapped, or the graph asserts the opposite of the note.
+# "Mei manages Sarah" is "Sarah reports_to Mei", not "Mei reports_to Sarah".
+INVERSE_ALIASES: frozenset[str] = frozenset({
+    "manages", "owned_by", "blocked_by", "employer_of", "owner_of",
+})
+
 RELATION_NAMES: list[str] = [r.name for r in RELATIONS]
 
 _RELATION_MAP: dict[str, RelationDef] = {r.name: r for r in RELATIONS}
+
+
+def normalise_relation(raw: str) -> tuple[str | None, bool]:
+    """
+    Map a model-produced relation onto the ontology.
+
+    Returns (canonical_name, inverted). `inverted` means the alias expressed
+    the relation the other way round, so the caller must swap subject and
+    object — "Mei manages Sarah" is stored as "Sarah reports_to Mei".
+
+    Returns (None, False) when nothing matches, leaving the caller to decide
+    between dropping the fact and keeping it as a weaker link.
+    """
+    key = (raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not key:
+        return None, False
+    if key in _RELATION_MAP:
+        return key, False
+    canonical = RELATION_ALIASES.get(key)
+    if canonical:
+        return canonical, key in INVERSE_ALIASES
+    return None, False
 
 
 def is_valid_triple(subject_type: str, relation: str, object_type: str) -> bool:
