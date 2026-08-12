@@ -199,3 +199,103 @@ def test_set_note_status_rejects_invalid_status():
     db.upsert_note("n1", "T", "C")
     with pytest.raises(ValueError):
         db.set_note_status("n1", "nonsense")
+
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+def test_workspaces_are_isolated_in_both_directions():
+    """
+    The whole safety property: one workspace must never read another's data.
+
+    Property-based partitioning fails open — a forgotten filter leaks silently
+    rather than erroring — so this is asserted explicitly in both directions.
+    """
+    db.upsert_note("shared-id", "Personal note", "Sarah is my neighbour.")
+    db.insert_triples([{
+        "subject_text": "Sarah", "subject_type": "person", "relation": "related_to",
+        "object_text": "neighbour", "object_type": "unknown", "source_note_id": "shared-id",
+    }])
+
+    other = db.for_workspace("office")
+    other.init_schema()
+    # Deliberately the SAME note id: ids are unique per workspace, not globally.
+    other.upsert_note("shared-id", "Office note", "Sarah is my manager.")
+
+    assert db.get_note("shared-id")["title"] == "Personal note"
+    assert other.get_note("shared-id")["title"] == "Office note"
+
+    assert db.get_db_stats()["notes_total"] == 1
+    assert other.stats()["notes_total"] == 1
+    # The office workspace must not inherit the default's triples.
+    assert other.get_all_triples() == []
+
+
+def test_new_workspace_starts_empty_and_is_registered():
+    db.upsert_note("n1", "T", "C")
+    created = db.create_workspace("apollo", name="Apollo", description="project graph")
+    assert created["id"] == "apollo"
+
+    ids = {w["id"] for w in db.list_workspaces()}
+    assert {"default", "apollo"} <= ids
+
+    apollo = db.for_workspace("apollo")
+    assert apollo.stats()["notes_total"] == 0, "a new workspace must inherit nothing"
+
+
+def test_invalid_workspace_ids_are_rejected():
+    from brahmastra.workspace import InvalidWorkspaceId
+    for bad in (
+        "all",          # reserved: already means "every workspace" at the API
+        "",             # no partition key
+        "Has Spaces",   # not a slug — would be ambiguous in a URL
+        "-leading",     # must start alphanumeric
+        "a" * 64,       # too long for an index key
+    ):
+        with pytest.raises((InvalidWorkspaceId, ValueError)):
+            db.create_workspace(bad)
+
+
+def test_workspace_ids_are_case_normalised_not_rejected():
+    """
+    Case is normalised rather than refused, so "Office" and "office" cannot
+    become two graphs that look identical in a list.
+    """
+    created = db.create_workspace("Office")
+    assert created["id"] == "office"
+    assert db.get_workspace("office") is not None
+
+
+def test_default_workspace_cannot_be_deleted():
+    # Deleting it would destroy every pre-workspace install's data, since that
+    # is where the migration puts it.
+    with pytest.raises(ValueError, match="default"):
+        db.delete_workspace("default")
+
+
+def test_delete_workspace_removes_only_its_own_data():
+    db.upsert_note("keep", "Keep", "stays in default")
+    db.create_workspace("temp")
+    tmp = db.for_workspace("temp")
+    tmp.upsert_note("gone", "Gone", "lives in temp")
+
+    db.delete_workspace("temp")
+
+    assert db.get_note("keep") is not None, "deleting one workspace touched another"
+    assert {w["id"] for w in db.list_workspaces()} == {"default"}
+
+
+def test_cross_workspace_search_is_explicit_and_tagged():
+    db.upsert_note("p1", "Personal", "Sarah plays cricket on Sunday.")
+    db.create_workspace("work")
+    db.for_workspace("work").upsert_note("w1", "Work", "Sarah ships the cricket feature.")
+
+    # Scoped search sees only its own workspace...
+    assert [n["id"] for n in db.search_notes("cricket")] == ["p1"]
+
+    # ...crossing the partition takes an explicit call.
+    hits = db.search_notes_across("cricket")
+    assert {n["id"] for n in hits} == {"p1", "w1"}
+    # Every result says where it came from, so a caller can never confuse them.
+    assert {n["workspace_id"] for n in hits} == {"default", "work"}

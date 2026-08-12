@@ -186,3 +186,41 @@ class GraphStore(ABC):
 
     @abstractmethod
     def stats(self) -> dict[str, int]: ...
+
+    # -- workspaces --------------------------------------------------------
+    #
+    # Not abstract: a backend without workspace support stays usable as a
+    # single-graph store rather than failing to instantiate. Anything that
+    # needs several graphs must implement these.
+
+    workspace: str = "default"
+
+    def _unsupported(self, what: str):
+        return NotImplementedError(
+            f"{type(self).__name__} does not support {what}. "
+            "Use GRAPH_BACKEND=sqlite, or implement it for this backend."
+        )
+
+    def list_workspaces(self) -> list[dict[str, Any]]:
+        raise self._unsupported("listing workspaces")
+
+    def create_workspace(self, ws: Any) -> dict[str, Any]:
+        raise self._unsupported("creating workspaces")
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        raise self._unsupported("reading workspaces")
+
+    def delete_workspace(self, workspace_id: str) -> None:
+        raise self._unsupported("deleting workspaces")
+
+    def search_notes_across(
+        self, query: str, workspaces: list[str] | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """
+        Search several workspaces at once; None means all of them.
+
+        Separate from search_notes deliberately: crossing the partition must be
+        something a caller asks for, never something that happens because a
+        filter was forgotten.
+        """
+        raise self._unsupported("cross-workspace search")

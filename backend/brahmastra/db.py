@@ -20,9 +20,12 @@ from typing import Any
 
 from brahmastra.stores import backend_name, get_store, reset_store
 from brahmastra.stores.sqlite_store import SCHEMA, db_path
+from brahmastra.workspace import DEFAULT_WORKSPACE, Workspace
 
 __all__ = [
     "backend_name", "reset_store", "db_path", "describe", "SCHEMA",
+    "workspace", "for_workspace", "list_workspaces", "create_workspace",
+    "get_workspace", "delete_workspace", "search_notes_across",
     "init_db", "upsert_note", "get_notes", "search_notes", "get_note",
     "mark_note_done", "mark_note_error", "set_note_status", "delete_note",
     "delete_triples_for_note", "insert_triples", "get_all_triples",
@@ -35,6 +38,65 @@ __all__ = [
 def describe() -> str:
     """Where data is actually going. Useful when a machine looks at the wrong store."""
     return get_store().describe()
+
+
+# ---------------------------------------------------------------------------
+# Workspaces — several independent graphs in one system
+# ---------------------------------------------------------------------------
+
+def workspace() -> str:
+    """The workspace these module-level calls are reading and writing."""
+    return getattr(get_store(), "workspace", DEFAULT_WORKSPACE)
+
+
+def for_workspace(workspace_id: str) -> Any:
+    """
+    A store bound to another workspace, without changing the process default.
+
+    Use this for a one-off read of a different graph. Long-lived selection
+    belongs in BRAHMASTRA_WORKSPACE so every module-level call agrees.
+    """
+    return get_store(workspace=workspace_id)
+
+
+def list_workspaces() -> list[dict[str, Any]]:
+    return get_store().list_workspaces()
+
+
+def create_workspace(
+    id: str,
+    name: str = "",
+    description: str = "",
+    notion_database_id: str | None = None,
+) -> dict[str, Any]:
+    """Create (or update) a workspace and make sure its schema exists."""
+    ws = Workspace(
+        id=id, name=name, description=description,
+        notion_database_id=notion_database_id,
+    )
+    created = get_store().create_workspace(ws)
+    # Initialise the new partition immediately so it can be written to without
+    # a separate setup step.
+    get_store(workspace=ws.id).init_schema()
+    return created
+
+
+def get_workspace(workspace_id: str) -> dict[str, Any] | None:
+    return get_store().get_workspace(workspace_id)
+
+
+def delete_workspace(workspace_id: str) -> None:
+    """Delete a workspace and everything partitioned under it."""
+    if workspace_id == DEFAULT_WORKSPACE:
+        raise ValueError("refusing to delete the default workspace")
+    get_store().delete_workspace(workspace_id)
+
+
+def search_notes_across(
+    query: str, workspaces: list[str] | None = None, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Search across workspaces; None means every workspace."""
+    return get_store().search_notes_across(query, workspaces, limit)
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,7 @@ from brahmastra.stores.base import GraphStore
 from brahmastra.stores.sqlite_store import SQLiteStore
 
 _store: GraphStore | None = None
-_store_backend: str | None = None
+_store_backend: tuple[str, str] | None = None
 
 
 def backend_name() -> str:
@@ -25,31 +25,44 @@ def backend_name() -> str:
     return os.environ.get("GRAPH_BACKEND", "sqlite").lower().strip() or "sqlite"
 
 
-def get_store() -> GraphStore:
-    """
-    Return the active store, constructing it on first use.
-
-    The cache is keyed on the backend name so changing GRAPH_BACKEND mid-process
-    (which tests do) rebuilds rather than silently returning the old backend.
-    """
-    global _store, _store_backend
-    name = backend_name()
-    if _store is not None and _store_backend == name:
-        return _store
-
+def _build(name: str, workspace: str | None) -> GraphStore:
     if name == "sqlite":
-        store: GraphStore = SQLiteStore()
-    elif name == "neo4j":
+        return SQLiteStore(workspace=workspace)
+    if name == "neo4j":
         # Imported lazily: the neo4j driver is an optional dependency, so a
         # sqlite-only install must not need it present.
         from brahmastra.stores.neo4j_store import Neo4jStore
-        store = Neo4jStore()
-    else:
-        raise ValueError(
-            f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
-        )
+        return Neo4jStore()
+    raise ValueError(
+        f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
+    )
 
-    _store, _store_backend = store, name
+
+def get_store(workspace: str | None = None) -> GraphStore:
+    """
+    Return a store, constructing it on first use.
+
+    Without `workspace` this returns the cached process-wide store for the
+    current workspace. Passing one builds an uncached store bound to that
+    workspace, so a one-off read of another graph cannot disturb the default
+    every other module-level call is using.
+
+    The cache is keyed on backend AND workspace, so changing either mid-process
+    (which tests do) rebuilds rather than silently returning the previous one.
+    """
+    global _store, _store_backend
+    name = backend_name()
+
+    if workspace is not None:
+        return _build(name, workspace)
+
+    from brahmastra.workspace import current_workspace
+    key = (name, current_workspace())
+    if _store is not None and _store_backend == key:
+        return _store
+
+    store = _build(name, None)
+    _store, _store_backend = store, key
     return store
 
 
