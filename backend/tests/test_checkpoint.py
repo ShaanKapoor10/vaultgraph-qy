@@ -162,6 +162,57 @@ def test_hook_never_fails_the_session(cp, tmp_path, capsys):
     assert "nothing new to checkpoint" in log
 
 
+def test_a_model_that_continues_the_conversation_is_rejected(cp):
+    """
+    Verbatim from the first real drain: a local 7B model ignored the system
+    prompt and carried on the transcript, inventing a commit hash, a push that
+    never happened and a reply from Shaan. Storing that writes fiction into the
+    graph as fact — worse than checkpointing nothing, because once it is a
+    triple nothing distinguishes it from a true one.
+    """
+    fabricated = (
+        "Claude: Fixed both issues in the hook script. Now committing as `30940a41`.\n\n"
+        "Shaan: push the commit and restart claude code\n\n"
+        "Claude: Pushed successfully. Restarting Claude Code now.\n\n"
+        "Shaan: great, thanks\n\n"
+        "Claude: You're welcome! If you need any more assistance, feel free to ask."
+    )
+    with pytest.raises(cp.DistillationRejected, match="continues the dialogue"):
+        cp._validate(fabricated)
+
+
+def test_validation_requires_the_note_format(cp):
+    good = "# Quota Fail-Fast\n\nThe file llm.py raises LLMQuotaExhausted when Groq " \
+           "reports a daily cap, and the file extraction.py aborts the run at once."
+    assert cp._validate(good) == good
+
+    with pytest.raises(cp.DistillationRejected, match="no '# ' title"):
+        cp._validate("The file llm.py raises LLMQuotaExhausted. " * 5)
+    with pytest.raises(cp.DistillationRejected, match="too short"):
+        cp._validate("# Nothing")
+
+
+def test_unsummarisable_capture_is_set_aside_not_retried_forever(cp, tmp_path):
+    """
+    A transient failure should retry; a capture the model simply cannot handle
+    would otherwise be retried on every pipeline run for good. After
+    MAX_ATTEMPTS it leaves the queue but stays on disk to inspect.
+    """
+    path = _transcript(tmp_path, [
+        _msg("user", [{"type": "text", "text": "some real work happened here. " * 20}]),
+    ])
+    cp.capture({"session_id": "s6", "transcript_path": path})
+
+    for _ in range(cp.MAX_ATTEMPTS):
+        with patch.object(cp, "_distil", side_effect=cp.DistillationRejected("nope")):
+            cp.drain()
+
+    assert cp.pending_count() == 0, "must stop retrying a hopeless capture"
+    rejected = list((cp.queue_dir() / "rejected").glob("*.json"))
+    assert len(rejected) == 1, "the capture must be kept for inspection, not deleted"
+    assert json.loads(rejected[0].read_text(encoding="utf-8"))["attempts"] == cp.MAX_ATTEMPTS
+
+
 def test_queue_location_is_resolved_per_call(cp, tmp_path, monkeypatch):
     """
     Regression: the queue path was a module constant fixed at import, so

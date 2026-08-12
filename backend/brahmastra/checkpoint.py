@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -65,13 +66,17 @@ def _log_path() -> Path:
 
 # Bound the prompt: a long session can be megabytes, and only the tail is new
 # knowledge anyway. Characters, taken from the END of the unseen turns.
-MAX_TRANSCRIPT_CHARS = 40_000
+# Kept modest because the distiller is normally a local 7B model — at 40k it
+# stopped summarising and started continuing the dialogue instead.
+MAX_TRANSCRIPT_CHARS = 20_000
 # Below this there is nothing worth a note — a two-line exchange is noise.
 MIN_TRANSCRIPT_CHARS = 400
+# Distillations to attempt before setting a capture aside as unsummarisable.
+MAX_ATTEMPTS = 3
 
 DISTIL_SYSTEM = (
     "You convert an AI pair-programming transcript into durable knowledge for a "
-    "knowledge graph.\n\n"
+    "knowledge graph. You are a summariser, never a participant.\n\n"
     "Write plain prose in explicit subject-relation-object sentences, because an "
     "extractor reads this into triples. Name real entities every time: say 'The file "
     "llm.py raises LLMQuotaExhausted', never 'it raises an exception there'. Never use "
@@ -83,8 +88,20 @@ DISTIL_SYSTEM = (
     "You are a backstop for notes the assistant wrote deliberately during the session, "
     "so prefer what it did NOT get to. Anything already covered by the listed notes is "
     "a duplicate — leave it out.\n\n"
-    "Start with a single '# ' title line naming the work. Then 1-4 short paragraphs. "
+    "State ONLY what the transcript shows. Never invent a commit, a command, a result "
+    "or a reply, and never write a line beginning with a speaker name — that is "
+    "continuing the conversation, which is the one thing you must not do.\n\n"
+    "Format: a single '# ' title line naming the work, then 1-4 short paragraphs. "
     "If the transcript holds nothing durable, reply with exactly: SKIP"
+)
+
+# The instruction is repeated AFTER the transcript because the failure mode is
+# recency-driven: a small model that has just read 20k characters of dialogue
+# will carry on writing dialogue unless the last thing it sees says otherwise.
+DISTIL_REMINDER = (
+    "\n</transcript>\n\n"
+    "Summarise the transcript above as durable knowledge. Do NOT continue the "
+    "conversation and do NOT invent anything that is not in it. Begin with '# '."
 )
 
 
@@ -274,13 +291,45 @@ def _existing_titles(limit: int = 80) -> list[str]:
         return []
 
 
+class DistillationRejected(RuntimeError):
+    """The model's output is not a summary, so it must not reach the graph."""
+
+
+# Lines that begin like dialogue mean the model resumed the conversation
+# instead of summarising it.
+_SPEAKER = re.compile(r"^\s*(Shaan|Claude|Claude Code|User|Assistant|Human)\s*:", re.M)
+
+
+def _validate(text: str) -> str:
+    """
+    Reject output that is not a summary.
+
+    This guard exists because the first real run produced a note that was
+    entirely invented: a local 7B model continued the transcript, complete with
+    a fabricated commit hash, a fabricated push and a fabricated "great,
+    thanks" from Shaan. Extracting that would have written fiction into the
+    graph as fact — strictly worse than checkpointing nothing, because a wrong
+    note is indistinguishable from a right one once it is a triple.
+    """
+    if _SPEAKER.search(text):
+        raise DistillationRejected("output continues the dialogue instead of summarising")
+    if not text.lstrip().startswith("#"):
+        raise DistillationRejected("output has no '# ' title line; format was ignored")
+    if len(text) < 120:
+        raise DistillationRejected(f"output too short to be a summary ({len(text)} chars)")
+    return text
+
+
 def _distil(conversation: str) -> str | None:
     """Conversation -> note text, or None if there is nothing durable in it."""
     from brahmastra.llm import chat, ollama_available
 
     # Prefer the local model: this runs unattended and often mid-session, so it
-    # must not eat the cloud daily quota that extraction depends on.
-    provider = "ollama" if ollama_available() else None
+    # must not eat the cloud daily quota that extraction depends on. Override
+    # with CHECKPOINT_PROVIDER when a stronger summariser is worth the tokens.
+    provider = os.environ.get("CHECKPOINT_PROVIDER") or (
+        "ollama" if ollama_available() else None
+    )
 
     known = _existing_titles()
     already = (
@@ -291,7 +340,7 @@ def _distil(conversation: str) -> str | None:
 
     text = chat(
         DISTIL_SYSTEM,
-        f"{already}Transcript:\n\n{conversation}\n\nKnowledge:",
+        f"{already}<transcript>\n{conversation}{DISTIL_REMINDER}",
         temperature=0.2,
         max_tokens=1200,
         timeout=180,
@@ -300,7 +349,7 @@ def _distil(conversation: str) -> str | None:
 
     if not text or text.upper().startswith("SKIP"):
         return None
-    return text
+    return _validate(text)
 
 
 def _split_title(note: str) -> tuple[str, str]:
@@ -343,6 +392,7 @@ def drain() -> dict[str, Any]:
             # looks identical to one that had nothing to say.
             _log(f"drain failed for {path.name}: {type(e).__name__}: {str(e)[:300]}")
             failed.append({"file": path.name, "error": str(e)[:200]})
+            _record_attempt(path, item, str(e))
             continue  # keep the file; try again next drain
 
         if note is None:
@@ -364,6 +414,29 @@ def drain() -> dict[str, Any]:
 
     return {"stored": stored, "skipped": skipped, "failed": failed,
             "queued": pending_count()}
+
+
+def _record_attempt(path: Path, item: dict[str, Any], error: str) -> None:
+    """
+    Count a failed distillation and set the capture aside once it looks hopeless.
+
+    A transient failure (LLM down, quota spent) clears on its own, so retrying
+    is right. A capture the model cannot summarise would otherwise be retried
+    on every pipeline run forever, so after MAX_ATTEMPTS it moves to
+    `rejected/` — out of the queue, but still on disk to inspect rather than
+    deleted.
+    """
+    item["attempts"] = int(item.get("attempts", 0)) + 1
+    item["last_error"] = error[:500]
+    try:
+        path.write_text(json.dumps(item, indent=2), encoding="utf-8")
+        if item["attempts"] >= MAX_ATTEMPTS:
+            rejected = queue_dir() / "rejected"
+            rejected.mkdir(parents=True, exist_ok=True)
+            path.replace(rejected / path.name)
+            _log(f"gave up on {path.name} after {MAX_ATTEMPTS} attempts; moved to rejected/")
+    except OSError:
+        pass
 
 
 def _captures() -> list[Path]:
