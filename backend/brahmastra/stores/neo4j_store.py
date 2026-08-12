@@ -40,6 +40,9 @@ from pathlib import Path
 from typing import Any
 
 from brahmastra.stores.base import GraphStore
+from brahmastra.workspace import (
+    DEFAULT_WORKSPACE, Workspace, current_workspace, validate_id,
+)
 
 # Load backend/.env so NEO4J_* are present no matter which entrypoint imports
 # us (server, CLI, migration script, MCP server). Same pattern as llm.py.
@@ -94,15 +97,37 @@ def _escape_lucene(term: str) -> str:
     return "".join(out)
 
 
+# Superseded by the composite constraints below. A globally-unique note id
+# would stop two workspaces holding notes with the same id — which they
+# legitimately do, since each syncs from its own Notion source.
+LEGACY_CONSTRAINTS = [
+    "note_id", "entity_name", "mention_text", "cluster_id", "meta_id",
+]
+
+# Uniqueness is per workspace, not global. Two workspaces may each have an
+# entity called "Sarah" and they are different people; entity resolution must
+# never merge them.
 CONSTRAINTS = [
-    "CREATE CONSTRAINT note_id IF NOT EXISTS FOR (n:Note) REQUIRE n.id IS UNIQUE",
-    "CREATE CONSTRAINT entity_name IF NOT EXISTS FOR (e:Entity) REQUIRE e.name IS UNIQUE",
-    "CREATE CONSTRAINT mention_text IF NOT EXISTS FOR (m:Mention) REQUIRE m.text IS UNIQUE",
-    "CREATE CONSTRAINT cluster_id IF NOT EXISTS FOR (c:Cluster) REQUIRE c.id IS UNIQUE",
-    "CREATE CONSTRAINT meta_id IF NOT EXISTS FOR (g:GraphMeta) REQUIRE g.id IS UNIQUE",
+    "CREATE CONSTRAINT note_ws_id IF NOT EXISTS FOR (n:Note) "
+    "REQUIRE (n.workspaceId, n.id) IS UNIQUE",
+    "CREATE CONSTRAINT entity_ws_name IF NOT EXISTS FOR (e:Entity) "
+    "REQUIRE (e.workspaceId, e.name) IS UNIQUE",
+    "CREATE CONSTRAINT mention_ws_text IF NOT EXISTS FOR (m:Mention) "
+    "REQUIRE (m.workspaceId, m.text) IS UNIQUE",
+    "CREATE CONSTRAINT cluster_ws_id IF NOT EXISTS FOR (c:Cluster) "
+    "REQUIRE (c.workspaceId, c.id) IS UNIQUE",
+    "CREATE CONSTRAINT meta_ws IF NOT EXISTS FOR (g:GraphMeta) "
+    "REQUIRE g.workspaceId IS UNIQUE",
+    "CREATE CONSTRAINT workspace_id IF NOT EXISTS FOR (w:Workspace) "
+    "REQUIRE w.id IS UNIQUE",
 ]
 
 INDEXES = [
+    # workspaceId leads every composite index: it is the first predicate of
+    # essentially every query, so it must be the leading column.
+    "CREATE INDEX note_ws_status IF NOT EXISTS FOR (n:Note) ON (n.workspaceId, n.extractionStatus)",
+    "CREATE INDEX entity_ws IF NOT EXISTS FOR (e:Entity) ON (e.workspaceId)",
+    "CREATE INDEX mention_ws IF NOT EXISTS FOR (m:Mention) ON (m.workspaceId)",
     "CREATE INDEX note_status IF NOT EXISTS FOR (n:Note) ON (n.extractionStatus)",
     "CREATE INDEX entity_pagerank IF NOT EXISTS FOR (e:Entity) ON (e.pagerank)",
     "CREATE FULLTEXT INDEX noteSearch IF NOT EXISTS FOR (n:Note) ON EACH [n.title, n.content]",
@@ -134,7 +159,10 @@ def _vector_indexes(dim: int) -> list[str]:
 class Neo4jStore(GraphStore):
     """Shared property-graph backend (Neo4j Aura)."""
 
-    def __init__(self) -> None:
+    def __init__(self, workspace: str | None = None) -> None:
+        # Bound at construction; every query adds the predicate itself, so a
+        # caller cannot express — and therefore cannot forget — the filter.
+        self.workspace = validate_id(workspace) if workspace else current_workspace()
         self._uri = os.environ.get("NEO4J_URI", "")
         self._user = os.environ.get("NEO4J_USER", "")
         self._password = os.environ.get("NEO4J_PASSWORD", "")
@@ -203,8 +231,137 @@ class Neo4jStore(GraphStore):
     # -- lifecycle ---------------------------------------------------------
 
     def init_schema(self) -> None:
+        # Existing nodes must be tagged BEFORE the composite constraints are
+        # created: an untagged node has workspaceId = null, and a uniqueness
+        # constraint over (null, id) would either reject the create or leave
+        # rows outside every workspace.
+        self._migrate_to_workspaces()
+
+        # Drop the old single-property constraints, which would still force
+        # note ids to be globally unique and so prevent two workspaces from
+        # syncing notes with the same id.
+        for name in LEGACY_CONSTRAINTS:
+            try:
+                self._run(f"DROP CONSTRAINT {name} IF EXISTS")
+            except Exception:
+                pass
+
         for stmt in CONSTRAINTS + INDEXES:
-            self._run(stmt)
+            try:
+                self._run(stmt)
+            except Exception:
+                # An index that already exists under a different name, or a
+                # constraint the tier does not support, must not stop the
+                # store from working.
+                pass
+
+        from brahmastra.embeddings import DIM
+        for stmt in _vector_indexes(DIM):
+            try:
+                self._run(stmt)
+            except Exception:
+                pass
+
+        # Register the workspace so it can be listed before holding content.
+        self._run(
+            """
+            MERGE (w:Workspace {id: $id})
+            ON CREATE SET w.name = $id, w.description = '',
+                          w.ontology = 'default', w.createdAt = $now
+            """,
+            id=self.workspace, now=_now(),
+        )
+
+    def _migrate_to_workspaces(self) -> None:
+        """
+        Put pre-workspace nodes into DEFAULT_WORKSPACE.
+
+        Idempotent and batched: `workspaceId IS NULL` matches only untagged
+        nodes, so a second run does nothing.
+        """
+        for label in ("Note", "Entity", "Mention", "Cluster", "GraphMeta"):
+            while True:
+                done = self._run(
+                    f"""
+                    MATCH (n:{label}) WHERE n.workspaceId IS NULL
+                    WITH n LIMIT 5000
+                    SET n.workspaceId = $ws
+                    RETURN count(n) AS c
+                    """,
+                    ws=DEFAULT_WORKSPACE,
+                )[0]["c"]
+                if not done:
+                    break
+
+    # -- workspace registry ------------------------------------------------
+
+    def list_workspaces(self) -> list[dict[str, Any]]:
+        rows = self._run(
+            "MATCH (w:Workspace) RETURN w.id AS id, w.name AS name, "
+            "w.description AS description, w.notionDatabaseId AS notion_database_id, "
+            "w.ontology AS ontology, w.createdAt AS created_at ORDER BY w.createdAt"
+        )
+        return rows
+
+    def create_workspace(self, ws: Workspace) -> dict[str, Any]:
+        self._run(
+            """
+            MERGE (w:Workspace {id: $id})
+            SET w.name = $name, w.description = $description,
+                w.notionDatabaseId = $notion, w.ontology = $ontology,
+                w.createdAt = coalesce(w.createdAt, $created)
+            """,
+            id=ws.id, name=ws.name, description=ws.description,
+            notion=ws.notion_database_id, ontology=ws.ontology,
+            created=ws.created_at,
+        )
+        return ws.to_dict()
+
+    def get_workspace(self, workspace_id: str) -> dict[str, Any] | None:
+        rows = self._run(
+            "MATCH (w:Workspace {id: $id}) RETURN w.id AS id, w.name AS name, "
+            "w.description AS description, w.notionDatabaseId AS notion_database_id, "
+            "w.ontology AS ontology, w.createdAt AS created_at",
+            id=workspace_id,
+        )
+        return rows[0] if rows else None
+
+    def delete_workspace(self, workspace_id: str) -> None:
+        """Delete a workspace and every node partitioned under it."""
+        while True:
+            done = self._run(
+                """
+                MATCH (n) WHERE n.workspaceId = $ws
+                WITH n LIMIT 5000 DETACH DELETE n
+                RETURN count(n) AS c
+                """,
+                ws=workspace_id,
+            )[0]["c"]
+            if not done:
+                break
+        self._run("MATCH (w:Workspace {id: $id}) DETACH DELETE w", id=workspace_id)
+
+    def search_notes_across(
+        self, query: str, workspaces: list[str] | None = None, limit: int = 10
+    ) -> list[dict[str, Any]]:
+        """Search every workspace, or a named subset. Results carry their workspace."""
+        terms = [t for t in (query or "").lower().split() if t]
+        if not terms:
+            return []
+        rows = self._run(
+            """
+            MATCH (n:Note)
+            WHERE ($wss IS NULL OR n.workspaceId IN $wss)
+            WITH n, toLower(coalesce(n.title,'') + ' ' + coalesce(n.content,'')) AS hay
+            WITH n, [t IN $terms WHERE hay CONTAINS t] AS hits
+            WHERE size(hits) > 0
+            RETURN n, size(hits) AS matched
+            ORDER BY matched DESC, n.lastEdited DESC
+            LIMIT $limit
+            """,
+            terms=terms, wss=workspaces, limit=limit,
+        )
+        return self._note_rows(rows)
         # Vector indexes are created separately: an older server without vector
         # support should still get a working store, just without semantic
         # search, rather than failing to initialise at all.
@@ -216,7 +373,7 @@ class Neo4jStore(GraphStore):
                 pass
 
     def describe(self) -> str:
-        return f"neo4j:{self._uri}/{self._database or '<home>'}"
+        return f"neo4j:{self._uri}/{self._database or '<home>'}#{self.workspace}"
 
     # -- notes -------------------------------------------------------------
 
@@ -232,7 +389,7 @@ class Neo4jStore(GraphStore):
         # changed last_edited re-opens the note, otherwise keep current status.
         self._run(
             """
-            MERGE (n:Note {id: $id})
+            MERGE (n:Note {id: $id, workspaceId: $ws})
             ON CREATE SET n.extractionStatus = $status
             SET n.title = $title,
                 n.content = $content,
@@ -244,8 +401,9 @@ class Neo4jStore(GraphStore):
                 END,
                 n.lastEdited = $lastEdited
             """,
-            id=id, title=title, content=content, lastEdited=last_edited,
-            now=_now(), status=("pending" if mark_pending else "done"),
+            id=id, ws=self.workspace, title=title, content=content,
+            lastEdited=last_edited, now=_now(),
+            status=("pending" if mark_pending else "done"),
         )
         self._embed_note(id, title, content)
 
@@ -264,11 +422,11 @@ class Neo4jStore(GraphStore):
         try:
             self._run(
                 """
-                MATCH (n:Note {id: $id})
+                MATCH (n:Note {id: $id, workspaceId: $ws})
                 CALL db.create.setNodeVectorProperty(n, 'embedding', $vec)
                 RETURN n.id
                 """,
-                id=note_id, vec=vec,
+                id=note_id, ws=self.workspace, vec=vec,
             )
         except Exception:
             pass
@@ -285,18 +443,22 @@ class Neo4jStore(GraphStore):
                 "last_edited": n.get("lastEdited"),
                 "last_synced": n.get("lastSynced"),
                 "extraction_status": n.get("extractionStatus"),
+                "workspace_id": n.get("workspaceId"),
             })
         return out
 
     def get_notes(self, status: str | None = None) -> list[dict[str, Any]]:
         if status:
             rows = self._run(
-                "MATCH (n:Note) WHERE n.extractionStatus = $status "
-                "RETURN n ORDER BY n.lastEdited DESC",
-                status=status,
+                "MATCH (n:Note) WHERE n.workspaceId = $ws "
+                "AND n.extractionStatus = $status RETURN n ORDER BY n.lastEdited DESC",
+                ws=self.workspace, status=status,
             )
         else:
-            rows = self._run("MATCH (n:Note) RETURN n ORDER BY n.lastEdited DESC")
+            rows = self._run(
+                "MATCH (n:Note) WHERE n.workspaceId = $ws RETURN n ORDER BY n.lastEdited DESC",
+                ws=self.workspace,
+            )
         return self._note_rows(rows)
 
     # Reciprocal Rank Fusion constant. 60 is the value from the original RRF
@@ -315,11 +477,12 @@ class Neo4jStore(GraphStore):
         try:
             rows = self._run(
                 """
-                CALL db.index.fulltext.queryNodes('noteSearch', $q, {limit: $limit})
+                CALL db.index.fulltext.queryNodes('noteSearch', $q, {limit: $over})
                 YIELD node, score
-                RETURN node.id AS id ORDER BY score DESC
+                WHERE node.workspaceId = $ws
+                RETURN node.id AS id ORDER BY score DESC LIMIT $limit
                 """,
-                q=lucene, limit=limit,
+                q=lucene, limit=limit, over=limit * 5, ws=self.workspace,
             )
         except Exception:
             return []
@@ -334,11 +497,12 @@ class Neo4jStore(GraphStore):
         try:
             rows = self._run(
                 """
-                CALL db.index.vector.queryNodes('noteVectors', $limit, $vec)
+                CALL db.index.vector.queryNodes('noteVectors', $over, $vec)
                 YIELD node, score
-                RETURN node.id AS id ORDER BY score DESC
+                WHERE node.workspaceId = $ws
+                RETURN node.id AS id ORDER BY score DESC LIMIT $limit
                 """,
-                limit=limit, vec=vec,
+                limit=limit, over=limit * 5, vec=vec, ws=self.workspace,
             )
         except Exception:
             return []
@@ -376,7 +540,8 @@ class Neo4jStore(GraphStore):
         if not ordered:
             return []
         rows = self._run(
-            "MATCH (n:Note) WHERE n.id IN $ids RETURN n", ids=ordered
+            "MATCH (n:Note) WHERE n.workspaceId = $ws AND n.id IN $ids RETURN n",
+            ids=ordered, ws=self.workspace
         )
         by_id = {r["n"].get("id"): r for r in rows}
         # Preserve fusion order; the Cypher IN does not guarantee it.
@@ -389,21 +554,24 @@ class Neo4jStore(GraphStore):
             return []
         rows = self._run(
             """
-            MATCH (n:Note)
+            MATCH (n:Note) WHERE n.workspaceId = $ws
             WITH n, toLower(coalesce(n.title,'') + ' ' + coalesce(n.content,'')) AS hay
             WITH n, hay, [t IN $terms WHERE hay CONTAINS t] AS hits
             WHERE size(hits) > 0
             RETURN n, size(hits) AS matched
             ORDER BY matched DESC, n.lastEdited DESC
             """,
-            terms=terms,
+            terms=terms, ws=self.workspace,
         )
         full = [r for r in rows if r["matched"] == len(terms)]
         pool = full if full else rows
         return self._note_rows(pool[:limit])
 
     def get_note(self, id: str) -> dict[str, Any] | None:
-        rows = self._run("MATCH (n:Note {id: $id}) RETURN n", id=id)
+        rows = self._run(
+            "MATCH (n:Note {id: $id, workspaceId: $ws}) RETURN n",
+            id=id, ws=self.workspace,
+        )
         got = self._note_rows(rows)
         return got[0] if got else None
 
@@ -411,13 +579,16 @@ class Neo4jStore(GraphStore):
         if status not in ("pending", "done", "error"):
             raise ValueError(f"invalid extraction status: {status!r}")
         self._run(
-            "MATCH (n:Note {id: $id}) SET n.extractionStatus = $status",
-            id=id, status=status,
+            "MATCH (n:Note {id: $id, workspaceId: $ws}) SET n.extractionStatus = $status",
+            id=id, ws=self.workspace, status=status,
         )
 
     def delete_note(self, id: str) -> None:
         self.delete_triples_for_note(id)
-        self._run("MATCH (n:Note {id: $id}) DETACH DELETE n", id=id)
+        self._run(
+            "MATCH (n:Note {id: $id, workspaceId: $ws}) DETACH DELETE n",
+            id=id, ws=self.workspace,
+        )
 
     # -- triples -----------------------------------------------------------
 
@@ -425,13 +596,14 @@ class Neo4jStore(GraphStore):
         # Drop the asserted facts from this note, then any mention left with no
         # remaining provenance (mentions exist only to carry triples).
         self._run(
-            "MATCH ()-[r:ASSERTS]->() WHERE r.sourceNoteId = $nid DELETE r",
-            nid=note_id,
+            "MATCH (a:Mention)-[r:ASSERTS]->(b:Mention) "
+            "WHERE a.workspaceId = $ws AND r.sourceNoteId = $nid DELETE r",
+            ws=self.workspace, nid=note_id,
         )
         self._run(
-            "MATCH (m:Mention)-[:EXTRACTED_FROM]->(n:Note {id: $nid}) "
+            "MATCH (m:Mention)-[:EXTRACTED_FROM]->(n:Note {id: $nid, workspaceId: $ws}) "
             "WHERE NOT (m)-[:ASSERTS]-() DETACH DELETE m",
-            nid=note_id,
+            ws=self.workspace, nid=note_id,
         )
 
     def insert_triples(self, triples: list[dict[str, Any]]) -> None:
@@ -458,9 +630,9 @@ class Neo4jStore(GraphStore):
         self._run(
             """
             UNWIND $rows AS row
-            MERGE (s:Mention {text: row.subject})
+            MERGE (s:Mention {text: row.subject, workspaceId: $ws})
               ON CREATE SET s.type = row.subjectType
-            MERGE (o:Mention {text: row.object})
+            MERGE (o:Mention {text: row.object, workspaceId: $ws})
               ON CREATE SET o.type = row.objectType
             CREATE (s)-[:ASSERTS {
                 relation: row.relation,
@@ -470,24 +642,26 @@ class Neo4jStore(GraphStore):
                 extractedAt: row.extractedAt
             }]->(o)
             WITH s, o, row
-            MATCH (n:Note {id: row.sourceNoteId})
+            MATCH (n:Note {id: row.sourceNoteId, workspaceId: $ws})
             MERGE (s)-[:EXTRACTED_FROM]->(n)
             MERGE (o)-[:EXTRACTED_FROM]->(n)
             """,
-            rows=rows,
+            rows=rows, ws=self.workspace,
         )
 
     def get_all_triples(self) -> list[dict[str, Any]]:
         rows = self._run(
             """
             MATCH (s:Mention)-[r:ASSERTS]->(o:Mention)
+            WHERE s.workspaceId = $ws
             RETURN s.text AS subject_text, s.type AS subject_type,
                    r.relation AS relation,
                    o.text AS object_text, o.type AS object_type,
                    r.confidence AS confidence, r.sourceQuote AS source_quote,
                    r.sourceNoteId AS source_note_id, r.extractedAt AS extracted_at
             ORDER BY r.extractedAt DESC
-            """
+            """,
+            ws=self.workspace,
         )
         return rows
 
@@ -496,20 +670,25 @@ class Neo4jStore(GraphStore):
     def replace_canonical_map(self, clusters: list[dict[str, Any]]) -> None:
         # Wholesale replacement, matching the SQLite backend: resolution is
         # recomputed every run and a partial map would corrupt the graph.
-        self._run("MATCH (:Mention)-[r:RESOLVES_TO]->(:Entity) DELETE r")
-        self._run("MATCH (e:Entity) DETACH DELETE e")
+        self._run(
+            "MATCH (m:Mention)-[r:RESOLVES_TO]->(:Entity) WHERE m.workspaceId = $ws DELETE r",
+            ws=self.workspace,
+        )
+        self._run("MATCH (e:Entity) WHERE e.workspaceId = $ws DETACH DELETE e",
+                  ws=self.workspace)
         if not clusters:
             return
         self._run(
             """
             UNWIND $clusters AS c
-            MERGE (e:Entity {name: c.canonical_name})
+            MERGE (e:Entity {name: c.canonical_name, workspaceId: $ws})
               SET e.clusterId = c.cluster_id
             WITH e, c
             UNWIND c.mentions AS mention
-            MERGE (m:Mention {text: mention})
+            MERGE (m:Mention {text: mention, workspaceId: $ws})
             MERGE (m)-[:RESOLVES_TO]->(e)
             """,
+            ws=self.workspace,
             clusters=[
                 {
                     "cluster_id": str(c["cluster_id"]),
@@ -522,19 +701,21 @@ class Neo4jStore(GraphStore):
 
     def get_canonical_map(self) -> dict[str, str]:
         rows = self._run(
-            "MATCH (m:Mention)-[:RESOLVES_TO]->(e:Entity) "
-            "RETURN m.text AS mention, e.name AS canonical"
+            "MATCH (m:Mention)-[:RESOLVES_TO]->(e:Entity) WHERE m.workspaceId = $ws "
+            "RETURN m.text AS mention, e.name AS canonical",
+            ws=self.workspace,
         )
         return {r["mention"]: r["canonical"] for r in rows}
 
     def get_entity_clusters(self) -> list[dict[str, Any]]:
         rows = self._run(
             """
-            MATCH (e:Entity)
+            MATCH (e:Entity) WHERE e.workspaceId = $ws
             OPTIONAL MATCH (m:Mention)-[:RESOLVES_TO]->(e)
             RETURN e.clusterId AS cluster_id, e.name AS canonical_name,
                    collect(m.text) AS mentions
-            """
+            """,
+            ws=self.workspace,
         )
         return [
             {
@@ -562,10 +743,11 @@ class Neo4jStore(GraphStore):
             self._run(
                 """
                 UNWIND $nodes AS n
-                MERGE (e:Entity {name: n.id})
+                MERGE (e:Entity {name: n.id, workspaceId: $ws})
                 SET e.label = n.label, e.type = n.type,
                     e.pagerank = n.pagerank, e.clusterId = toString(n.cluster)
                 """,
+                ws=self.workspace,
                 nodes=[
                     {
                         "id": str(n.get("id")),
@@ -601,21 +783,25 @@ class Neo4jStore(GraphStore):
             })
 
         # Clear previously written typed edges so a rebuild does not duplicate.
-        self._run("MATCH (:Entity)-[r]->(:Entity) WHERE type(r) <> 'IN_CLUSTER' DELETE r")
+        self._run(
+            "MATCH (s:Entity)-[r]->(:Entity) WHERE s.workspaceId = $ws "
+            "AND type(r) <> 'IN_CLUSTER' DELETE r",
+            ws=self.workspace,
+        )
 
         for rel_type, rows in by_type.items():
             self._run(
                 f"""
                 UNWIND $rows AS row
-                MATCH (s:Entity {{name: row.source}})
-                MATCH (t:Entity {{name: row.target}})
+                MATCH (s:Entity {{name: row.source, workspaceId: $ws}})
+                MATCH (t:Entity {{name: row.target, workspaceId: $ws}})
                 CREATE (s)-[:{rel_type} {{
                     confidence: row.confidence,
                     sourceQuote: row.sourceQuote,
                     sourceNoteId: row.sourceNoteId
                 }}]->(t)
                 """,
-                rows=rows,
+                rows=rows, ws=self.workspace,
             )
 
         # Clusters, including any LLM summaries carried on the projection.
@@ -624,14 +810,14 @@ class Neo4jStore(GraphStore):
             self._run(
                 """
                 UNWIND $clusters AS c
-                MERGE (cl:Cluster {id: c.id})
+                MERGE (cl:Cluster {id: c.id, workspaceId: $ws})
                 SET cl.summary = c.summary, cl.size = c.size, cl.builtAt = $now
                 WITH cl, c
                 UNWIND c.members AS member
-                MATCH (e:Entity {name: member})
+                MATCH (e:Entity {name: member, workspaceId: $ws})
                 MERGE (e)-[:IN_CLUSTER]->(cl)
                 """,
-                now=_now(),
+                now=_now(), ws=self.workspace,
                 clusters=[
                     {
                         "id": str(c.get("cluster_id", c.get("id"))),
@@ -650,11 +836,11 @@ class Neo4jStore(GraphStore):
         # here; load_graph() reconstructs it from the nodes and edges above.
         self._run(
             """
-            MERGE (g:GraphMeta {id: 1})
+            MERGE (g:GraphMeta {workspaceId: $ws})
             SET g.builtAt = $now, g.statsJson = $stats
             REMOVE g.graphJson
             """,
-            now=_now(), stats=json.dumps(stats),
+            ws=self.workspace, now=_now(), stats=json.dumps(stats),
         )
 
     def load_graph(self) -> dict[str, Any] | None:
@@ -666,21 +852,23 @@ class Neo4jStore(GraphStore):
         longer drift apart.
         """
         meta = self._run(
-            "MATCH (g:GraphMeta {id: 1}) RETURN g.builtAt AS builtAt, "
-            "g.statsJson AS statsJson"
+            "MATCH (g:GraphMeta {workspaceId: $ws}) RETURN g.builtAt AS builtAt, "
+            "g.statsJson AS statsJson",
+            ws=self.workspace,
         )
         if not meta:
             return None
 
         node_rows = self._run(
             """
-            MATCH (e:Entity)
+            MATCH (e:Entity) WHERE e.workspaceId = $ws
             RETURN e.name AS id, coalesce(e.label, e.name) AS label,
                    coalesce(e.type, 'unknown') AS type,
                    coalesce(e.pagerank, 0.0) AS pagerank,
                    e.clusterId AS cluster
             ORDER BY e.pagerank DESC
-            """
+            """,
+            ws=self.workspace,
         )
         nodes = []
         for r in node_rows:
@@ -702,12 +890,13 @@ class Neo4jStore(GraphStore):
         edge_rows = self._run(
             """
             MATCH (s:Entity)-[r]->(t:Entity)
-            WHERE type(r) <> 'IN_CLUSTER'
+            WHERE s.workspaceId = $ws AND type(r) <> 'IN_CLUSTER'
             RETURN s.name AS source, t.name AS target, type(r) AS relation,
                    coalesce(r.sourceQuote, '') AS source_quote,
                    coalesce(r.sourceNoteId, '') AS note_id,
                    coalesce(r.confidence, 1.0) AS confidence
-            """
+            """,
+            ws=self.workspace,
         )
         edges = [
             {
@@ -742,10 +931,11 @@ class Neo4jStore(GraphStore):
             self._run(
                 """
                 UNWIND $rows AS row
-                MATCH (e:Entity {name: row.name})
+                MATCH (e:Entity {name: row.name, workspaceId: $ws})
                 CALL db.create.setNodeVectorProperty(e, 'embedding', row.vec)
                 RETURN count(*)
                 """,
+                ws=self.workspace,
                 rows=[{"name": n, "vec": v} for n, v in zip(names, vecs)],
             )
         except Exception:
@@ -771,11 +961,13 @@ class Neo4jStore(GraphStore):
                 lexical = [
                     r["name"] for r in self._run(
                         """
-                        CALL db.index.fulltext.queryNodes('entitySearch', $q, {limit: $limit})
+                        CALL db.index.fulltext.queryNodes('entitySearch', $q, {limit: $over})
                         YIELD node, score
-                        RETURN node.name AS name ORDER BY score DESC
+                        WHERE node.workspaceId = $ws
+                        RETURN node.name AS name ORDER BY score DESC LIMIT $limit
                         """,
-                        q=" OR ".join(terms), limit=pool,
+                        q=" OR ".join(terms), limit=pool, over=pool * 5,
+                        ws=self.workspace,
                     )
                 ]
             except Exception:
@@ -789,11 +981,12 @@ class Neo4jStore(GraphStore):
                 semantic = [
                     r["name"] for r in self._run(
                         """
-                        CALL db.index.vector.queryNodes('entityVectors', $limit, $vec)
+                        CALL db.index.vector.queryNodes('entityVectors', $over, $vec)
                         YIELD node, score
-                        RETURN node.name AS name ORDER BY score DESC
+                        WHERE node.workspaceId = $ws
+                        RETURN node.name AS name ORDER BY score DESC LIMIT $limit
                         """,
-                        limit=pool, vec=vec,
+                        limit=pool, over=pool * 5, vec=vec, ws=self.workspace,
                     )
                 ]
             except Exception:
@@ -810,12 +1003,12 @@ class Neo4jStore(GraphStore):
         ordered = sorted(scores, key=lambda n: scores[n], reverse=True)[:limit]
         rows = self._run(
             """
-            MATCH (e:Entity) WHERE e.name IN $names
+            MATCH (e:Entity) WHERE e.workspaceId = $ws AND e.name IN $names
             RETURN e.name AS id, coalesce(e.label, e.name) AS label,
                    coalesce(e.type,'unknown') AS type,
                    coalesce(e.pagerank, 0.0) AS pagerank, e.clusterId AS cluster
             """,
-            names=ordered,
+            names=ordered, ws=self.workspace,
         )
         by_name = {r["id"]: r for r in rows}
         out = []
@@ -848,7 +1041,8 @@ class Neo4jStore(GraphStore):
         h = max(1, min(int(max_hops), 10))
         rows = self._run(
             f"""
-            MATCH (a:Entity {{name: $source}}), (b:Entity {{name: $target}})
+            MATCH (a:Entity {{name: $source, workspaceId: $ws}}),
+                  (b:Entity {{name: $target, workspaceId: $ws}})
             MATCH p = shortestPath((a)-[*..{h}]-(b))
             WHERE none(r IN relationships(p) WHERE type(r) = 'IN_CLUSTER')
             RETURN [n IN nodes(p) | n.name] AS names,
@@ -857,7 +1051,7 @@ class Neo4jStore(GraphStore):
                    [r IN relationships(p) | startNode(r).name] AS starts
             LIMIT 1
             """,
-            source=source, target=target,
+            source=source, target=target, ws=self.workspace,
         )
         if not rows:
             return []
@@ -887,12 +1081,13 @@ class Neo4jStore(GraphStore):
         """Nodes only — no edge scan, unlike the SQLite backend."""
         rows = self._run(
             """
-            MATCH (e:Entity)
+            MATCH (e:Entity) WHERE e.workspaceId = $ws
             RETURN e.name AS id, coalesce(e.label, e.name) AS label,
                    coalesce(e.type, 'unknown') AS type,
                    coalesce(e.pagerank, 0.0) AS pagerank, e.clusterId AS cluster
             ORDER BY e.pagerank DESC
-            """
+            """,
+            ws=self.workspace,
         )
         out = []
         for r in rows:
@@ -932,7 +1127,8 @@ class Neo4jStore(GraphStore):
             rows = self._run(
                 """
                 MATCH (e:Entity)-[r]-(o:Entity)
-                WHERE e.name IN $names AND type(r) <> 'IN_CLUSTER'
+                WHERE e.workspaceId = $ws AND e.name IN $names
+                  AND type(r) <> 'IN_CLUSTER'
                 WITH startNode(r) AS s, endNode(r) AS t, r
                 RETURN DISTINCT s.name AS subject, type(r) AS relation, t.name AS object,
                        coalesce(r.sourceQuote, '') AS quote,
@@ -942,7 +1138,7 @@ class Neo4jStore(GraphStore):
                 ORDER BY confidence DESC
                 LIMIT $limit
                 """,
-                names=sorted(names), limit=limit,
+                names=sorted(names), limit=limit, ws=self.workspace,
             )
         else:
             # Every relationship along any path of length <= d from a seed,
@@ -951,7 +1147,7 @@ class Neo4jStore(GraphStore):
             rows = self._run(
                 f"""
                 MATCH p = (e:Entity)-[*1..{d}]-(o:Entity)
-                WHERE e.name IN $names
+                WHERE e.workspaceId = $ws AND e.name IN $names
                   AND none(rel IN relationships(p) WHERE type(rel) = 'IN_CLUSTER')
                 UNWIND relationships(p) AS r
                 WITH r, startNode(r) AS s, endNode(r) AS t, min(length(p)) AS hops
@@ -963,7 +1159,7 @@ class Neo4jStore(GraphStore):
                 ORDER BY hops ASC, confidence DESC
                 LIMIT $limit
                 """,
-                names=sorted(names), limit=limit,
+                names=sorted(names), limit=limit, ws=self.workspace,
             )
 
         facts: list[dict[str, Any]] = []
@@ -988,16 +1184,22 @@ class Neo4jStore(GraphStore):
     def stats(self) -> dict[str, int]:
         r = self._run(
             """
-            OPTIONAL MATCH (n:Note)        WITH count(n) AS notes
-            OPTIONAL MATCH (p:Note) WHERE p.extractionStatus = 'pending'
+            OPTIONAL MATCH (n:Note) WHERE n.workspaceId = $ws
+              WITH count(n) AS notes
+            OPTIONAL MATCH (p:Note) WHERE p.workspaceId = $ws
+              AND p.extractionStatus = 'pending'
               WITH notes, count(p) AS pending
-            OPTIONAL MATCH ()-[t:ASSERTS]->() WITH notes, pending, count(t) AS triples
-            OPTIONAL MATCH (e:Entity)      WITH notes, pending, triples, count(e) AS entities
-            OPTIONAL MATCH (g:GraphMeta)   RETURN notes, pending, triples, entities,
-                                                  count(g) AS meta
-            """
+            OPTIONAL MATCH (a:Mention)-[t:ASSERTS]->() WHERE a.workspaceId = $ws
+              WITH notes, pending, count(t) AS triples
+            OPTIONAL MATCH (e:Entity) WHERE e.workspaceId = $ws
+              WITH notes, pending, triples, count(e) AS entities
+            OPTIONAL MATCH (g:GraphMeta) WHERE g.workspaceId = $ws
+              RETURN notes, pending, triples, entities, count(g) AS meta
+            """,
+            ws=self.workspace,
         )[0]
         return {
+            "workspace": self.workspace,
             "notes_total": r["notes"],
             "notes_pending": r["pending"],
             "triples_total": r["triples"],

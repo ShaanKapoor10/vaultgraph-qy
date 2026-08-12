@@ -32,7 +32,11 @@ def _build(name: str, workspace: str | None) -> GraphStore:
         # Imported lazily: the neo4j driver is an optional dependency, so a
         # sqlite-only install must not need it present.
         from brahmastra.stores.neo4j_store import Neo4jStore
-        return Neo4jStore()
+        # The workspace MUST be forwarded. Dropping it here silently bound
+        # every requested workspace to the process default, so writes meant
+        # for one graph landed in another — the exact leak property-based
+        # partitioning is vulnerable to.
+        return Neo4jStore(workspace=workspace)
     raise ValueError(
         f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
     )

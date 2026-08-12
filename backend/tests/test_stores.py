@@ -299,3 +299,35 @@ def test_cross_workspace_search_is_explicit_and_tagged():
     assert {n["id"] for n in hits} == {"p1", "w1"}
     # Every result says where it came from, so a caller can never confuse them.
     assert {n["workspace_id"] for n in hits} == {"default", "work"}
+
+
+def test_store_factory_forwards_the_requested_workspace():
+    """
+    Regression: the factory built the Neo4j store WITHOUT passing the
+    workspace, so every requested workspace silently bound to the process
+    default and writes meant for one graph landed in another. It overwrote a
+    real note before the isolation test caught it.
+
+    Asserted at the factory rather than through a backend, so it holds for any
+    backend added later.
+    """
+    from brahmastra.stores import get_store
+    for wid in ("office", "apollo"):
+        assert get_store(workspace=wid).workspace == wid
+
+    # And an explicit request must not disturb the cached default store.
+    default_before = get_store().workspace
+    get_store(workspace="office")
+    assert get_store().workspace == default_before
+
+
+def test_workspace_binding_survives_env_change():
+    """A store bound explicitly ignores BRAHMASTRA_WORKSPACE afterwards."""
+    import os
+    from brahmastra.stores import get_store
+    bound = get_store(workspace="apollo")
+    os.environ["BRAHMASTRA_WORKSPACE"] = "something-else"
+    try:
+        assert bound.workspace == "apollo"
+    finally:
+        os.environ.pop("BRAHMASTRA_WORKSPACE", None)
