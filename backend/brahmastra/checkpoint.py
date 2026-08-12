@@ -75,33 +75,37 @@ MIN_TRANSCRIPT_CHARS = 400
 MAX_ATTEMPTS = 3
 
 DISTIL_SYSTEM = (
-    "You convert an AI pair-programming transcript into durable knowledge for a "
-    "knowledge graph. You are a summariser, never a participant.\n\n"
-    "Write plain prose in explicit subject-relation-object sentences, because an "
-    "extractor reads this into triples. Name real entities every time: say 'The file "
-    "llm.py raises LLMQuotaExhausted', never 'it raises an exception there'. Never use "
-    "pronouns for things that have names.\n\n"
+    "You extract durable facts from a record of a software work session. The records "
+    "are labelled [REQUEST n] for what Shaan Kapoor asked and [WORK n] for what Claude "
+    "Code did. You are an archivist reading a finished record, not a participant in a "
+    "conversation.\n\n"
+    "Write short standalone sentences in subject-relation-object form, because an "
+    "extractor turns them into graph triples. Name real entities every time: say 'The "
+    "file llm.py raises LLMQuotaExhausted', never 'it raises an exception there'.\n\n"
     "Record only what stays true after the session ends: decisions and why they were "
-    "made, bugs and their root causes, how components relate, constraints discovered. "
-    "Skip the back-and-forth, the tool calls, the file listings, and anything already "
-    "obvious from reading the code.\n\n"
-    "You are a backstop for notes the assistant wrote deliberately during the session, "
-    "so prefer what it did NOT get to. Anything already covered by the listed notes is "
-    "a duplicate — leave it out.\n\n"
-    "State ONLY what the transcript shows. Never invent a commit, a command, a result "
-    "or a reply, and never write a line beginning with a speaker name — that is "
-    "continuing the conversation, which is the one thing you must not do.\n\n"
-    "Format: a single '# ' title line naming the work, then 1-4 short paragraphs. "
-    "If the transcript holds nothing durable, reply with exactly: SKIP"
+    "made, bugs and their root causes, how components relate, constraints discovered.\n\n"
+    "ACCURACY BEATS COMPLETENESS. Every sentence must be supported by the record in "
+    "front of you. If you are not certain a detail appears there — a file name, a "
+    "commit, a number, an outcome — leave the whole sentence out. Three facts you can "
+    "point at are worth more than ten that read well. Never state that something was "
+    "committed, pushed, deployed or finished unless the record says so.\n\n"
+    "You are a backstop for notes written deliberately during the session, so prefer "
+    "what they do not already cover.\n\n"
+    "Format, exactly: the FIRST line is '# ' followed by a short name for the work — "
+    "two to six words, a name and not a sentence. Every following line is one plain "
+    "factual sentence with no '#', no '-' and no numbering. Write 3 to 8 of them. "
+    "No dialogue, no speaker names, no questions, no offers of help. "
+    "If the record holds nothing durable, reply with exactly: SKIP"
 )
 
-# The instruction is repeated AFTER the transcript because the failure mode is
-# recency-driven: a small model that has just read 20k characters of dialogue
-# will carry on writing dialogue unless the last thing it sees says otherwise.
+# The instruction is repeated AFTER the record because the failure mode is
+# recency-driven: a small model that has just read 20k characters carries on in
+# whatever shape it just saw unless the last thing it reads says otherwise.
 DISTIL_REMINDER = (
-    "\n</transcript>\n\n"
-    "Summarise the transcript above as durable knowledge. Do NOT continue the "
-    "conversation and do NOT invent anything that is not in it. Begin with '# '."
+    "\n</record>\n\n"
+    "The record above has ended. Write the facts worth keeping from it. Omit anything "
+    "you cannot point to in the record — a shorter note is the correct answer when you "
+    "are unsure. Begin with '# '."
 )
 
 
@@ -179,8 +183,15 @@ def read_transcript(path: str | Path, start_line: int = 0) -> tuple[str, int]:
                 text = _block_text(row.get("message", {}).get("content"))
                 if _is_noise(text):
                     continue
-                role = "Shaan" if row["type"] == "user" else "Claude"
-                parts.append(f"{role}: {text.strip()}")
+                # Deliberately NOT "Shaan: ... Claude: ...". Speaker-colon
+                # formatting is a chat template, and ending a prompt with
+                # thousands of tokens of it makes "write the next turn" the
+                # single most likely continuation — which is exactly what a 7B
+                # model did, inventing a commit and a reply from Shaan. Framing
+                # each turn as a labelled record instead removes the pattern
+                # while keeping who-said-what.
+                kind = "REQUEST" if row["type"] == "user" else "WORK"
+                parts.append(f"[{kind} {len(parts) + 1}]\n{text.strip()}")
     except OSError:
         return "", start_line
 
@@ -299,10 +310,30 @@ class DistillationRejected(RuntimeError):
 # instead of summarising it.
 _SPEAKER = re.compile(r"^\s*(Shaan|Claude|Claude Code|User|Assistant|Human)\s*:", re.M)
 
+# Identifiers are the tokens a model invents most confidently and that do the
+# most damage in a code graph: a commit that was never made, a file that does
+# not exist. Both are cheap to check — they must appear in the source text.
+_HASH = re.compile(r"\b[0-9a-f]{7,40}\b")
+_FILENAME = re.compile(r"\b[\w./-]+\.(?:py|ts|tsx|js|jsx|md|json|ya?ml|toml|sql|env)\b")
 
-def _validate(text: str) -> str:
+
+def _ungrounded(text: str, source: str) -> list[str]:
     """
-    Reject output that is not a summary.
+    Identifiers asserted in `text` that do not occur in `source`.
+
+    A cheap, blunt grounding check. It cannot catch a wrong *claim* about a
+    real file, but it catches invention outright — and invention is what
+    happened: the fabricated note cited commit `30940a41`, which was actually a
+    note ID the model had seen and reshaped into a plausible hash.
+    """
+    haystack = source.lower()
+    claimed = set(_HASH.findall(text.lower())) | set(_FILENAME.findall(text.lower()))
+    return sorted(token for token in claimed if token not in haystack)
+
+
+def _validate(text: str, source: str = "") -> str:
+    """
+    Reject output that is not a faithful summary.
 
     This guard exists because the first real run produced a note that was
     entirely invented: a local 7B model continued the transcript, complete with
@@ -310,6 +341,10 @@ def _validate(text: str) -> str:
     thanks" from Shaan. Extracting that would have written fiction into the
     graph as fact — strictly worse than checkpointing nothing, because a wrong
     note is indistinguishable from a right one once it is a triple.
+
+    Every check here fails CLOSED: a rejection keeps the capture queued and
+    stores nothing. Losing a checkpoint is recoverable, poisoning the graph is
+    not, so anything doubtful is dropped rather than written.
     """
     if _SPEAKER.search(text):
         raise DistillationRejected("output continues the dialogue instead of summarising")
@@ -317,19 +352,20 @@ def _validate(text: str) -> str:
         raise DistillationRejected("output has no '# ' title line; format was ignored")
     if len(text) < 120:
         raise DistillationRejected(f"output too short to be a summary ({len(text)} chars)")
+    if "?" in text:
+        raise DistillationRejected("output asks a question; a record of facts contains none")
+
+    if source:
+        invented = _ungrounded(text, source)
+        if invented:
+            raise DistillationRejected(
+                f"output cites identifiers absent from the record: {', '.join(invented[:5])}"
+            )
     return text
 
 
-def _distil(conversation: str) -> str | None:
-    """Conversation -> note text, or None if there is nothing durable in it."""
-    from brahmastra.llm import chat, ollama_available
-
-    # Prefer the local model: this runs unattended and often mid-session, so it
-    # must not eat the cloud daily quota that extraction depends on. Override
-    # with CHECKPOINT_PROVIDER when a stronger summariser is worth the tokens.
-    provider = os.environ.get("CHECKPOINT_PROVIDER") or (
-        "ollama" if ollama_available() else None
-    )
+def _ask(conversation: str, provider: str | None) -> str:
+    from brahmastra.llm import chat
 
     known = _existing_titles()
     already = (
@@ -338,26 +374,77 @@ def _distil(conversation: str) -> str | None:
         + "\n\n"
     ) if known else ""
 
-    text = chat(
+    return chat(
         DISTIL_SYSTEM,
-        f"{already}<transcript>\n{conversation}{DISTIL_REMINDER}",
-        temperature=0.2,
-        max_tokens=1200,
+        f"{already}<record>\n{conversation}{DISTIL_REMINDER}",
+        temperature=0.0,  # nothing here benefits from sampling variety
+        max_tokens=900,
         timeout=180,
         provider=provider,
     ).strip()
 
+
+def _distil(conversation: str) -> str | None:
+    """Conversation -> note text, or None if there is nothing durable in it."""
+    from brahmastra.llm import ollama_available, resolve_provider
+
+    # Prefer the local model: this runs unattended and often mid-session, so it
+    # must not eat the cloud daily quota that extraction depends on. Override
+    # with CHECKPOINT_PROVIDER when a stronger summariser is worth the tokens.
+    pinned = os.environ.get("CHECKPOINT_PROVIDER")
+    first = pinned or ("ollama" if ollama_available() else None)
+
+    text = _ask(conversation, first)
     if not text or text.upper().startswith("SKIP"):
         return None
-    return _validate(text)
+
+    try:
+        return _validate(text, conversation)
+    except DistillationRejected as rejected:
+        # A small local model failing this is expected, and it is the ONLY
+        # reason to spend cloud tokens here: one retry, on a stronger model,
+        # rather than discarding a session's knowledge over a format slip.
+        if pinned:
+            raise
+        try:
+            fallback = resolve_provider()
+        except Exception:
+            raise rejected
+        if fallback == first:
+            raise
+
+        _log(f"{rejected}; retrying on {fallback}")
+        retry = _ask(conversation, fallback)
+        if not retry or retry.upper().startswith("SKIP"):
+            return None
+        return _validate(retry, conversation)
+
+
+MAX_TITLE_CHARS = 70
 
 
 def _split_title(note: str) -> tuple[str, str]:
-    """Pull the leading '# ' heading out as the note title."""
+    """
+    Pull the leading '# ' heading out as the note title and tidy the body.
+
+    Formatting slips are normalised rather than rejected. Rejection is for
+    output that might be untrue; punishing an accurate note for putting '#' on
+    every line would throw away good knowledge over cosmetics — which happened:
+    a run produced eight correct facts, each prefixed with '#' because the
+    model read "one per line" as "one heading per line".
+    """
     lines = note.splitlines()
+    title = "Session Checkpoint"
     if lines and lines[0].lstrip().startswith("#"):
-        return lines[0].lstrip("# ").strip(), "\n".join(lines[1:]).strip()
-    return "Session Checkpoint", note
+        title = lines[0].lstrip("#").strip() or title
+        lines = lines[1:]
+
+    # A title is a name, not a sentence — long ones read badly in recall lists.
+    if len(title) > MAX_TITLE_CHARS:
+        title = title[:MAX_TITLE_CHARS].rsplit(" ", 1)[0].rstrip(" ,;:") + "…"
+
+    body = "\n".join(line.lstrip("#").lstrip("-").strip() for line in lines)
+    return title.rstrip("."), body.strip()
 
 
 def drain() -> dict[str, Any]:

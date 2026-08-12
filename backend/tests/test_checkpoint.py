@@ -181,6 +181,151 @@ def test_a_model_that_continues_the_conversation_is_rejected(cp):
         cp._validate(fabricated)
 
 
+def test_transcript_is_not_formatted_as_a_chat(cp, tmp_path):
+    """
+    The root cause of the fabrication. Ending a prompt with thousands of tokens
+    of 'Shaan: ... Claude: ...' makes "write the next turn" the most likely
+    continuation, so the model wrote one. Turns are now labelled records, which
+    keeps who-said-what without handing the model a chat template to extend.
+    """
+    path = _transcript(tmp_path, [
+        _msg("user", [{"type": "text", "text": "fix the sync"}]),
+        _msg("assistant", [{"type": "text", "text": "notion-client 3.x dropped query."}]),
+    ])
+    convo, _ = cp.read_transcript(path, 0)
+
+    assert "Shaan:" not in convo and "Claude:" not in convo
+    assert "[REQUEST 1]" in convo
+    assert "[WORK 2]" in convo
+    assert "fix the sync" in convo
+
+
+def test_invented_identifiers_are_rejected(cp):
+    """
+    The fabricated note cited commit `30940a41` — actually a note ID the model
+    had seen and reshaped into a plausible hash. An identifier the record never
+    contained is invention, and invention is what must never reach the graph.
+    """
+    record = "[WORK 1]\nThe file llm.py raises LLMQuotaExhausted on a daily cap."
+
+    grounded = ("# Quota Handling\n\nThe file llm.py raises LLMQuotaExhausted when the "
+                "provider reports a daily cap. Aborting at the first quota error keeps "
+                "the run short instead of retrying every remaining note.")
+    assert cp._validate(grounded, record) == grounded
+
+    with pytest.raises(cp.DistillationRejected, match="30940a41"):
+        cp._validate(
+            "# Quota Handling\n\nClaude Code committed the quota fix as 30940a41 and "
+            "pushed it to the branch feat/multi-workspace successfully.",
+            record,
+        )
+
+    with pytest.raises(cp.DistillationRejected, match="ghost.py"):
+        cp._validate(
+            "# Quota Handling\n\nThe file ghost.py raises LLMQuotaExhausted whenever "
+            "the provider reports that the daily token cap for the account is spent.",
+            record,
+        )
+
+
+def test_distil_calls_the_llm_for_real(cp):
+    """
+    Every other test here patches _ask, which mocks straight past the code that
+    builds and sends the prompt — and that is exactly where a NameError for the
+    unimported `chat` survived a green suite. This one stubs the provider call
+    itself, so the real prompt-building path runs.
+    """
+    record = "[WORK 1]\nThe file sync.py branches on the capability of the client."
+    good = ("# Sync Compatibility\n\nThe file sync.py branches on the capability of "
+            "the client rather than on the installed version number, because both "
+            "generations of the SDK are present.")
+    seen: dict = {}
+
+    def fake_chat(system, user, **kwargs):
+        seen["system"] = system
+        seen["user"] = user
+        seen["kwargs"] = kwargs
+        return good
+
+    with patch("brahmastra.llm.chat", side_effect=fake_chat), \
+         patch("brahmastra.llm.ollama_available", return_value=True):
+        assert cp._distil(record) == good
+
+    assert "<record>" in seen["user"], "the record must be delimited"
+    assert seen["user"].rstrip().endswith("Begin with '# '."), \
+        "the instruction must come last; recency is what the model follows"
+    assert record in seen["user"]
+    assert seen["kwargs"]["provider"] == "ollama"
+
+
+def test_a_rejected_local_summary_escalates_once(cp):
+    """
+    Correctness first, but a format slip from a 7B model should not cost a
+    session's knowledge. One retry on a stronger provider, never a loop.
+    """
+    record = "[WORK 1]\nThe file sync.py branches on the capability."
+    good = ("# Sync Compatibility\n\nThe file sync.py branches on the capability "
+            "rather than the installed version number of the SDK, because both "
+            "generations of the client are present on this machine.")
+    calls: list[str | None] = []
+
+    def answer(_conversation, provider):
+        calls.append(provider)
+        return "Claude: sure, I'll do that next." if len(calls) == 1 else good
+
+    with patch.object(cp, "_ask", side_effect=answer), \
+         patch("brahmastra.llm.ollama_available", return_value=True), \
+         patch("brahmastra.llm.resolve_provider", return_value="groq"):
+        assert cp._distil(record) == good
+
+    assert calls == ["ollama", "groq"], "must retry exactly once, on a different provider"
+
+
+def test_escalation_does_not_loop_forever(cp):
+    """A second bad answer is a rejection, not a third attempt."""
+    record = "[WORK 1]\nThe file sync.py branches on the capability."
+    calls: list[str | None] = []
+
+    def always_bad(_conversation, provider):
+        calls.append(provider)
+        return "Claude: happy to help!"
+
+    with patch.object(cp, "_ask", side_effect=always_bad), \
+         patch("brahmastra.llm.ollama_available", return_value=True), \
+         patch("brahmastra.llm.resolve_provider", return_value="groq"):
+        with pytest.raises(cp.DistillationRejected):
+            cp._distil(record)
+
+    assert len(calls) == 2
+
+
+def test_formatting_slips_are_tidied_not_rejected(cp):
+    """
+    Observed: a run produced eight accurate facts, each prefixed with '#'
+    because the model read "one per line" as "one heading per line", and used a
+    whole sentence as the title. None of that makes the note untrue, so it is
+    normalised — rejection is reserved for output that might be false.
+    """
+    messy = (
+        "# The model generated a fabricated note because the transcript looked like a chat log.\n"
+        "# A 7B model holds an instruction across long context worse than a 70B one.\n"
+        "- The rejected checkpoint is kept queued rather than stored.\n"
+    )
+    title, body = cp._split_title(messy)
+
+    assert len(title) <= cp.MAX_TITLE_CHARS
+    assert not title.endswith(".")
+    assert "#" not in body and not body.startswith("-")
+    assert "A 7B model holds an instruction" in body
+    assert "kept queued rather than stored" in body
+
+
+def test_missing_title_still_yields_a_usable_note(cp):
+    title, body = cp._split_title("The file sync.py branches on the capability.")
+    assert title == "Session Checkpoint"
+    assert body == "The file sync.py branches on the capability."
+
+
 def test_validation_requires_the_note_format(cp):
     good = "# Quota Fail-Fast\n\nThe file llm.py raises LLMQuotaExhausted when Groq " \
            "reports a daily cap, and the file extraction.py aborts the run at once."
