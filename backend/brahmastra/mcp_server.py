@@ -185,3 +185,95 @@ def brahmastra_add_note(title: str, content: str, note_id: str = "") -> str:
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")
+
+
+# ---------------------------------------------------------------------------
+# Workspaces — several independent graphs
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+def brahmastra_list_workspaces() -> str:
+    """
+    List the knowledge graphs available, and which one is currently active.
+
+    Each workspace is a fully separate graph: notes, entities and relations in
+    one are invisible to the others. Use this before adding a note to confirm
+    which graph it will land in.
+    """
+    db.init_db()
+    return json.dumps({
+        "current": db.workspace(),
+        "workspaces": db.list_workspaces(),
+    }, indent=2)
+
+
+@mcp.tool()
+def brahmastra_create_workspace(
+    name: str,
+    id: str = "",
+    description: str = "",
+    notion_database_id: str = "",
+) -> str:
+    """
+    Create a new, empty knowledge graph.
+
+    Use for a separate area of knowledge that should not mix with the current
+    one — work versus personal, or a single project. The new workspace starts
+    empty and inherits nothing.
+
+    name: display name, e.g. "Office"
+    id:   optional slug; derived from name when omitted
+    description: what this graph is for
+    notion_database_id: this workspace's own Notion source (optional)
+    """
+    from brahmastra.workspace import InvalidWorkspaceId, slugify
+    db.init_db()
+    try:
+        created = db.create_workspace(
+            id=id or slugify(name),
+            name=name,
+            description=description,
+            notion_database_id=notion_database_id or None,
+        )
+    except InvalidWorkspaceId as e:
+        return json.dumps({"error": f"invalid workspace id: {e}"}, indent=2)
+    except NotImplementedError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps({
+        "created": created,
+        # Creating does not switch: an agent should not silently redirect
+        # where the user's next note gets written.
+        "note": (
+            f"Created but NOT switched to. The active workspace is still "
+            f"{db.workspace()!r}. Set BRAHMASTRA_WORKSPACE={created['id']} to "
+            f"make it active, or pass the workspace explicitly."
+        ),
+    }, indent=2)
+
+
+@mcp.tool()
+def brahmastra_search_all_workspaces(query: str, limit: int = 10) -> str:
+    """
+    Search the full text of notes across EVERY workspace.
+
+    Normal search only sees the active graph. Use this when you do not know
+    which workspace holds something. Each result reports the workspace it came
+    from.
+    """
+    db.init_db()
+    try:
+        hits = db.search_notes_across(query, None, limit)
+    except NotImplementedError as e:
+        return json.dumps({"error": str(e)}, indent=2)
+    return json.dumps({
+        "query": query,
+        "results": [
+            {
+                "workspace": h.get("workspace_id"),
+                "id": h.get("id"),
+                "title": h.get("title"),
+                "snippet": (h.get("content") or "")[:280],
+            }
+            for h in hits
+        ],
+    }, indent=2)
