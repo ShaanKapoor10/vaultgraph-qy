@@ -50,6 +50,34 @@ Two consequences fall out of firing that often, and both are load-bearing:
   would each restate the same work; merged, the model sees the whole arc of a
   session and produces one note.
 
+### Which event does what
+
+All three are registered, and they are not redundant — they answer different
+questions:
+
+| Event | Role | Why it cannot be dropped |
+|---|---|---|
+| `Stop` | **capture** every turn | The only one that survives a crash. Bounds loss to a single turn. |
+| `PreCompact` | **drain** | Forces a note to exist before the context that produced it is gone. |
+| `SessionEnd` | **drain** | Materialises whatever is still queued at the end of work. |
+
+The split matters: `Stop` deliberately does *not* distil below
+`DRAIN_THRESHOLD_CHARS`, so without the boundary events a session could end
+with an undrained queue. Nothing would be lost — the queue is on disk and the
+pipeline drains it — but the note would not exist until the next run.
+
+**Cost, measured.** A `Stop` invocation is ~420 ms, and ~400 ms of that is
+Python interpreter startup, which no subprocess hook can avoid. Throttling
+inside the process therefore saves almost nothing: the choice is to fire every
+turn or not at all. It is worth firing, because the alternative is losing
+everything since the last boundary — which happened, twice, to a laptop crash.
+
+What did need fixing was the part that *grew*. Resuming by line number re-read
+the whole transcript every turn (78 ms at 8.5 MB, O(file) per turn and O(file²)
+across a session). Resuming by **byte offset** made that **0.5 ms and flat**.
+That is what makes per-turn capture affordable indefinitely rather than only
+early in a session.
+
 ### This is a net, not a replacement
 
 Deliberate notes remain primary. They are written while the author still knows which

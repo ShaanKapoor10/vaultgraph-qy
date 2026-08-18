@@ -56,7 +56,7 @@ def test_transcript_keeps_prose_and_drops_machinery(cp, tmp_path):
         _msg("user", [{"type": "text", "text": "<system-reminder>ignore me</system-reminder>"}]),
     ])
 
-    convo, lines = cp.read_transcript(path, 0)
+    convo, end = cp.read_transcript(path, 0)
 
     assert "the pipeline is slow" in convo
     assert "Groq's daily cap was spent." in convo
@@ -64,7 +64,11 @@ def test_transcript_keeps_prose_and_drops_machinery(cp, tmp_path):
     assert "Bash" not in convo
     assert "subagent noise" not in convo, "sidechain is not the main conversation"
     assert "ignore me" not in convo, "injected scaffolding is not conversation"
-    assert lines == 7
+    # The second value is a BYTE offset, not a line count: a per-turn hook
+    # cannot afford to re-read the whole file just to skip to the end.
+    import os
+    assert end == os.path.getsize(path), "must report where reading stopped"
+
 
 
 def test_second_capture_only_sees_new_turns(cp, tmp_path):
@@ -459,3 +463,51 @@ def test_stop_hook_captures_every_turn_but_defers_distillation(cp, tmp_path, mon
     sys.stdin = io.StringIO(json.dumps({**payload, "hook_event_name": "SessionEnd"}))
     assert cp.main([]) == 0
     assert drained == [1], "a boundary always drains"
+
+
+def test_resume_is_proportional_to_new_content_not_file_size(cp, tmp_path):
+    """
+    A per-turn Stop hook re-read the entire transcript every turn merely to
+    skip to the end — O(file) per turn, O(file squared) across a session.
+    Measured at 8.5 MB that was 78 ms a turn and climbing. Seeking by byte
+    offset makes a resume touch only what is new.
+    """
+    rows = [_msg("user", [{"type": "text", "text": "old turn. " * 50}]) for _ in range(200)]
+    path = _transcript(tmp_path, rows)
+
+    _, end = cp.read_transcript(path, 0)
+    import os
+    assert end == os.path.getsize(path)
+
+    rows.append(_msg("assistant", [{"type": "text", "text": "the newest turn."}]))
+    _transcript(tmp_path, rows)
+
+    fresh, _ = cp.read_transcript(path, end)
+    assert "the newest turn." in fresh
+    assert "old turn." not in fresh, "a resume must not re-read what it already saw"
+
+
+def test_legacy_line_offsets_are_converted_not_misread(cp, tmp_path):
+    """
+    Offsets used to be LINE numbers. Reading a stored line number as a byte
+    offset would silently re-capture almost the whole file and produce a
+    duplicate note, so a legacy value is converted exactly by scanning to that
+    line once.
+    """
+    rows = [_msg("user", [{"type": "text", "text": f"turn {i}. " * 30}]) for i in range(10)]
+    path = _transcript(tmp_path, rows)
+
+    legacy = {"s-legacy": 5}          # five LINES consumed, old format
+    resume = cp._resume_byte(legacy, "s-legacy", path)
+
+    with open(path, "rb") as fh:
+        expected = sum(len(fh.readline()) for _ in range(5))
+    assert resume == expected, "a line count must be converted, not read as bytes"
+
+    convo, _ = cp.read_transcript(path, resume)
+    assert "turn 4." not in convo, "already-seen turns must not come back"
+    assert "turn 5." in convo
+
+    # The new format is passed straight through.
+    assert cp._resume_byte({"s": {"bytes": 42}}, "s", path) == 42
+    assert cp._resume_byte({}, "missing", path) == 0

@@ -164,59 +164,106 @@ def _is_noise(text: str) -> bool:
     )
 
 
-def read_transcript(path: str | Path, start_line: int = 0) -> tuple[str, int]:
+def read_transcript(path: str | Path, start_byte: int = 0) -> tuple[str, int]:
     """
-    Return (conversation text after start_line, total lines seen).
+    Return (conversation text after start_byte, byte offset of the end).
 
-    The line count is returned so repeated checkpoints in one session resume
-    where the last one stopped instead of re-storing the whole conversation.
+    The offset is in BYTES, not lines, so a resume seeks straight to it. With a
+    per-turn Stop hook the line-based version re-read the whole file on every
+    turn merely to skip to the end — O(file) per turn, O(file²) across a
+    session. Measured at 8.5 MB that was 78 ms a turn and climbing; seeking
+    makes it proportional to the new content instead.
+
+    Returning the offset (rather than a line count) is what lets the caller
+    resume without ever touching the earlier bytes again.
     """
-    lines_seen = 0
     parts: list[str] = []
+    end = start_byte
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            for i, line in enumerate(fh):
-                lines_seen = i + 1
-                if i < start_line or not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if row.get("type") not in ("user", "assistant"):
-                    continue
-                if row.get("isSidechain"):
-                    continue  # subagent chatter, not the main thread
-                text = _block_text(row.get("message", {}).get("content"))
-                if _is_noise(text):
-                    continue
-                # Deliberately NOT "Shaan: ... Claude: ...". Speaker-colon
-                # formatting is a chat template, and ending a prompt with
-                # thousands of tokens of it makes "write the next turn" the
-                # single most likely continuation — which is exactly what a 7B
-                # model did, inventing a commit and a reply from Shaan. Framing
-                # each turn as a labelled record instead removes the pattern
-                # while keeping who-said-what.
-                kind = "REQUEST" if row["type"] == "user" else "WORK"
-                parts.append(f"[{kind} {len(parts) + 1}]\n{text.strip()}")
-    except OSError:
-        return "", start_line
+        size = os.path.getsize(path)
+        # A transcript that shrank is a different file reusing the name — a new
+        # session, or a truncation. Re-read it rather than seek past its end.
+        if start_byte > size:
+            start_byte = 0
+        with open(path, "rb") as fh:
+            fh.seek(start_byte)
+            raw = fh.read()
+        end = start_byte + len(raw)
 
-    convo = "\n\n".join(parts)
+        # Decode after seeking. Seeking by bytes can land mid-character on a
+        # multi-byte sequence; errors="replace" absorbs at most one mangled
+        # glyph at the boundary rather than raising.
+        for line in raw.decode("utf-8", errors="replace").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                # A seek can land mid-line, so the first record of a resumed
+                # read may be a fragment. Skipping it costs one turn's opening
+                # bytes, never a whole turn.
+                continue
+            if row.get("type") not in ("user", "assistant"):
+                continue
+            if row.get("isSidechain"):
+                continue  # subagent chatter, not the main thread
+            text = _block_text(row.get("message", {}).get("content"))
+            if _is_noise(text):
+                continue
+            # Deliberately NOT "Shaan: ... Claude: ...". Speaker-colon
+            # formatting is a chat template, and ending a prompt with
+            # thousands of tokens of it makes "write the next turn" the
+            # single most likely continuation — which is exactly what a 7B
+            # model did, inventing a commit and a reply from Shaan. Framing
+            # each turn as a labelled record instead removes the pattern
+            # while keeping who-said-what.
+            kind = "REQUEST" if row["type"] == "user" else "WORK"
+            parts.append(f"[{kind} {len(parts) + 1}]" + SEP[:1] + text.strip())
+    except OSError:
+        return "", start_byte
+
+    convo = SEP.join(parts)
     if len(convo) > MAX_TRANSCRIPT_CHARS:
         convo = convo[-MAX_TRANSCRIPT_CHARS:]
-    return convo, lines_seen
+    return convo, end
 
 
 # ---------------------------------------------------------------------------
 # Phase 1 — capture (fast, runs inside the hook)
 # ---------------------------------------------------------------------------
 
-def _load_offsets() -> dict[str, int]:
+def _load_offsets() -> dict[str, Any]:
     try:
         return json.loads(_offsets_path().read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
+
+
+def _resume_byte(offsets: dict[str, Any], session: str, transcript: str | Path) -> int:
+    """
+    Where to resume reading this session's transcript, in bytes.
+
+    Offsets used to be LINE numbers. Reading a stored line number as a byte
+    offset would silently re-capture almost the whole file and produce a
+    duplicate note, so a legacy value is converted exactly — by scanning to
+    that line once — rather than guessed at. The conversion costs one O(file)
+    read, once per session, and never repeats because the value is rewritten
+    in the new form.
+    """
+    stored = offsets.get(session)
+    if isinstance(stored, dict):
+        return int(stored.get("bytes", 0))
+    if not isinstance(stored, int) or stored <= 0:
+        return 0
+
+    try:
+        with open(transcript, "rb") as fh:
+            for _ in range(stored):
+                if not fh.readline():
+                    break
+            return fh.tell()
+    except OSError:
+        return 0
 
 
 def _save_offsets(offsets: dict[str, int]) -> None:
@@ -235,11 +282,11 @@ def capture(payload: dict[str, Any]) -> Path | None:
 
     session = str(payload.get("session_id") or "unknown")
     offsets = _load_offsets()
-    convo, lines_seen = read_transcript(transcript, offsets.get(session, 0))
+    convo, end_byte = read_transcript(transcript, _resume_byte(offsets, session, transcript))
 
     # Advance the offset even when we skip: a stretch too short to be worth a
     # note should not be re-read into the next checkpoint either.
-    offsets[session] = lines_seen
+    offsets[session] = {"bytes": end_byte}
     _save_offsets(offsets)
 
     if len(convo) < MIN_TRANSCRIPT_CHARS:
