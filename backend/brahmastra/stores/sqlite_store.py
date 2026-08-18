@@ -45,6 +45,14 @@ CREATE TABLE IF NOT EXISTS notes (
     last_synced       TEXT,
     extraction_status TEXT NOT NULL DEFAULT 'pending'
         CHECK(extraction_status IN ('pending','done','error')),
+    -- Notion projection. `publish` is opt-in curation: a note is only given a
+    -- Notion page when something asks for one, so session checkpoints and
+    -- working memory stay in the graph instead of filling a human workspace.
+    -- `notion_page_id` is the page created for it, and MUST be persisted —
+    -- without it every run creates the page again instead of updating it.
+    -- For notes pulled FROM Notion this stays NULL: their own id is the page id.
+    publish           INTEGER NOT NULL DEFAULT 0,
+    notion_page_id    TEXT,
     -- Ids are unique WITHIN a workspace, not globally: two workspaces may
     -- legitimately hold notes with the same id from different Notion sources.
     PRIMARY KEY (workspace_id, id)
@@ -140,6 +148,7 @@ def _run_migration(path: Path) -> None:
         conn.execute("PRAGMA foreign_keys=OFF")
         conn.execute("BEGIN")
         _migrate_to_workspaces(conn)
+        _add_missing_columns(conn)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -147,6 +156,22 @@ def _run_migration(path: Path) -> None:
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.close()
+
+
+def _add_missing_columns(conn: sqlite3.Connection) -> None:
+    """
+    Add columns introduced after a database was created.
+
+    Purely additive, so unlike the workspace migration this needs no table
+    rebuild — which is the whole point. Rebuilding `notes` is what once
+    cascaded and deleted every triple; ALTER TABLE ADD COLUMN touches nothing
+    else. Adding a column is also the one schema change SQLite does cheaply.
+    """
+    have = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+    if "publish" not in have:
+        conn.execute("ALTER TABLE notes ADD COLUMN publish INTEGER NOT NULL DEFAULT 0")
+    if "notion_page_id" not in have:
+        conn.execute("ALTER TABLE notes ADD COLUMN notion_page_id TEXT")
 
 
 def _migrate_to_workspaces(conn: sqlite3.Connection) -> None:
@@ -411,26 +436,32 @@ class SQLiteStore(GraphStore):
         content: str,
         last_edited: str | None = None,
         mark_pending: bool = True,
+        publish: bool | None = None,
     ) -> None:
         status = "pending" if mark_pending else "done"
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO notes (id, workspace_id, title, content, last_edited,
-                                   last_synced, extraction_status)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                                   last_synced, extraction_status, publish)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, id) DO UPDATE SET
                     title = excluded.title,
                     content = excluded.content,
                     last_edited = excluded.last_edited,
                     last_synced = excluded.last_synced,
+                    -- None means "leave as is", so a sync cannot silently
+                    -- unpublish a note somebody chose to publish.
+                    publish = COALESCE(?, notes.publish),
                     extraction_status = CASE
                         WHEN excluded.extraction_status = 'pending' THEN 'pending'
                         WHEN excluded.last_edited != notes.last_edited THEN 'pending'
                         ELSE notes.extraction_status
                     END
                 """,
-                (id, self.workspace, title, content, last_edited, _now(), status),
+                (id, self.workspace, title, content, last_edited, _now(), status,
+                 1 if publish else 0,
+                 None if publish is None else (1 if publish else 0)),
             )
 
     def get_notes(self, status: str | None = None) -> list[dict[str, Any]]:
@@ -479,6 +510,14 @@ class SQLiteStore(GraphStore):
                 (self.workspace, id),
             ).fetchone()
         return dict(row) if row else None
+
+    def set_notion_page_id(self, note_id: str, page_id: str) -> None:
+        """Remember the Notion page created for this note."""
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE notes SET notion_page_id = ? WHERE workspace_id = ? AND id = ?",
+                (page_id, self.workspace, note_id),
+            )
 
     def set_note_status(self, id: str, status: str) -> None:
         if status not in ("pending", "done", "error"):

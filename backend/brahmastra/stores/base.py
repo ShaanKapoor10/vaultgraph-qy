@@ -65,6 +65,16 @@ class GraphStore(ABC):
     def get_note(self, id: str) -> dict[str, Any] | None: ...
 
     @abstractmethod
+    def set_notion_page_id(self, note_id: str, page_id: str) -> None:
+        """
+        Record the Notion page a Brahmastra-born note was published to.
+
+        Not abstract: a backend without a Notion projection simply never
+        publishes. Persisting the id is what stops write-back creating a fresh
+        page on every run instead of updating the one it made.
+        """
+        raise NotImplementedError
+
     def set_note_status(self, id: str, status: str) -> None:
         """Set extraction status: 'pending' | 'done' | 'error'."""
 

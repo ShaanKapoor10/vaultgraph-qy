@@ -163,9 +163,14 @@ def _process_page(
     existing: dict[str, dict],
     counters: dict[str, int],
     errors: list[dict[str, str]],
+    projections: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     page_id = page["id"]
     if page.get("archived") or page.get("in_trash"):
+        return
+    if page_id in projections:
+        # Our own published page; the note it came from is already in the graph.
+        counters["unchanged"] += 1
         return
 
     last_edited = page.get("last_edited_time", "")
@@ -320,6 +325,16 @@ def run_sync() -> dict[str, Any]:
     counters = {"synced": 0, "unchanged": 0}
     errors: list[dict[str, str]] = []
 
+    # Pages Brahmastra PUBLISHED are projections of notes we already hold.
+    # Pulling them back would store the same content twice — once under the
+    # local note id, once under the Notion page id — and double every triple
+    # extracted from it. This is the same feedback loop the insight toggle is
+    # skipped for, one level up: there we ignore our own blocks, here our own
+    # pages.
+    projections = {
+        n["notion_page_id"] for n in existing.values() if n.get("notion_page_id")
+    }
+
     # Decide mode: is target_id a database? Probe once per process, then cache.
     # The probe intentionally fails for page IDs; silence ALL logging around it
     # (logging.disable is global+temporary) so the SDK's expected WARNING/retries
@@ -343,7 +358,7 @@ def run_sync() -> dict[str, Any]:
     if is_database:
         mode = "database"
         for page in _iter_database_rows(client, target_id):
-            _process_page(client, page, existing, counters, errors)
+            _process_page(client, page, existing, counters, errors, projections)
     else:
         # Page mode: pull every page the integration can access via search.
         mode = "pages"
@@ -362,7 +377,7 @@ def run_sync() -> dict[str, Any]:
             for page in resp.get("results", []):
                 if page.get("object") != "page":
                     continue
-                _process_page(client, page, existing, counters, errors)
+                _process_page(client, page, existing, counters, errors, projections)
             if not resp.get("has_more"):
                 break
             cursor = resp.get("next_cursor")

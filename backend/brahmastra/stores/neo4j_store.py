@@ -435,6 +435,7 @@ class Neo4jStore(GraphStore):
         content: str,
         last_edited: str | None = None,
         mark_pending: bool = True,
+        publish: bool | None = None,
     ) -> None:
         # Mirrors the SQLite CASE: caller-requested pending wins, otherwise a
         # changed last_edited re-opens the note, otherwise keep current status.
@@ -450,11 +451,17 @@ class Neo4jStore(GraphStore):
                     WHEN n.lastEdited IS NOT NULL AND n.lastEdited <> $lastEdited THEN 'pending'
                     ELSE n.extractionStatus
                 END,
-                n.lastEdited = $lastEdited
+                n.lastEdited = $lastEdited,
+                // NULL means "leave as is", so a sync cannot silently
+                // unpublish a note somebody chose to publish.
+                n.publish = CASE WHEN $publish IS NULL
+                                 THEN coalesce(n.publish, false)
+                                 ELSE $publish END
             """,
             id=id, ws=self.workspace, title=title, content=content,
             lastEdited=last_edited, now=_now(),
             status=("pending" if mark_pending else "done"),
+            publish=(None if publish is None else bool(publish)),
         )
         self._embed_note(id, title, content)
 
@@ -495,6 +502,8 @@ class Neo4jStore(GraphStore):
                 "last_synced": n.get("lastSynced"),
                 "extraction_status": n.get("extractionStatus"),
                 "workspace_id": n.get("workspaceId"),
+                "publish": bool(n.get("publish")),
+                "notion_page_id": n.get("notionPageId"),
             })
         return out
 
@@ -625,6 +634,13 @@ class Neo4jStore(GraphStore):
         )
         got = self._note_rows(rows)
         return got[0] if got else None
+
+    def set_notion_page_id(self, note_id: str, page_id: str) -> None:
+        """Remember the Notion page created for this note."""
+        self._run(
+            "MATCH (n:Note {id: $id, workspaceId: $ws}) SET n.notionPageId = $pid",
+            id=note_id, ws=self.workspace, pid=page_id,
+        )
 
     def set_note_status(self, id: str, status: str) -> None:
         if status not in ("pending", "done", "error"):

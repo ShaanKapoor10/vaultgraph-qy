@@ -171,20 +171,22 @@ def brahmastra_get_contradictions() -> str:
 
 
 @mcp.tool()
-def brahmastra_add_note(title: str, content: str, note_id: str = "") -> str:
-    """Add or update a note. Marks it pending so the next pipeline run extracts triples from it."""
+def brahmastra_add_note(
+    title: str, content: str, note_id: str = "", publish: bool = False
+) -> str:
+    """
+    Add or update a note. Marks it pending so the next pipeline run extracts triples from it.
+
+    publish=True also gives the note a page in the workspace's Notion database,
+    created on the next write-back. Use it for prose a human will want to
+    re-read — decisions, design records. Leave it off for working memory such
+    as session checkpoints, which belong in the graph, not in Notion.
+    """
     db.init_db()
     nid = note_id or str(uuid.uuid4())[:8]
-    db.upsert_note(nid, title, content, mark_pending=True)
-    return json.dumps({"status": "added", "note_id": nid, "title": title}, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    mcp.run(transport="stdio")
+    db.upsert_note(nid, title, content, mark_pending=True, publish=publish or None)
+    return json.dumps({"status": "added", "note_id": nid, "title": title,
+                       "publish": bool(publish)}, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -277,3 +279,18 @@ def brahmastra_search_all_workspaces(query: str, limit: int = 10) -> str:
             for h in hits
         ],
     }, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
+#
+# MUST be the last thing in this file. mcp.run() blocks forever, so any @mcp.tool
+# defined below it is never registered — which is exactly what happened: the
+# three workspace tools sat after this block and were invisible to every client,
+# while `from brahmastra.mcp_server import mcp` listed all ten, because an
+# import skips __main__ and runs the whole module. That gap between "the code
+# has the tool" and "the server serves it" cost a long hunt.
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")

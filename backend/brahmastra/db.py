@@ -118,8 +118,13 @@ def upsert_note(
     content: str,
     last_edited: str | None = None,
     mark_pending: bool = True,
+    publish: bool | None = None,
 ) -> None:
-    get_store().upsert_note(id, title, content, last_edited, mark_pending)
+    get_store().upsert_note(id, title, content, last_edited, mark_pending, publish)
+
+
+def set_notion_page_id(note_id: str, page_id: str) -> None:
+    get_store().set_notion_page_id(note_id, page_id)
 
 
 def get_notes(status: str | None = None) -> list[dict[str, Any]]:
