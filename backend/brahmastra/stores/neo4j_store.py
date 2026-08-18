@@ -436,6 +436,7 @@ class Neo4jStore(GraphStore):
         last_edited: str | None = None,
         mark_pending: bool = True,
         publish: bool | None = None,
+        source: str | None = None,
     ) -> None:
         # Mirrors the SQLite CASE: caller-requested pending wins, otherwise a
         # changed last_edited re-opens the note, otherwise keep current status.
@@ -456,12 +457,20 @@ class Neo4jStore(GraphStore):
                 // unpublish a note somebody chose to publish.
                 n.publish = CASE WHEN $publish IS NULL
                                  THEN coalesce(n.publish, false)
-                                 ELSE $publish END
+                                 ELSE $publish END,
+                // Keep a known origin, upgrade an unknown one — matching
+                // SQLite. A re-sync must not relabel where a note came from.
+                n.source = CASE
+                    WHEN n.source IS NULL OR n.source = 'unknown'
+                        THEN coalesce($source, 'unknown')
+                    ELSE n.source
+                END
             """,
             id=id, ws=self.workspace, title=title, content=content,
             lastEdited=last_edited, now=_now(),
             status=("pending" if mark_pending else "done"),
             publish=(None if publish is None else bool(publish)),
+            source=source,
         )
         self._embed_note(id, title, content)
 
@@ -504,6 +513,7 @@ class Neo4jStore(GraphStore):
                 "workspace_id": n.get("workspaceId"),
                 "publish": bool(n.get("publish")),
                 "notion_page_id": n.get("notionPageId"),
+                "source": n.get("source") or "unknown",
             })
         return out
 

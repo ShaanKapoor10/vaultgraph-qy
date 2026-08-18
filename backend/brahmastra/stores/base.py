@@ -40,6 +40,8 @@ class GraphStore(ABC):
         content: str,
         last_edited: str | None = None,
         mark_pending: bool = True,
+        publish: bool | None = None,
+        source: str | None = None,
     ) -> None:
         """
         Insert or update a note.

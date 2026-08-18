@@ -495,6 +495,7 @@ def drain() -> dict[str, Any]:
             title=f"{title} ({captured})" if captured else title,
             content=f"{title}\n\n{body}",
             mark_pending=True,
+            source="checkpoint",
         )
         stored += 1
         path.unlink(missing_ok=True)

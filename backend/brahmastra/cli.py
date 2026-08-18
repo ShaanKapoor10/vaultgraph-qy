@@ -136,7 +136,7 @@ def add_note(
         raise typer.Exit(1)
 
     nid = note_id or str(uuid.uuid4())[:8]
-    upsert_note(nid, title, body, mark_pending=True)
+    upsert_note(nid, title, body, mark_pending=True, source="cli")
     console.print(f"[green]Added[/] note id=[cyan]{nid}[/] title=[bold]{title}[/] — status=pending")
     console.print("Run [bold]brahmastra run[/] to extract triples.")
 

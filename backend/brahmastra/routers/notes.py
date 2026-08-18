@@ -45,6 +45,9 @@ async def create_note(body: NoteCreate) -> dict[str, Any]:
         content=body.content,
         last_edited=body.last_edited,
         mark_pending=mark_pending,
+        # The REST route is what the Next.js dashboard posts to. A future
+        # non-UI caller of POST /notes should send its own source instead.
+        source="ui",
     )
     return db.get_note(body.id)  # type: ignore[return-value]
 

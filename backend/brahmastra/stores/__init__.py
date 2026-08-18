@@ -12,9 +12,27 @@ subtlety. Tests call reset_store() to drop the cache.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from brahmastra.stores.base import GraphStore
 from brahmastra.stores.sqlite_store import SQLiteStore
+
+# Load backend/.env HERE. This module answers "which store?" for every process
+# in the system, and it answered it before anything had read the config file —
+# so GRAPH_BACKEND in .env was silently ignored and every process fell back to
+# the sqlite default. That is why an MCP-added note could be invisible to a
+# pipeline run: the two processes disagreed about where "the" database was.
+#
+# The backend name must resolve the same way whether the caller is uvicorn, the
+# MCP server, a hook, the CLI or a bare `python -c`, and .env is the one place
+# they can all agree on.
+_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
+if _ENV.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_ENV)  # never overrides an already-set var; tests keep control
+    except ImportError:
+        pass
 
 _store: GraphStore | None = None
 _store_backend: tuple[str, str] | None = None

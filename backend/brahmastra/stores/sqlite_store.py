@@ -53,6 +53,12 @@ CREATE TABLE IF NOT EXISTS notes (
     -- For notes pulled FROM Notion this stays NULL: their own id is the page id.
     publish           INTEGER NOT NULL DEFAULT 0,
     notion_page_id    TEXT,
+    -- Where this note came from: notion | mcp | ui | cli | checkpoint |
+    -- migration | unknown. Five different writers reach this table and, once
+    -- written, a paragraph distilled from a transcript by a 7B model is
+    -- indistinguishable from prose a person typed in Notion. Recording origin
+    -- is what lets retrieval weight them differently later.
+    source            TEXT NOT NULL DEFAULT 'unknown',
     -- Ids are unique WITHIN a workspace, not globally: two workspaces may
     -- legitimately hold notes with the same id from different Notion sources.
     PRIMARY KEY (workspace_id, id)
@@ -172,6 +178,21 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE notes ADD COLUMN publish INTEGER NOT NULL DEFAULT 0")
     if "notion_page_id" not in have:
         conn.execute("ALTER TABLE notes ADD COLUMN notion_page_id TEXT")
+    if "source" not in have:
+        conn.execute(
+            "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
+        )
+        # Backfill only what the data itself proves. A Notion-shaped id IS a
+        # Notion page id, and the checkpoint drain sets its own id prefix.
+        # Everything else could be mcp, ui or cli, so it stays 'unknown'
+        # rather than being guessed — a wrong provenance is worse than none.
+        conn.execute(
+            "UPDATE notes SET source = 'notion' "
+            "WHERE length(id) - length(replace(id, '-', '')) = 4"
+        )
+        conn.execute(
+            "UPDATE notes SET source = 'checkpoint' WHERE id LIKE 'checkpoint-%'"
+        )
 
 
 def _migrate_to_workspaces(conn: sqlite3.Connection) -> None:
@@ -437,14 +458,15 @@ class SQLiteStore(GraphStore):
         last_edited: str | None = None,
         mark_pending: bool = True,
         publish: bool | None = None,
+        source: str | None = None,
     ) -> None:
         status = "pending" if mark_pending else "done"
         with self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO notes (id, workspace_id, title, content, last_edited,
-                                   last_synced, extraction_status, publish)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                   last_synced, extraction_status, publish, source)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, id) DO UPDATE SET
                     title = excluded.title,
                     content = excluded.content,
@@ -453,6 +475,16 @@ class SQLiteStore(GraphStore):
                     -- None means "leave as is", so a sync cannot silently
                     -- unpublish a note somebody chose to publish.
                     publish = COALESCE(?, notes.publish),
+                    -- Keep a known origin, but allow 'unknown' to be
+                    -- upgraded. COALESCE alone is wrong here: it prefers the
+                    -- NEW value, so a Notion sync re-upserting an MCP note
+                    -- would relabel it and provenance would decay to whichever
+                    -- job ran last.
+                    source = CASE
+                        WHEN notes.source IS NULL OR notes.source = 'unknown'
+                            THEN COALESCE(?, 'unknown')
+                        ELSE notes.source
+                    END,
                     extraction_status = CASE
                         WHEN excluded.extraction_status = 'pending' THEN 'pending'
                         WHEN excluded.last_edited != notes.last_edited THEN 'pending'
@@ -460,8 +492,9 @@ class SQLiteStore(GraphStore):
                     END
                 """,
                 (id, self.workspace, title, content, last_edited, _now(), status,
-                 1 if publish else 0,
-                 None if publish is None else (1 if publish else 0)),
+                 1 if publish else 0, source or "unknown",
+                 None if publish is None else (1 if publish else 0),
+                 source),
             )
 
     def get_notes(self, status: str | None = None) -> list[dict[str, Any]]:

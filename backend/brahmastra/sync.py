@@ -210,6 +210,7 @@ def _process_page(
         content=full,
         last_edited=last_edited,
         mark_pending=True,
+        source="notion",
     )
     counters["synced"] += 1
 

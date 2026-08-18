@@ -73,6 +73,9 @@ def migrate(apply: bool = False, wipe: bool = False) -> dict[str, int]:
             # Preserve status verbatim: re-marking everything pending would
             # trigger a full re-extraction and a large LLM bill.
             mark_pending=(n.get("extraction_status") == "pending"),
+            # Carry the origin across rather than relabelling everything
+            # 'migration' — the point of the column is where a note came FROM.
+            source=n.get("source") or "unknown",
         )
         if n.get("extraction_status") in ("done", "error"):
             dst.set_note_status(n["id"], n["extraction_status"])

@@ -184,7 +184,8 @@ def brahmastra_add_note(
     """
     db.init_db()
     nid = note_id or str(uuid.uuid4())[:8]
-    db.upsert_note(nid, title, content, mark_pending=True, publish=publish or None)
+    db.upsert_note(nid, title, content, mark_pending=True,
+                   publish=publish or None, source="mcp")
     return json.dumps({"status": "added", "note_id": nid, "title": title,
                        "publish": bool(publish)}, indent=2)
 
