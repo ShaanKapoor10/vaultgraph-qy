@@ -13,6 +13,17 @@ cluster summaries (25), Notion write-back (3 pages).
 
 ---
 
+## Start here
+
+**`docs/SYSTEM_MAP.html`** — the whole system on one page: how the seven stages connect, where
+every piece of data physically lives, one note traced end to end, and what each swappable
+component could be instead. Open it in a browser; it is self-contained, needs no server, and
+carries the live numbers as of 18 August 2026.
+
+Also published as an artifact: https://claude.ai/code/artifact/e8b71f49-92b0-4d75-9ef2-c3a1881a4e60
+
+---
+
 ## What this version added
 
 Twenty commits, grouped by what they actually deliver.

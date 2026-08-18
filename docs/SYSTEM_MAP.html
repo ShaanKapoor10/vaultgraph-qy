@@ -1,0 +1,1147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="How Brahmastra works end to end - the pipeline, where every piece of data is stored, and what each swappable component could be instead.">
+<style>
+  /* Minimal reset — the hosted artifact gets this from the publisher. */
+  *, *::before, *::after { box-sizing: border-box; }
+  body { margin: 0; }
+  img, svg { max-width: 100%; }
+</style>
+<title>Brahmastra System Map</title>
+
+<style>
+  /* ---- tokens: light is the base, both dark states redefine only these ---- */
+  :root {
+    --bg:        #F4F6F9;
+    --surface:   #FFFFFF;
+    --surface-2: #EDF0F5;
+    --ink:       #14171D;
+    --ink-soft:  #3D4451;
+    --muted:     #5B6472;
+    --line:      #DCE1E9;
+    --line-firm: #C3CAD6;
+
+    --accent:    #A85118;   /* forged copper — the intelligence path */
+    --accent-ink:#8C420F;
+    --accent-bg: #FBEFE6;
+    --store:     #1B6470;   /* teal — persistence, every diagram */
+    --store-bg:  #E4F0F2;
+
+    --ok:        #2C6E49;
+    --warn:      #8A6210;
+    --crit:      #96302F;
+
+    --shadow:    0 1px 2px rgba(20,23,29,.06), 0 8px 24px -12px rgba(20,23,29,.18);
+
+    --display: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --body: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "JetBrains Mono", "SF Mono", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:        #0E1116;
+      --surface:   #151A21;
+      --surface-2: #1C222B;
+      --ink:       #E3E7EE;
+      --ink-soft:  #BFC6D2;
+      --muted:     #8F98A7;
+      --line:      #242B35;
+      --line-firm: #333C49;
+
+      --accent:    #E08A4C;
+      --accent-ink:#F0A469;
+      --accent-bg: #2A1D13;
+      --store:     #5FB0BE;
+      --store-bg:  #12242A;
+
+      --ok:        #6FBF8E;
+      --warn:      #D6A83F;
+      --crit:      #E0736F;
+
+      --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -14px rgba(0,0,0,.7);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:        #0E1116;
+    --surface:   #151A21;
+    --surface-2: #1C222B;
+    --ink:       #E3E7EE;
+    --ink-soft:  #BFC6D2;
+    --muted:     #8F98A7;
+    --line:      #242B35;
+    --line-firm: #333C49;
+
+    --accent:    #E08A4C;
+    --accent-ink:#F0A469;
+    --accent-bg: #2A1D13;
+    --store:     #5FB0BE;
+    --store-bg:  #12242A;
+
+    --ok:        #6FBF8E;
+    --warn:      #D6A83F;
+    --crit:      #E0736F;
+
+    --shadow:    0 1px 2px rgba(0,0,0,.5), 0 10px 28px -14px rgba(0,0,0,.7);
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 0;
+    max-width: 1240px;
+    margin: 0 auto;
+    padding: 0 24px 120px;
+  }
+  @media (min-width: 1100px) {
+    .shell { grid-template-columns: 220px minmax(0, 1fr); gap: 56px; }
+  }
+
+  /* ---- table of contents rail ---- */
+  nav.toc { display: none; }
+  @media (min-width: 1100px) {
+    nav.toc {
+      display: block;
+      position: sticky;
+      top: 0;
+      align-self: start;
+      padding-top: 96px;
+      max-height: 100vh;
+      overflow-y: auto;
+    }
+  }
+  nav.toc p {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 0 0 14px;
+  }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 9px; }
+  nav.toc a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13.5px;
+    line-height: 1.4;
+    display: block;
+    border-left: 2px solid var(--line);
+    padding-left: 12px;
+  }
+  nav.toc a:hover, nav.toc a:focus-visible { color: var(--accent); border-left-color: var(--accent); }
+
+  main { min-width: 0; padding-top: 96px; }
+
+  /* ---- masthead ---- */
+  .masthead { margin-bottom: 72px; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .16em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 20px;
+  }
+  h1 {
+    font-family: var(--display);
+    font-size: clamp(38px, 6vw, 62px);
+    line-height: 1.04;
+    letter-spacing: -.018em;
+    font-weight: 600;
+    margin: 0 0 22px;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 19px;
+    line-height: 1.6;
+    color: var(--ink-soft);
+    max-width: 60ch;
+    margin: 0;
+  }
+
+  .facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 30px;
+  }
+  .fact {
+    font-family: var(--mono);
+    font-size: 12px;
+    border: 1px solid var(--line-firm);
+    border-radius: 3px;
+    padding: 5px 10px;
+    color: var(--muted);
+    background: var(--surface);
+  }
+  .fact b { color: var(--ink); font-weight: 600; }
+
+  /* ---- sections ---- */
+  section { margin-bottom: 84px; scroll-margin-top: 32px; }
+  h2 {
+    font-family: var(--display);
+    font-size: clamp(26px, 3.4vw, 34px);
+    line-height: 1.18;
+    letter-spacing: -.012em;
+    font-weight: 600;
+    margin: 0 0 8px;
+    text-wrap: balance;
+  }
+  .sec-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .14em;
+    color: var(--accent);
+    display: block;
+    margin-bottom: 10px;
+  }
+  h3 {
+    font-family: var(--body);
+    font-size: 17px;
+    font-weight: 650;
+    letter-spacing: -.005em;
+    margin: 38px 0 10px;
+    color: var(--ink);
+  }
+  h4 {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 28px 0 10px;
+    font-weight: 600;
+  }
+  p { margin: 0 0 16px; max-width: 72ch; }
+  .lede { color: var(--ink-soft); font-size: 17.5px; max-width: 66ch; margin-bottom: 28px; }
+  ul, ol { max-width: 72ch; padding-left: 22px; margin: 0 0 16px; }
+  li { margin-bottom: 8px; }
+  strong { font-weight: 650; }
+  a { color: var(--accent); }
+
+  code {
+    font-family: var(--mono);
+    font-size: .87em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: 1px 5px;
+    color: var(--ink);
+    word-break: break-word;
+  }
+
+  /* ---- figures ---- */
+  figure {
+    margin: 34px 0;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 26px 22px 18px;
+    box-shadow: var(--shadow);
+    overflow-x: auto;
+  }
+  figure svg { display: block; max-width: 100%; height: auto; margin: 0 auto; color: var(--ink-soft); }
+  figcaption {
+    font-size: 13.5px;
+    line-height: 1.5;
+    color: var(--muted);
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--line);
+    max-width: 78ch;
+  }
+  figcaption b { color: var(--ink-soft); font-weight: 600; }
+
+  .svg-label { font-family: var(--mono); font-size: 11px; fill: currentColor; }
+  .svg-title { font-family: var(--body); font-size: 13px; font-weight: 650; fill: var(--ink); }
+  .svg-sub   { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+  .svg-edge  { font-family: var(--mono); font-size: 10px; fill: var(--muted); }
+  .box       { fill: var(--surface-2); stroke: var(--line-firm); stroke-width: 1; }
+  .box-accent{ fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1.4; }
+  .box-store { fill: var(--store-bg); stroke: var(--store); stroke-width: 1.4; }
+  .flow      { stroke: currentColor; stroke-width: 1.3; fill: none; }
+  .flow-accent { stroke: var(--accent); stroke-width: 1.8; fill: none; }
+  .flow-store  { stroke: var(--store); stroke-width: 1.6; fill: none; }
+  .flow-dash { stroke-dasharray: 5 4; }
+
+  /* ---- tables ---- */
+  .table-wrap { overflow-x: auto; margin: 26px 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    background: var(--surface-2);
+    white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: none; }
+  td code { background: transparent; border: none; padding: 0; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+
+  /* ---- swap point cards ---- */
+  .swap {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--accent);
+    border-radius: 5px;
+    background: var(--surface);
+    padding: 20px 22px;
+    margin: 22px 0;
+  }
+  .swap h3 { margin: 0 0 4px; font-size: 16px; }
+  .swap .env {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 14px;
+  }
+  .opts { display: flex; flex-direction: column; gap: 10px; margin: 0; padding: 0; list-style: none; max-width: none; }
+  .opt {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 2px 14px;
+    padding: 11px 13px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--surface-2);
+    margin: 0;
+  }
+  @media (min-width: 720px) { .opt { grid-template-columns: 170px 1fr; } }
+  .opt.is-default { border-color: var(--accent); background: var(--accent-bg); }
+  .opt-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--ink); }
+  .opt-why { font-size: 14px; color: var(--ink-soft); }
+  .tag {
+    font-family: var(--mono);
+    font-size: 9.5px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--accent-ink);
+    border: 1px solid var(--accent);
+    border-radius: 2px;
+    padding: 1px 5px;
+    margin-left: 7px;
+    vertical-align: 1px;
+  }
+
+  /* ---- callouts ---- */
+  .note {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--store);
+    background: var(--surface);
+    border-radius: 5px;
+    padding: 16px 20px;
+    margin: 24px 0;
+  }
+  .note.warn { border-left-color: var(--warn); }
+  .note.crit { border-left-color: var(--crit); }
+  .note p:last-child { margin-bottom: 0; }
+  .note .kicker {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: .11em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 7px;
+  }
+
+  /* ---- walkthrough steps ---- */
+  .steps { list-style: none; padding: 0; margin: 30px 0 0; max-width: none; }
+  .step {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 4px 24px;
+    padding: 22px 0;
+    border-top: 1px solid var(--line);
+    margin: 0;
+  }
+  @media (min-width: 760px) { .step { grid-template-columns: 92px minmax(0,1fr); } }
+  .step-n {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: .1em;
+    color: var(--accent);
+    padding-top: 3px;
+  }
+  .step h3 { margin: 0 0 8px; font-size: 17px; }
+  .step p { margin-bottom: 12px; }
+  .writes {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 8px 11px;
+    display: block;
+  }
+  .writes b { color: var(--store); font-weight: 600; }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    line-height: 1.55;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    margin: 18px 0;
+    color: var(--ink-soft);
+  }
+
+  hr.rule { border: none; border-top: 1px solid var(--line); margin: 0 0 72px; }
+
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+</head>
+<body>
+<div class="shell">
+
+<nav class="toc" aria-label="Contents">
+  <p>Contents</p>
+  <ol>
+    <li><a href="#map">The whole system</a></li>
+    <li><a href="#stores">Where everything is stored</a></li>
+    <li><a href="#walk">One note, start to finish</a></li>
+    <li><a href="#swaps">Every swappable part</a></li>
+    <li><a href="#loops">The two feedback loops</a></li>
+    <li><a href="#decide">Open decisions</a></li>
+  </ol>
+</nav>
+
+<main>
+
+<header class="masthead">
+  <p class="eyebrow">System reference &middot; 18 August 2026</p>
+  <h1>Brahmastra System Map</h1>
+  <p class="standfirst">
+    Every moving part, what it writes, and where that lands on disk — followed end to end
+    through the life of a single note. Written to be argued with: each swappable component
+    lists what it is today and what else it could be.
+  </p>
+  <div class="facts">
+    <span class="fact"><b>55</b> notes</span>
+    <span class="fact"><b>633</b> triples</span>
+    <span class="fact"><b>417</b> entities</span>
+    <span class="fact"><b>62</b> clusters</span>
+    <span class="fact"><b>7</b> pipeline stages</span>
+    <span class="fact"><b>4</b> places data lives</span>
+  </div>
+</header>
+
+<hr class="rule">
+
+<!-- ============================================================= -->
+<section id="map">
+  <span class="sec-num">01 — Orientation</span>
+  <h2>The whole system</h2>
+  <p class="lede">
+    Three ways in, one engine, one graph store, four ways out. Everything else in this
+    document is detail hanging off that shape.
+  </p>
+
+  <p>
+    The engine's single job is to turn <strong>prose into a queryable graph</strong>. It does not
+    try to be an editor — Notion is better at that — and it does not try to be a chat product.
+    It reads notes from wherever they come from, extracts facts, works out which names refer to
+    the same thing, builds a graph, and exposes that graph to whatever asks.
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 960 430" role="img" aria-label="Three input sources feed the Brahmastra pipeline, which reads and writes a single graph store, which in turn serves four output surfaces.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+        </marker>
+        <marker id="ar-a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="var(--accent)"/>
+        </marker>
+        <marker id="ar-s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="var(--store)"/>
+        </marker>
+      </defs>
+
+      <text class="svg-sub" x="20" y="24">SOURCES</text>
+      <text class="svg-sub" x="300" y="24">ENGINE</text>
+      <text class="svg-sub" x="580" y="24">SYSTEM OF RECORD</text>
+      <text class="svg-sub" x="800" y="24">SURFACES</text>
+
+      <!-- sources -->
+      <rect class="box" x="20" y="44" width="180" height="56" rx="4"/>
+      <text class="svg-title" x="34" y="70">Notion database</text>
+      <text class="svg-sub" x="34" y="88">4 pages &middot; human prose</text>
+
+      <rect class="box" x="20" y="122" width="180" height="56" rx="4"/>
+      <text class="svg-title" x="34" y="148">AI agents (MCP)</text>
+      <text class="svg-sub" x="34" y="166">51 notes &middot; dominant path</text>
+
+      <rect class="box" x="20" y="200" width="180" height="56" rx="4"/>
+      <text class="svg-title" x="34" y="226">Session hooks</text>
+      <text class="svg-sub" x="34" y="244">PreCompact / SessionEnd</text>
+
+      <!-- engine -->
+      <rect class="box-accent" x="300" y="44" width="190" height="290" rx="5"/>
+      <text class="svg-title" x="316" y="70">Pipeline</text>
+      <text class="svg-sub" x="316" y="88">7 stages, one lock per store</text>
+      <line class="flow" x1="316" y1="100" x2="474" y2="100" stroke="var(--accent)" opacity=".4"/>
+      <text class="svg-label" x="316" y="122">0 &nbsp;sync</text>
+      <text class="svg-label" x="316" y="142">0b drain checkpoints</text>
+      <text class="svg-label" x="316" y="162">1 &nbsp;extract &nbsp;&nbsp;&nbsp;LLM</text>
+      <text class="svg-label" x="316" y="182">2 &nbsp;resolve &nbsp;&nbsp;&nbsp;embed</text>
+      <text class="svg-label" x="316" y="202">3 &nbsp;build graph</text>
+      <text class="svg-label" x="316" y="222">4 &nbsp;summarise &nbsp;LLM</text>
+      <text class="svg-label" x="316" y="242">5 &nbsp;cache</text>
+      <text class="svg-label" x="316" y="262">6 &nbsp;write back</text>
+      <line class="flow" x1="316" y1="278" x2="474" y2="278" stroke="var(--accent)" opacity=".4"/>
+      <text class="svg-sub" x="316" y="298">status: ok | partial | error</text>
+      <text class="svg-sub" x="316" y="316">+ failed_stages[]</text>
+
+      <!-- store -->
+      <rect class="box-store" x="580" y="112" width="170" height="120" rx="5"/>
+      <text class="svg-title" x="596" y="138">Graph store</text>
+      <text class="svg-sub" x="596" y="158">GRAPH_BACKEND selects</text>
+      <text class="svg-label" x="596" y="182" fill="var(--store)">sqlite &nbsp;— local file</text>
+      <text class="svg-label" x="596" y="202" fill="var(--store)">neo4j &nbsp;&nbsp;— Aura, shared</text>
+      <text class="svg-sub" x="596" y="220">one active per process</text>
+
+      <!-- surfaces -->
+      <rect class="box" x="800" y="44" width="140" height="46" rx="4"/>
+      <text class="svg-title" x="814" y="66">REST :8001</text>
+      <text class="svg-sub" x="814" y="82">19 routes</text>
+
+      <rect class="box" x="800" y="106" width="140" height="46" rx="4"/>
+      <text class="svg-title" x="814" y="128">MCP</text>
+      <text class="svg-sub" x="814" y="144">10 tools</text>
+
+      <rect class="box" x="800" y="168" width="140" height="46" rx="4"/>
+      <text class="svg-title" x="814" y="190">Next.js :3000</text>
+      <text class="svg-sub" x="814" y="206">D3 graph view</text>
+
+      <rect class="box" x="800" y="230" width="140" height="46" rx="4"/>
+      <text class="svg-title" x="814" y="252">Notion</text>
+      <text class="svg-sub" x="814" y="268">insights + pages</text>
+
+      <!-- edges in -->
+      <path class="flow" marker-end="url(#ar)" d="M200 72 H300"/>
+      <text class="svg-edge" x="214" y="66">pull</text>
+      <path class="flow" marker-end="url(#ar)" d="M200 150 H300"/>
+      <text class="svg-edge" x="214" y="144">add_note</text>
+      <path class="flow" marker-end="url(#ar)" d="M200 228 H262 V190 H300"/>
+      <text class="svg-edge" x="214" y="222">queue file</text>
+
+      <!-- engine to store -->
+      <path class="flow-store" marker-end="url(#ar-s)" d="M490 160 H580"/>
+      <text class="svg-edge" x="502" y="154">writes</text>
+      <path class="flow-store flow-dash" marker-end="url(#ar-s)" d="M580 200 H490"/>
+      <text class="svg-edge" x="502" y="218">reads</text>
+
+      <!-- store to surfaces -->
+      <path class="flow-store" marker-end="url(#ar-s)" d="M750 150 H776 V67 H800"/>
+      <path class="flow-store" marker-end="url(#ar-s)" d="M750 160 H776 V129 H800"/>
+      <path class="flow-store" marker-end="url(#ar-s)" d="M750 180 H776 V191 H800"/>
+      <text class="svg-edge" x="754" y="118">queries</text>
+
+      <!-- writeback loop -->
+      <path class="flow-accent" marker-end="url(#ar-a)" d="M490 300 H770 V253 H800"/>
+      <text class="svg-edge" x="560" y="294" fill="var(--accent)">insights + published pages</text>
+      <path class="flow-accent flow-dash" marker-end="url(#ar-a)" d="M870 276 V360 H110 V100"/>
+      <text class="svg-edge" x="430" y="376" fill="var(--accent)">published pages become sources — must be skipped on the next pull (§05)</text>
+    </svg>
+    <figcaption>
+      <b>The shape of the system.</b> Note that the copper return path closes a circle: anything
+      written into Notion is read back by the next sync unless something breaks the loop. Two
+      separate guards exist for exactly this, and both are covered in §05.
+    </figcaption>
+  </figure>
+
+  <div class="note">
+    <span class="kicker">The thing most people get wrong first</span>
+    <p>
+      The documented design says Notion is the content layer. In practice <strong>51 of 55 notes
+      arrive through MCP</strong>, not Notion — the dominant author is an AI agent, not a person
+      typing. The architecture below reflects the system you actually have, not the one the
+      original README described.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section id="stores">
+  <span class="sec-num">02 — Persistence</span>
+  <h2>Where everything is stored</h2>
+  <p class="lede">
+    Four physical locations. Only one of them is the system of record; the rest are
+    derived, cached, or a projection for humans.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr><th>Location</th><th>Holds</th><th>Size today</th><th>If deleted</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><code>backend/data/concept_graph.db</code></td>
+          <td>SQLite: notes, triples, entity clusters, canonical map, cached graph, workspaces</td>
+          <td class="num">908 KB</td>
+          <td>Everything is lost unless Neo4j is current</td>
+        </tr>
+        <tr>
+          <td><code>208ed26a.databases.neo4j.io</code></td>
+          <td>Neo4j Aura: the same data as a property graph, plus vector + fulltext indexes</td>
+          <td class="num">54 notes</td>
+          <td>Rebuildable from SQLite via <code>migrate_to_neo4j</code></td>
+        </tr>
+        <tr>
+          <td><code>backend/.cache/</code></td>
+          <td>sentence-transformers model <code>all-MiniLM-L6-v2</code>, 384-dim</td>
+          <td class="num">88 MB</td>
+          <td>Re-downloaded on next run</td>
+        </tr>
+        <tr>
+          <td><code>backend/data/checkpoints/</code></td>
+          <td>Queued conversation captures, per-session line offsets, failure log</td>
+          <td class="num">varies</td>
+          <td>Pending session knowledge is lost; stored notes unaffected</td>
+        </tr>
+        <tr>
+          <td>Notion &mdash; <em>Brahmastra Notes</em></td>
+          <td>Human prose (4 pages), plus one insights toggle per page</td>
+          <td class="num">4 pages</td>
+          <td>Original prose lost; graph survives</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Inside SQLite</h3>
+  <p>
+    Six tables, every one partitioned by <code>workspace_id</code>. The row counts tell you what
+    each stage produced.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Table</th><th class="num">Rows</th><th>Written by</th><th>What a row is</th></tr></thead>
+      <tbody>
+        <tr><td><code>workspaces</code></td><td class="num">1</td><td>create workspace</td><td>One independent graph</td></tr>
+        <tr><td><code>notes</code></td><td class="num">55</td><td>sync, MCP, checkpoint drain</td><td>Title + body + extraction status + Notion projection</td></tr>
+        <tr><td><code>raw_triples</code></td><td class="num">633</td><td>stage 1 extract</td><td>One asserted fact, pre-resolution</td></tr>
+        <tr><td><code>canonical_map</code></td><td class="num">505</td><td>stage 2 resolve</td><td>Surface form &rarr; canonical name</td></tr>
+        <tr><td><code>entity_clusters</code></td><td class="num">417</td><td>stage 2 resolve</td><td>All spellings of one real thing</td></tr>
+        <tr><td><code>graph_cache</code></td><td class="num">1</td><td>stage 3 &amp; 4</td><td>The whole computed graph as JSON</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h3>Inside Neo4j</h3>
+  <p>
+    The same information expressed natively, so traversal is a query rather than a Python loop.
+    Every node carries <code>workspaceId</code>.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Label / type</th><th class="num">Count</th><th>Meaning</th></tr></thead>
+      <tbody>
+        <tr><td><code>(:Note)</code></td><td class="num">54</td><td>Source document</td></tr>
+        <tr><td><code>(:Mention)</code></td><td class="num">505</td><td>A name exactly as written, before resolution</td></tr>
+        <tr><td><code>(:Entity)</code></td><td class="num">417</td><td>The resolved thing a mention refers to</td></tr>
+        <tr><td><code>-[:ASSERTS]-&gt;</code></td><td class="num">623</td><td>Raw fact between two mentions</td></tr>
+        <tr><td><code>-[:RESOLVES_TO]-&gt;</code></td><td class="num">505</td><td>Mention &rarr; Entity</td></tr>
+        <tr><td><code>-[:EXTRACTED_FROM]-&gt;</code></td><td class="num">724</td><td>Provenance back to the note</td></tr>
+        <tr><td>17 ontology types</td><td class="num">607</td><td><code>DEPENDS_ON</code> 69, <code>HAS_COMPONENT</code> 99, <code>RELATED_TO</code> 239, <code>PART_OF</code> 53, &hellip;</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <span class="kicker">Live drift, right now</span>
+    <p>
+      SQLite says 55 notes and 633 triples; Neo4j says 54 and 623. Both numbers are correct.
+      <strong>The pipeline writes only to the backend currently selected</strong>, so the copy you
+      are not using falls behind until you re-migrate. The 10-triple gap is different: SQLite has
+      no uniqueness constraint on <code>raw_triples</code>, so a fact the extractor emitted twice
+      from one note is stored twice, while Neo4j's <code>MERGE</code> collapses it. Neo4j's number
+      is the more correct one.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section id="walk">
+  <span class="sec-num">03 — Walkthrough</span>
+  <h2>One note, start to finish</h2>
+  <p class="lede">
+    Follow a single sentence — <em>“Sarah reports to Mei.”</em> — from the moment it is written
+    to the moment the graph can answer a question about it.
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 940 250" role="img" aria-label="A sentence becomes a note row, then a raw triple, then a resolved entity pair, then a graph edge, then a cached answer, and finally an annotation pushed back to Notion.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="var(--store)"/>
+        </marker>
+      </defs>
+
+      <text class="svg-sub" x="16" y="20">THE SENTENCE, AT EACH STAGE</text>
+
+      <rect class="box" x="16" y="36" width="132" height="72" rx="4"/>
+      <text class="svg-sub" x="28" y="56">written</text>
+      <text class="svg-label" x="28" y="76">“Sarah reports</text>
+      <text class="svg-label" x="28" y="92">to Mei.”</text>
+
+      <rect class="box" x="180" y="36" width="132" height="72" rx="4"/>
+      <text class="svg-sub" x="192" y="56">notes row</text>
+      <text class="svg-label" x="192" y="76">id, title, body</text>
+      <text class="svg-label" x="192" y="92">status=pending</text>
+
+      <rect class="box-accent" x="344" y="36" width="132" height="72" rx="4"/>
+      <text class="svg-sub" x="356" y="56">raw_triples</text>
+      <text class="svg-label" x="356" y="76">Sarah</text>
+      <text class="svg-label" x="356" y="92">reports_to Mei</text>
+
+      <rect class="box" x="508" y="36" width="132" height="72" rx="4"/>
+      <text class="svg-sub" x="520" y="56">canonical_map</text>
+      <text class="svg-label" x="520" y="76">“Sarah”, “sarah”</text>
+      <text class="svg-label" x="520" y="92">&rarr; Sarah</text>
+
+      <rect class="box-store" x="672" y="36" width="132" height="72" rx="4"/>
+      <text class="svg-sub" x="684" y="56">graph edge</text>
+      <text class="svg-label" x="684" y="76">Sarah &rarr; Mei</text>
+      <text class="svg-label" x="684" y="92">pagerank, cluster</text>
+
+      <rect class="box" x="836" y="36" width="88" height="72" rx="4"/>
+      <text class="svg-sub" x="848" y="56">answer</text>
+      <text class="svg-label" x="848" y="76">/ask</text>
+      <text class="svg-label" x="848" y="92">/paths</text>
+
+      <path class="flow-store" marker-end="url(#ar2)" d="M148 72 H180"/>
+      <path class="flow-store" marker-end="url(#ar2)" d="M312 72 H344"/>
+      <path class="flow-store" marker-end="url(#ar2)" d="M476 72 H508"/>
+      <path class="flow-store" marker-end="url(#ar2)" d="M640 72 H672"/>
+      <path class="flow-store" marker-end="url(#ar2)" d="M804 72 H836"/>
+
+      <text class="svg-edge" x="150" y="132">sync /</text>
+      <text class="svg-edge" x="150" y="146">add_note</text>
+      <text class="svg-edge" x="322" y="132">LLM</text>
+      <text class="svg-edge" x="322" y="146">extract</text>
+      <text class="svg-edge" x="482" y="132">union-find +</text>
+      <text class="svg-edge" x="482" y="146">embeddings</text>
+      <text class="svg-edge" x="644" y="132">networkx</text>
+      <text class="svg-edge" x="644" y="146">pagerank</text>
+      <text class="svg-edge" x="808" y="132">graphrag</text>
+
+      <line class="flow" x1="16" y1="180" x2="924" y2="180" opacity=".35"/>
+      <text class="svg-sub" x="16" y="202">Only the first two boxes are irreplaceable. Everything from “raw_triples” rightward</text>
+      <text class="svg-sub" x="16" y="218">is derived, and can be rebuilt from the note body alone — at the cost of LLM tokens.</text>
+      <text class="svg-sub" x="16" y="240">That asymmetry is why the prose, not the graph, is the thing worth protecting.</text>
+    </svg>
+    <figcaption>
+      <b>What is precious and what is disposable.</b> The graph is a computation over the notes.
+      Losing it costs money and time; losing the notes costs knowledge.
+    </figcaption>
+  </figure>
+
+  <ol class="steps">
+    <li class="step">
+      <div class="step-n">STAGE 0</div>
+      <div>
+        <h3>Sync — pull prose in from Notion</h3>
+        <p>
+          Detects whether the configured id is a database or a bare page, then reads every row.
+          Blocks are flattened to plain text, Brahmastra's own insight toggle is stripped out, and
+          empty pages are skipped. Change detection compares <em>content</em>, not Notion's
+          <code>last_edited</code>, because write-back bumps that timestamp without the body
+          actually changing.
+        </p>
+        <span class="writes">writes → <b>notes</b> (status <code>pending</code> only if content changed)</span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 0b</div>
+      <div>
+        <h3>Drain checkpoints — recover conversations</h3>
+        <p>
+          Session hooks queue raw transcripts to disk as JSON. This stage distils each into
+          entity-rich prose and stores it as a note. It runs <em>before</em> extract so anything
+          recovered is graphed in the same run. A queue file is deleted only once its note exists,
+          so an LLM outage delays a checkpoint rather than losing it.
+        </p>
+        <span class="writes">reads → <b>data/checkpoints/*.json</b> &nbsp;·&nbsp; writes → <b>notes</b></span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 1</div>
+      <div>
+        <h3>Extract — prose becomes facts</h3>
+        <p>
+          Each pending note goes to the LLM in JSON mode with the ontology in the system prompt.
+          Returned triples are validated: placeholders like “unknown” are rejected, and anything
+          off-ontology is <strong>degraded to <code>related_to</code> rather than dropped</strong>.
+          Silent dropping is why an earlier version left no <code>Veraxion</code> entity at all
+          despite the sentence naming it.
+        </p>
+        <span class="writes">writes → <b>raw_triples</b> &nbsp;·&nbsp; updates → <b>notes.extraction_status</b></span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 2</div>
+      <div>
+        <h3>Resolve — decide which names mean the same thing</h3>
+        <p>
+          Three signals combine: exact match, Jaro-Winkler string distance, and cosine similarity
+          over 384-dimension sentence-transformer embeddings. Union-Find merges the resulting pairs
+          into clusters, and the longest, most complete spelling wins as the canonical name. This is
+          the stage that makes “Sarah”, “sarah” and “Sarah K.” one node instead of three.
+        </p>
+        <span class="writes">writes → <b>canonical_map</b>, <b>entity_clusters</b></span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 3</div>
+      <div>
+        <h3>Build graph — structure and importance</h3>
+        <p>
+          Triples are rewritten through the canonical map and loaded into NetworkX. PageRank scores
+          importance, Louvain finds communities, functional relations are checked for contradictions
+          (a person cannot be <code>located_in</code> two places), and unconnected-but-similar pairs
+          become predicted links.
+        </p>
+        <span class="writes">writes → <b>graph_cache</b> &nbsp;·&nbsp; on Neo4j also <b>(:Entity)</b> + typed edges</span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 4</div>
+      <div>
+        <h3>Cluster summaries — name each community</h3>
+        <p>
+          The 25 largest clusters get a one-sentence theme from the LLM, which is what makes global
+          questions (“what is this whole graph about?”) answerable without reading every note. Fails
+          soft: a cluster that errors keeps its members and loses only its label.
+        </p>
+        <span class="writes">merges into → <b>graph_cache.stats</b></span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 5</div>
+      <div>
+        <h3>Cache — one read for the whole graph</h3>
+        <p>
+          The finished graph and its statistics are serialised so the API and the D3 front end can
+          load everything in a single read instead of recomputing PageRank per request.
+        </p>
+        <span class="writes">writes → <b>graph_cache</b> (one row per workspace)</span>
+      </div>
+    </li>
+
+    <li class="step">
+      <div class="step-n">STAGE 6</div>
+      <div>
+        <h3>Write back — return the intelligence to Notion</h3>
+        <p>
+          Two jobs. First, notes marked <code>publish</code> that have no Notion page get one created,
+          and the returned page id is persisted — without that, every run would create the page again.
+          Second, each page receives a single <em>🧠 Brahmastra Insights</em> toggle listing its
+          relationships, contradictions and suggested links. The toggle is deleted and rewritten each
+          run, so it stays current rather than accumulating.
+        </p>
+        <span class="writes">writes → <b>Notion pages</b> &nbsp;·&nbsp; writes → <b>notes.notion_page_id</b></span>
+      </div>
+    </li>
+  </ol>
+
+  <div class="note">
+    <span class="kicker">Reading the result</span>
+    <p>
+      A run returns <code>status: ok | partial | error</code> plus <code>failed_stages[]</code>.
+      This matters more than it sounds: before it existed, a run where <em>every single extraction
+      failed</em> still looked successful. Write-back is now skipped entirely when extraction failed
+      for every note, rather than pushing a stale graph into Notion.
+    </p>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section id="swaps">
+  <span class="sec-num">04 — Alternatives</span>
+  <h2>Every swappable part</h2>
+  <p class="lede">
+    Six decisions are already pluggable. For each: what runs today, what else is available, and
+    what actually changes if you switch.
+  </p>
+
+  <div class="swap">
+    <h3>Graph store</h3>
+    <code class="env">GRAPH_BACKEND</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">sqlite <span class="tag">default</span></span>
+        <span class="opt-why">One file, zero setup, no network. Search is lexical only — no vector similarity. Right for local work and tests.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">neo4j</span>
+        <span class="opt-why">Shared across machines. Native traversal, vector + BM25 hybrid search, real constraints. Required for deployment. Free tier suspends after ~3 days idle.</span>
+      </li>
+    </ul>
+    <p style="margin:14px 0 0; font-size:14.5px; color:var(--muted);">
+      Adding a third means implementing one class against the <code>GraphStore</code> contract —
+      roughly 104 call sites go through <code>db.*</code> and none touch a backend directly.
+    </p>
+  </div>
+
+  <div class="swap">
+    <h3>Language model</h3>
+    <code class="env">LLM_PROVIDER &middot; GROQ_MODEL &middot; OLLAMA_MODEL</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">groq <span class="tag">default</span></span>
+        <span class="opt-why"><code>openai/gpt-oss-120b</code>, ~0.8 s per call, 131k context. Free tier has a hard daily token cap. Must honour JSON mode — extraction depends on it.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">ollama</span>
+        <span class="opt-why"><code>qwen2.5:7b-instruct</code> locally. No quota, no network. On a 4 GB laptop GPU the model does not fit and spills to CPU: <strong>1m37s–3m57s per call</strong>, roughly 100× slower.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">anthropic</span>
+        <span class="opt-why">Cloud fallback. Configured but not the default path.</span>
+      </li>
+    </ul>
+    <p style="margin:14px 0 0; font-size:14.5px; color:var(--muted);">
+      Selection is cloud-first and automatic, so the same code deploys unchanged. An explicit
+      provider only wins if it is actually reachable — a stale <code>ollama</code> setting with a
+      dead server falls through instead of failing the run.
+    </p>
+  </div>
+
+  <div class="swap">
+    <h3>Where notes come from</h3>
+    <code class="env">NOTION_DATABASE_ID &middot; per-workspace override</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">database mode <span class="tag">active</span></span>
+        <span class="opt-why">Each row of a Notion database is a note. Detected automatically.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">page mode</span>
+        <span class="opt-why">Every page the integration can see becomes a note. Friendlier if you keep notes as loose pages rather than a database.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">no Notion at all</span>
+        <span class="opt-why">Perfectly valid. MCP already supplies 51 of 55 notes; sync simply reports skipped.</span>
+      </li>
+    </ul>
+  </div>
+
+  <div class="swap">
+    <h3>Which graph you are working in</h3>
+    <code class="env">BRAHMASTRA_WORKSPACE</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">default <span class="tag">active</span></span>
+        <span class="opt-why">One graph holding everything. Existing data was migrated here, so single-graph use is unchanged.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">named workspaces</span>
+        <span class="opt-why">Separate graphs for personal, office, per-project. Uniqueness is per workspace — two workspaces may each hold a different “Sarah”, and merging them would corrupt both.</span>
+      </li>
+    </ul>
+  </div>
+
+  <div class="swap">
+    <h3>What reaches Notion</h3>
+    <code class="env">notes.publish</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">curated <span class="tag">chosen</span></span>
+        <span class="opt-why">Design records and decisions get a page; session checkpoints stay in the graph. Keeps a human workspace readable instead of filling it with agent transcripts.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">everything</span>
+        <span class="opt-why">Nothing is invisible, but ~50 pages appear at once and every future checkpoint adds more.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">annotations only</span>
+        <span class="opt-why">The original behaviour: annotate pages that already exist, never create any.</span>
+      </li>
+    </ul>
+  </div>
+
+  <div class="swap">
+    <h3>Retrieval strategy for <code>/ask</code></h3>
+    <code class="env">POST /ask {"depth": 1..3}</code>
+    <ul class="opts">
+      <li class="opt is-default">
+        <span class="opt-name">local <span class="tag">auto</span></span>
+        <span class="opt-why">Pulls the subgraph around the entities named in the question. Depth 2 is selected automatically for chained questions such as “Sarah's manager's other reports”.</span>
+      </li>
+      <li class="opt">
+        <span class="opt-name">global</span>
+        <span class="opt-why">Answers from cluster summaries instead of specific entities — for broad questions about the whole corpus.</span>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<!-- ============================================================= -->
+<section id="loops">
+  <span class="sec-num">05 — The subtle part</span>
+  <h2>The two feedback loops</h2>
+  <p class="lede">
+    Writing into the same place you read from creates a cycle. There are two, they fail
+    silently, and each needed its own guard.
+  </p>
+
+  <figure>
+    <svg viewBox="0 0 900 320" role="img" aria-label="Two cycles between Brahmastra and Notion: the insights toggle written onto a page, and the page created from a note. Each is broken by a specific skip rule.">
+      <defs>
+        <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="currentColor"/>
+        </marker>
+        <marker id="ar3c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <polygon points="0,1 10,5 0,9" fill="var(--crit)"/>
+        </marker>
+      </defs>
+
+      <text class="svg-sub" x="16" y="20">LOOP 1 — THE INSIGHTS TOGGLE</text>
+      <rect class="box" x="16" y="36" width="150" height="60" rx="4"/>
+      <text class="svg-title" x="30" y="60">Notion page</text>
+      <text class="svg-sub" x="30" y="78">prose + our toggle</text>
+
+      <rect class="box-accent" x="290" y="36" width="150" height="60" rx="4"/>
+      <text class="svg-title" x="304" y="60">Graph</text>
+      <text class="svg-sub" x="304" y="78">triples</text>
+
+      <path class="flow" marker-end="url(#ar3)" d="M166 56 H290"/>
+      <text class="svg-edge" x="190" y="50">pull blocks</text>
+      <path class="flow" marker-end="url(#ar3)" d="M290 84 H166"/>
+      <text class="svg-edge" x="186" y="102">write toggle</text>
+
+      <line class="flow-dash" x1="228" y1="24" x2="228" y2="112" stroke="var(--crit)" stroke-width="2"/>
+      <text class="svg-edge" x="470" y="52" fill="var(--crit)">GUARD: skip any block whose text starts</text>
+      <text class="svg-edge" x="470" y="68" fill="var(--crit)">with “🧠 Brahmastra Insights” when reading.</text>
+      <text class="svg-edge" x="470" y="88">Without it: our own output is re-extracted as</text>
+      <text class="svg-edge" x="470" y="104">fact, forever, compounding each run.</text>
+
+      <line class="flow" x1="16" y1="150" x2="884" y2="150" opacity=".3"/>
+
+      <text class="svg-sub" x="16" y="184">LOOP 2 — THE PUBLISHED PAGE</text>
+      <rect class="box-accent" x="16" y="200" width="150" height="60" rx="4"/>
+      <text class="svg-title" x="30" y="224">Note (MCP)</text>
+      <text class="svg-sub" x="30" y="242">publish = true</text>
+
+      <rect class="box" x="290" y="200" width="150" height="60" rx="4"/>
+      <text class="svg-title" x="304" y="224">New Notion page</text>
+      <text class="svg-sub" x="304" y="242">in the same database</text>
+
+      <path class="flow" marker-end="url(#ar3)" d="M166 220 H290"/>
+      <text class="svg-edge" x="196" y="214">create page</text>
+      <path class="flow-dash" marker-end="url(#ar3c)" d="M290 248 H166" stroke="var(--crit)"/>
+      <text class="svg-edge" x="180" y="266" fill="var(--crit)">next sync pulls it back</text>
+
+      <line class="flow-dash" x1="228" y1="188" x2="228" y2="276" stroke="var(--crit)" stroke-width="2"/>
+      <text class="svg-edge" x="470" y="216" fill="var(--crit)">GUARD: sync skips any page id already stored</text>
+      <text class="svg-edge" x="470" y="232" fill="var(--crit)">as some note's notion_page_id.</text>
+      <text class="svg-edge" x="470" y="252">Without it: the same content exists twice — once</text>
+      <text class="svg-edge" x="470" y="268">under the note id, once under the page id —</text>
+      <text class="svg-edge" x="470" y="284">and every triple from it is counted twice.</text>
+    </svg>
+    <figcaption>
+      <b>Both guards are skip rules on the read side, not the write side.</b> That is deliberate:
+      the writer cannot know what a future reader will do with its output, so the reader is the one
+      that has to recognise its own handwriting.
+    </figcaption>
+  </figure>
+
+  <p>
+    A third cycle is worth naming because it is <em>not</em> guarded: publishing a note does not
+    push later edits to that page. Publishing creates, and stops. Updating a page a human may have
+    edited is a merge problem, not a write, and it was left alone deliberately.
+  </p>
+</section>
+
+<!-- ============================================================= -->
+<section id="decide">
+  <span class="sec-num">06 — Yours to call</span>
+  <h2>Open decisions</h2>
+  <p class="lede">
+    Five things the system currently does one way, where the other way is defensible and the
+    choice is genuinely yours.
+  </p>
+
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Decision</th><th>Today</th><th>The case for changing</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Which store is authoritative</strong></td>
+          <td>SQLite locally, Neo4j for deploy</td>
+          <td>Running both means one always drifts. Committing to Neo4j everywhere removes a whole class of “which copy is right?” — at the cost of needing the network to work at all.</td>
+        </tr>
+        <tr>
+          <td><strong>Provenance on triples</strong></td>
+          <td>None — a fact distilled by a 7B model is indistinguishable from one you wrote</td>
+          <td>This is the largest structural gap. Marking origin would let <code>/ask</code> weight human notes above machine ones, and let contradiction detection prefer the human side.</td>
+        </tr>
+        <tr>
+          <td><strong>Cluster summaries</strong></td>
+          <td>All 25 recomputed every run</td>
+          <td>Most clusters are unchanged since yesterday. Caching by membership would cut this to near zero on a typical run.</td>
+        </tr>
+        <tr>
+          <td><strong>Timeout retries</strong></td>
+          <td>A timeout is retried three times</td>
+          <td>A timeout means the model cannot handle that input; retrying identically cannot help. This burned 12 of 45 minutes on one run.</td>
+        </tr>
+        <tr>
+          <td><strong>Duplicate triples in SQLite</strong></td>
+          <td>No uniqueness constraint</td>
+          <td>Neo4j already enforces it. Adding the same constraint to SQLite would make the two backends agree on counts.</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note crit">
+    <span class="kicker">Before deploying</span>
+    <p>
+      Neo4j Aura's free tier <strong>suspends after roughly three days of inactivity</strong>, and
+      while suspended its hostname stops resolving entirely — which looks exactly like the instance
+      having been deleted. For anything long-lived this is an operational constraint, not a detail.
+    </p>
+  </div>
+</section>
+
+</main>
+</div>
+
+</body>
+</html>
