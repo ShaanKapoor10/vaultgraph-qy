@@ -1,0 +1,106 @@
+# Brahmastra — full stack, SQLite by default.
+#
+#   docker compose up --build
+#   dashboard  http://localhost:3000
+#   api        http://localhost:8001/health/ready
+#
+# The default profile deploys with SQLite, because it is a legitimate
+# production choice for this system: one writer, modest data (a 900 KB
+# database at 55 notes), and no second service to operate. What it requires is
+# a PERSISTENT VOLUME and a SINGLE WORKER — both are configured below, and
+# both are easy to lose by accident, which is the entire risk.
+#
+# To run against Neo4j instead:
+#   docker compose --profile neo4j up --build
+# which starts a local Neo4j and points the backend at it. For Aura, leave the
+# profile off and set NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD in .env.
+
+services:
+  backend:
+    build:
+      context: ./backend
+    image: brahmastra-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    environment:
+      # ---- storage -------------------------------------------------------
+      # One answer for every process. The MCP server, the CLI and the hooks
+      # read this from backend/.env; inside the container it comes from here.
+      GRAPH_BACKEND: ${GRAPH_BACKEND:-sqlite}
+      # Both paths point INTO the volume. A database written to the image
+      # layer instead is discarded on the next deploy, silently.
+      BRAHMASTRA_DB: /data/concept_graph.db
+      BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
+      BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
+
+      # ---- neo4j (ignored when GRAPH_BACKEND=sqlite) ----------------------
+      NEO4J_URI: ${NEO4J_URI:-}
+      NEO4J_USER: ${NEO4J_USER:-}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+
+      # ---- language model ------------------------------------------------
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Reaches the host's Ollama from inside the container; a bare localhost
+      # here would resolve to the container itself and always fail.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+
+      # ---- notion (optional) ---------------------------------------------
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID:-}
+
+      # ---- web -----------------------------------------------------------
+      # Lock this down before exposing the API publicly.
+      CORS_ORIGINS: ${CORS_ORIGINS:-*}
+      # SQLite is a single file; concurrent writers give "database is locked".
+      # Raise this ONLY with GRAPH_BACKEND=neo4j.
+      WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
+    volumes:
+      # The only stateful thing in the deployment. Lose this and you lose the
+      # notes, which are the one part of the system that is not rebuildable.
+      - brahmastra-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend:
+    build:
+      context: ./frontend
+    image: brahmastra-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Service name, not localhost: inside the compose network "localhost"
+      # is the frontend container itself.
+      BACKEND_URL: http://backend:8001
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  # Optional local Neo4j, for trying the other backend without Aura.
+  #   docker compose --profile neo4j up --build
+  neo4j:
+    profiles: ["neo4j"]
+    image: neo4j:5-community
+    restart: unless-stopped
+    ports:
+      - "7474:7474"   # browser
+      - "7687:7687"   # bolt
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_LOCAL_PASSWORD:-brahmastra}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+volumes:
+  brahmastra-data:
+  neo4j-data:

@@ -1,0 +1,13 @@
+# Never ship secrets or local state into an image layer.
+.env
+.env.*
+data/
+.cache/
+.venv/
+__pycache__/
+*.py[cod]
+tests/
+.pytest_cache/
+*.db
+*.db-shm
+*.db-wal

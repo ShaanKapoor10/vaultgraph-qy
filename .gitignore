@@ -17,9 +17,12 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files
+# env files — secrets never enter the repo
 .env*
 backend/.env
+# ...but the TEMPLATE must, or nobody deploying knows which keys exist.
+# The negation has to come after the pattern that excluded it.
+!.env.example
 
 # vercel
 .vercel

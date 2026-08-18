@@ -28,11 +28,20 @@ MODEL_NAME = os.environ.get("EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 # be dropped and rebuilt or writes will be rejected.
 DIM = int(os.environ.get("EMBEDDING_DIM", "384"))
 
-# Absolute, so the cache lands in backend/.cache no matter the working
-# directory. This was previously the relative string "backend/.cache", which
-# resolved to backend/backend/.cache when anything ran from backend/ — the
-# reason an 87MB model tree ended up committed at an unexpected path.
-_CACHE_DIR = Path(__file__).resolve().parent.parent / ".cache"
+def cache_dir() -> Path:
+    """
+    Where the ~88 MB model tree lives.
+
+    Absolute, never relative: this was once the string "backend/.cache", which
+    resolved to backend/backend/.cache when anything ran from backend/ — the
+    reason a model tree ended up committed at an unexpected path.
+
+    Overridable with BRAHMASTRA_CACHE so a container can bake the model into
+    the image at build time. Without that the download happens on the first
+    request after every cold start, and fails outright with no network.
+    """
+    override = os.environ.get("BRAHMASTRA_CACHE")
+    return Path(override) if override else Path(__file__).resolve().parent.parent / ".cache"
 
 _model: Any | None = None
 _load_failed = False
@@ -45,7 +54,7 @@ def get_model() -> Any | None:
         return _model
     try:
         from sentence_transformers import SentenceTransformer
-        _model = SentenceTransformer(MODEL_NAME, cache_folder=str(_CACHE_DIR))
+        _model = SentenceTransformer(MODEL_NAME, cache_folder=str(cache_dir()))
         return _model
     except Exception:
         # Missing package, no disk space, offline on first download — all mean

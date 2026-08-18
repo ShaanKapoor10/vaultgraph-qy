@@ -15,11 +15,23 @@ dependencies = [
     "typer>=0.12.0",
     "rich>=13.7.0",
     "python-dotenv>=1.0.0",
-    "notion-client>=2.2.1,<3",  # 3.x uses the new data-source API which breaks classic database calls
+    # Both SDK generations work: sync._iter_database_rows branches on whether
+    # databases.query exists and falls back to data_sources.query, because the
+    # 2025-09-03 Notion API split a database into data sources. The old <3 pin
+    # locked out the current API for no remaining reason.
+    "notion-client>=2.2.1",
     "mcp>=1.0.0",
     "groq>=1.0.0",
     "numpy>=1.26.0",
     "scipy>=1.13.0",
+    # Required whenever GRAPH_BACKEND=neo4j. Undeclared until now: it happened
+    # to be present in the local venv, so nothing failed here, but a clean
+    # install would import-error the moment the Neo4j backend was selected.
+    "neo4j>=5.20.0",
+    # Not transitive-by-accident: neo4j_store passes an explicit certifi SSL
+    # context, because a TLS-intercepting root CA makes the driver's default
+    # verification fail with "self-signed certificate in certificate chain".
+    "certifi>=2024.2.2",
 ]
 
 [project.scripts]

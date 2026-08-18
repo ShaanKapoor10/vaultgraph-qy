@@ -1,0 +1,5 @@
+Static assets served at the site root.
+
+Kept in git deliberately: frontend/Dockerfile does `COPY /app/public ./public`,
+and Docker fails the build when a COPY source does not exist. An empty tracked
+directory keeps the image buildable before any asset is added.

@@ -21,7 +21,9 @@ if _ENV.exists():
     except ImportError:
         pass  # python-dotenv not installed — rely on shell env
 
-from fastapi import FastAPI
+from typing import Any
+
+from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
 from brahmastra.db import init_db
@@ -43,7 +45,10 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # "*" is right for local development and wrong for a public deployment:
+    # combined with allow_credentials it lets any site call the API as the
+    # user. Set CORS_ORIGINS to a comma-separated allowlist when deploying.
+    allow_origins=[o.strip() for o in os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,4 +65,41 @@ app.include_router(workspaces.router)
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    """
+    Liveness. Answers "is this process running?" and nothing more.
+
+    Deliberately does not touch the database: a liveness probe that fails when
+    a dependency is down gets the container killed and restarted, which cannot
+    fix a dependency. Restarting a healthy process because Neo4j is asleep just
+    turns a degraded system into an unavailable one.
+    """
     return {"status": "ok", "service": "brahmastra"}
+
+
+@app.get("/health/ready")
+async def ready(response: Response) -> dict[str, Any]:
+    """
+    Readiness. Answers "can this instance serve traffic?" — which means the
+    graph store must actually respond, not merely be configured.
+
+    Returns 503 when it cannot, so a load balancer stops routing here while
+    leaving the process alive to recover. This is the probe worth wiring up:
+    the store is remote and pausable when GRAPH_BACKEND=neo4j, and Aura Free
+    suspends after roughly three days idle.
+    """
+    from brahmastra import db
+    from brahmastra.stores import backend_name
+
+    detail: dict[str, Any] = {"service": "brahmastra", "backend": backend_name()}
+    try:
+        stats = db.get_db_stats()
+        detail.update(
+            status="ready",
+            workspace=stats.get("workspace"),
+            notes=stats.get("notes_total"),
+            graph_cached=stats.get("graph_cached"),
+        )
+    except Exception as exc:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+        detail.update(status="unavailable", error=f"{type(exc).__name__}: {exc}"[:300])
+    return detail
