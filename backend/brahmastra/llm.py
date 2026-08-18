@@ -13,7 +13,7 @@ Providers:
 
 Config (backend/.env):
   LLM_PROVIDER    "groq" | "ollama" | "anthropic"; unset = auto
-  GROQ_API_KEY / GROQ_MODEL          (default "llama-3.3-70b-versatile")
+  GROQ_API_KEY / GROQ_MODEL          (default GROQ_DEFAULT_MODEL below)
   ANTHROPIC_API_KEY / ANTHROPIC_MODEL (default "claude-haiku-4-5-20251001")
   OLLAMA_MODEL    (default "qwen2.5:7b-instruct")
   OLLAMA_HOST     (default "http://localhost:11434")
@@ -49,6 +49,14 @@ def _env(name: str, default: str) -> str:
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_HOST = _env("OLLAMA_HOST", "http://localhost:11434")
 
+# Groq retires hosted models, so this WILL go stale. It was
+# llama-3.3-70b-versatile until Groq decommissioned it mid-session: the same
+# model served traffic one hour and 404ed the next. Chosen because it is the
+# largest current option (131k context) and honours response_format json_object,
+# which extraction depends on — qwen3.6-27b does not, it emits reasoning tokens
+# and fails JSON validation. Override per deployment with GROQ_MODEL.
+GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
+
 PROVIDERS = ("groq", "anthropic", "ollama")
 
 
@@ -67,6 +75,18 @@ class LLMQuotaExhausted(LLMUnavailable):
     """
 
 
+class LLMModelUnavailable(LLMUnavailable):
+    """
+    The configured model does not exist on this account.
+
+    Providers retire hosted models. `llama-3.3-70b-versatile` was the default
+    here and served traffic one hour, then 404ed the next — it had been
+    decommissioned. Retrying cannot fix a model that no longer exists, and the
+    raw 404 buried under three attempts reads like a network fault, so this is
+    raised immediately with the actual remedy.
+    """
+
+
 def _is_quota_exhausted(exc: Exception) -> bool:
     """
     True for a limit that will not clear during this run.
@@ -80,6 +100,14 @@ def _is_quota_exhausted(exc: Exception) -> bool:
     return any(
         marker in text
         for marker in ("per day", "tokens per day", "(tpd)", "requests per day", "rpd")
+    )
+
+
+def _is_model_missing(exc: Exception) -> bool:
+    """True when the provider says the configured model does not exist."""
+    text = str(exc).lower()
+    return "404" in text and (
+        "does not exist" in text or "model_not_found" in text or "not found" in text
     )
 
 
@@ -209,8 +237,9 @@ def _groq_chat(
         ) from e
 
     client = Groq(api_key=_env("GROQ_API_KEY", ""))
+    model = _env("GROQ_MODEL", GROQ_DEFAULT_MODEL)
     kwargs: dict = {
-        "model": _env("GROQ_MODEL", "llama-3.3-70b-versatile"),
+        "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [
@@ -234,6 +263,15 @@ def _groq_chat(
                 # A daily cap will not clear in 2-6 seconds. Backing off here
                 # only wastes ~12s per note and still fails.
                 raise LLMQuotaExhausted(f"Groq daily quota exhausted: {e}") from e
+            if _is_model_missing(e):
+                # Retrying a retired model is as pointless as retrying a daily
+                # cap, and the raw 404 gives no hint that the fix is one env var.
+                raise LLMModelUnavailable(
+                    f"Groq model {model!r} is not available on this account. "
+                    f"Groq retires hosted models; set GROQ_MODEL in backend/.env to a "
+                    f"current one (list them with `client.models.list()`). "
+                    f"Default is {GROQ_DEFAULT_MODEL!r}. Original error: {e}"
+                ) from e
             time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
 
     raise LLMUnavailable(f"Groq request failed after {retries} attempts: {last_err}")

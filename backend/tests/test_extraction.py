@@ -179,6 +179,23 @@ def test_daily_quota_is_distinguished_from_a_transient_limit():
     assert not spent(Exception("Connection reset by peer"))
 
 
+def test_a_retired_model_is_not_retried():
+    """
+    Groq decommissions hosted models. `llama-3.3-70b-versatile` served traffic
+    one hour and 404ed the next, and three retries turned a one-line
+    configuration problem into something that read like a network fault.
+    """
+    from brahmastra.llm import _is_model_missing as missing
+
+    assert missing(Exception(
+        "Error code: 404 - {'error': {'message': 'The model "
+        "`llama-3.3-70b-versatile` does not exist or you do not have access to it.'}}"
+    ))
+
+    assert not missing(Exception("Error code: 429 - rate limit reached"))
+    assert not missing(Exception("Connection reset by peer"))
+
+
 def test_extraction_aborts_on_quota_instead_of_grinding(temp_db, monkeypatch):
     """
     Observed for real: 15 notes retried against a spent daily quota took over

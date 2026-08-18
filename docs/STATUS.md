@@ -1,7 +1,7 @@
 # Brahmastra — Status
 
-**Branch:** `feat/multi-workspace` · **16 commits ahead of the last pushed branch, none pushed yet**
-**Tests:** 91 passing across 8 files (`python -m pytest tests/ -q` from `backend/`)
+**Branch:** `feat/multi-workspace` · **18 commits ahead of the last pushed branch, none pushed yet**
+**Tests:** 92 passing across 8 files (`python -m pytest tests/ -q` from `backend/`)
 **Last verified:** 12 August 2026
 
 Live graph (workspace `default`): **53 notes**, 602 triples, **396 entities**, 61 concept
@@ -144,8 +144,17 @@ Measured 12 August 2026 on this machine.
 
 | Provider | Per extraction call |
 |---|---|
-| Groq `llama-3.3-70b` (default) | ~1.5s |
+| Groq `openai/gpt-oss-120b` (default) | ~0.8s |
 | Ollama `qwen2.5:7b-instruct` | 1m37s – 3m57s |
+
+**The Groq default changed mid-session.** `llama-3.3-70b-versatile` served traffic one hour
+and returned `404 does not exist` the next — Groq had decommissioned it, which broke
+extraction, cluster summaries, GraphRAG and checkpointing simultaneously. The replacement
+is `openai/gpt-oss-120b`: largest current option, 131k context, and it honours
+`response_format={"type":"json_object"}`, which extraction requires. `qwen/qwen3.6-27b`
+does **not** — it emits reasoning tokens and fails JSON validation, so it is unsuitable
+despite being available. `LLMModelUnavailable` now fails fast instead of retrying a model
+that no longer exists. **Expect this default to go stale again.**
 
 Ollama is ~100× slower **here specifically** because the model does not fit the GPU: the
 RTX 3060 Laptop has 4 GB VRAM and `qwen2.5:7b` at 8k context needs ~5.6 GB, so `ollama ps`
