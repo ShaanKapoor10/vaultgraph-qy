@@ -56,6 +56,26 @@ OLLAMA_HOST = _env("OLLAMA_HOST", "http://localhost:11434")
 # which extraction depends on — qwen3.6-27b does not, it emits reasoning tokens
 # and fails JSON validation. Override per deployment with GROQ_MODEL.
 GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
+ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+
+
+def groq_model() -> str:
+    """
+    The Groq model every caller must use.
+
+    Provider selection was centralised here so extraction, GraphRAG and cluster
+    summaries could never disagree about which provider is live — but the MODEL
+    was left hardcoded in each call site, so they disagreed about that instead.
+    When Groq retired llama-3.3-70b this module was fixed and extraction kept
+    calling the dead model, failing every note while summaries succeeded in the
+    same run.
+    """
+    return _env("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+
+
+def anthropic_model() -> str:
+    """The Anthropic model every caller must use. See groq_model()."""
+    return _env("ANTHROPIC_MODEL", ANTHROPIC_DEFAULT_MODEL)
 
 PROVIDERS = ("groq", "anthropic", "ollama")
 
@@ -237,7 +257,7 @@ def _groq_chat(
         ) from e
 
     client = Groq(api_key=_env("GROQ_API_KEY", ""))
-    model = _env("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+    model = groq_model()
     kwargs: dict = {
         "model": model,
         "temperature": temperature,
@@ -293,7 +313,7 @@ def _anthropic_chat(
 
     client = anthropic.Anthropic(api_key=_env("ANTHROPIC_API_KEY", ""))
     resp = client.messages.create(
-        model=_env("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001"),
+        model=anthropic_model(),
         max_tokens=max_tokens,
         temperature=temperature,
         system=system,

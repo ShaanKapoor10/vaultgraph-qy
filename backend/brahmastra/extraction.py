@@ -1,9 +1,13 @@
 """
 Stage 3 — Extraction agent.
 
-Reads notes with extraction_status='pending' from SQLite,
-calls Anthropic claude-3-5-haiku via structured JSON output,
-validates each triple against the ontology, then writes results back.
+Reads notes with extraction_status='pending' from SQLite, calls the configured
+LLM via structured JSON output, validates each triple against the ontology,
+then writes results back.
+
+Which provider AND which model both come from `brahmastra.llm` — never name a
+model here. Naming one is how extraction kept calling a retired Groq model
+after llm.py had already been pointed at its replacement.
 
 Usage (programmatic):   from brahmastra.extraction import run_extraction
 Usage (CLI):            brahmastra extract
@@ -118,6 +122,11 @@ def _build_user_message(title: str, content: str) -> str:
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b-instruct")
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
+# A truncated reply is not partial JSON, it is unparseable, so the entire note
+# fails and loses every triple in it. Long design notes overran the old 2048
+# limit; current cloud models have 131k context, so headroom is cheap.
+EXTRACTION_MAX_TOKENS = int(os.environ.get("EXTRACTION_MAX_TOKENS", "8192"))
+
 
 def _ollama_available() -> bool:
     """Return True if a local Ollama server is reachable."""
@@ -191,7 +200,15 @@ def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:
 
 
 def _parse_llm_response(raw_text: str) -> list[dict[str, Any]]:
-    raw_text = raw_text.strip()
+    raw_text = (raw_text or "").strip()
+    if not raw_text:
+        # Distinguish an empty reply from malformed JSON. A reasoning-style
+        # model that spends its budget before emitting content returns "", and
+        # "Expecting value: line 1 column 1" gives no clue what went wrong.
+        raise ValueError(
+            "LLM returned an empty response — no content to parse. The model may "
+            "have exhausted max_tokens before answering, or ignored JSON mode."
+        )
     if raw_text.startswith("```"):
         raw_text = raw_text.split("```")[1]
         if raw_text.startswith("json"):
@@ -210,10 +227,22 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
     except ImportError as e:
         raise RuntimeError("groq package not installed — run: uv pip install groq") from e
 
+    from brahmastra.llm import groq_model
+
     client = Groq(api_key=api_key)
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        max_tokens=2048,
+        # NOT a literal: llm.py owns which model runs, or this call site drifts
+        # and keeps hitting a retired one after llm.py has been fixed.
+        model=groq_model(),
+        # A long note yields many triples, and a cut-off reply is not partial
+        # JSON — it is unparseable, so the whole note fails. At 2048 a 3KB note
+        # truncated mid-string at char 3151 and lost everything.
+        max_tokens=EXTRACTION_MAX_TOKENS,
+        # Ollama has always asked for JSON; this path never did, and relied on
+        # the model volunteering it. Reasoning-style models answer with prose
+        # first and leave `content` empty, which parses as "no triples".
+        response_format={"type": "json_object"},
+        temperature=0.0,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": _build_user_message(title, content)},
@@ -228,10 +257,12 @@ def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict
     except ImportError as e:
         raise RuntimeError("anthropic package not installed — run: uv pip install anthropic") from e
 
+    from brahmastra.llm import anthropic_model
+
     client = anthropic.Anthropic(api_key=api_key)
     message = client.messages.create(
-        model="claude-3-5-haiku-20241022",
-        max_tokens=2048,
+        model=anthropic_model(),  # see _extract_with_groq
+        max_tokens=EXTRACTION_MAX_TOKENS,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_message(title, content)}],
     )
@@ -255,9 +286,18 @@ def _is_placeholder(text: str) -> bool:
 
 
 def _is_quota_error(message: str) -> bool:
-    """True if this failure is a provider quota that will not clear this run."""
-    from brahmastra.llm import _is_quota_exhausted
-    return _is_quota_exhausted(Exception(str(message)))
+    """
+    True if this failure will not clear during this run, so the run must stop.
+
+    Covers two causes with the same remedy — stop now, do not grind through the
+    remaining notes. A spent DAILY quota does not refill in seconds, and a
+    retired model does not come back at all: Groq decommissioned
+    llama-3.3-70b-versatile mid-session, and every pending note failed against
+    it one after another.
+    """
+    from brahmastra.llm import _is_model_missing, _is_quota_exhausted
+    exc = Exception(str(message))
+    return _is_quota_exhausted(exc) or _is_model_missing(exc)
 
 
 def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:

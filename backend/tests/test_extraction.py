@@ -196,6 +196,59 @@ def test_a_retired_model_is_not_retried():
     assert not missing(Exception("Connection reset by peer"))
 
 
+def test_extraction_uses_the_model_llm_py_configures(monkeypatch):
+    """
+    Provider selection was centralised in llm.py so the stages could never
+    disagree about which provider is live — but each call site kept its own
+    hardcoded MODEL, so they disagreed about that instead. When Groq retired
+    llama-3.3-70b, llm.py was fixed and extraction kept calling the dead model:
+    every note failed while cluster summaries succeeded in the same run.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    monkeypatch.setenv("GROQ_MODEL", "test/model-from-env")
+
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        message = MagicMock()
+        message.content = '{"triples": []}'
+        choice = MagicMock()
+        choice.message = message
+        resp = MagicMock()
+        resp.choices = [choice]
+        return resp
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    fake_groq = types.ModuleType("groq")
+    fake_groq.Groq = lambda **_: client
+    monkeypatch.setitem(sys.modules, "groq", fake_groq)
+
+    from brahmastra import extraction
+    importlib.reload(extraction)
+    extraction._extract_with_groq("T", "C", "key")
+
+    assert captured["model"] == "test/model-from-env", (
+        "extraction must use the model llm.py resolves, not a literal of its own"
+    )
+
+
+def test_a_retired_model_stops_the_run_like_a_spent_quota():
+    """Retrying 50 notes against a model that no longer exists is the same grind."""
+    from brahmastra.extraction import _is_quota_error
+
+    assert _is_quota_error(
+        "Error code: 404 - {'error': {'message': 'The model "
+        "`llama-3.3-70b-versatile` does not exist', 'code': 'model_not_found'}}"
+    )
+    assert _is_quota_error("429 ... tokens per day (TPD): Limit 100000")
+    assert not _is_quota_error("Connection reset by peer")
+
+
 def test_extraction_aborts_on_quota_instead_of_grinding(temp_db, monkeypatch):
     """
     Observed for real: 15 notes retried against a spent daily quota took over
