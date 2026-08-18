@@ -674,6 +674,12 @@ class Neo4jStore(GraphStore):
                 "sourceNoteId": t.get("source_note_id"),
                 "extractedAt": now,
             })
+        # MERGE, never CREATE. The normal extraction path deletes a note's
+        # triples before re-inserting, so CREATE looked safe — but migration
+        # does not delete, and re-running it appended a second copy of every
+        # triple: 633 in SQLite became 1028 in Neo4j. Identity is
+        # (subject, relation, object, sourceNoteId); confidence and quote are
+        # mutable and get overwritten on match.
         # One generic :ASSERTS relationship carrying the relation name. The
         # ontology-typed relationships are created in save_graph() between
         # resolved :Entity nodes; raw mentions are pre-resolution and would
@@ -685,13 +691,13 @@ class Neo4jStore(GraphStore):
               ON CREATE SET s.type = row.subjectType
             MERGE (o:Mention {text: row.object, workspaceId: $ws})
               ON CREATE SET o.type = row.objectType
-            CREATE (s)-[:ASSERTS {
+            MERGE (s)-[a:ASSERTS {
                 relation: row.relation,
-                confidence: row.confidence,
-                sourceQuote: row.sourceQuote,
-                sourceNoteId: row.sourceNoteId,
-                extractedAt: row.extractedAt
+                sourceNoteId: row.sourceNoteId
             }]->(o)
+            SET a.confidence = row.confidence,
+                a.sourceQuote = row.sourceQuote,
+                a.extractedAt = row.extractedAt
             WITH s, o, row
             MATCH (n:Note {id: row.sourceNoteId, workspaceId: $ws})
             MERGE (s)-[:EXTRACTED_FROM]->(n)

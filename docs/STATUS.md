@@ -15,7 +15,7 @@ cluster summaries (25), Notion write-back (3 pages).
 
 ## What this version added
 
-Sixteen commits, grouped by what they actually deliver.
+Twenty commits, grouped by what they actually deliver.
 
 ### 1. Workspaces — several independent graphs
 `2d0b45e` `efc9000` `427b098` `723a953`
@@ -103,7 +103,7 @@ result. The pull was being skipped while the push went ahead.
 ## What is left
 
 ### Blocking a push
-- **16 commits are unpushed.** Nothing on this branch exists on any remote.
+- **20 commits are unpushed.** Nothing on this branch exists on any remote.
 
 ### Model configuration is a recurring trap
 Fixing the retired model in `llm.py` did **not** fix extraction, because extraction never
@@ -117,6 +117,61 @@ Groq extraction path never requested `json_object` (it relied on the model volun
 JSON, and a reasoning model returns empty `content`), and `max_tokens=2048` truncated long
 notes mid-string — a cut-off reply is unparseable, so the note lost every triple. Now
 `EXTRACTION_MAX_TOKENS`, default 8192.
+
+### Notion holds 3 of 54 notes — the loop is one-way for everything else
+
+```
+from/to Notion :  3   Sarah Location, Team Structure, Apollo Project
+local only     : 51   every note added via MCP — session records, checkpoints, design notes
+```
+
+Write-back only touches notes whose ID is a Notion page UUID (`_is_notion_page_id`), so a
+note that originated in Brahmastra has nowhere to be written. **Nothing creates a Notion
+page for a Brahmastra-originated note.** The bidirectional brain is bidirectional only for
+pages that started in Notion.
+
+To close it, write-back needs to `pages.create` in the workspace's data source for notes
+with no Notion ID, then store the returned page ID so the next run updates rather than
+duplicates. That last part is the whole difficulty: without persisting the returned ID,
+every run creates the page again.
+
+This also forces the question in the next section — if Brahmastra can create Notion pages,
+which of the two is the system of record?
+
+### Neo4j is live and verified — but migration was not idempotent
+The Aura instance had **paused**, not been deleted; Aura Free suspends after ~3 days idle
+and `208ed26a.databases.neo4j.io` stops resolving while suspended. Resuming it from the
+console restored everything.
+
+Both backends now run the full pipeline green. Verified 18 August against Aura: `status:
+ok`, no failed stages, Notion pull 3 → extract → resolve (505 mentions, embeddings) →
+graph (417 nodes / 623 edges / 63 clusters / 6 contradictions) → 25 cluster summaries →
+Notion write-back 3.
+
+Getting there exposed a real bug. `Neo4jStore.insert_triples` used `CREATE` for the
+`:ASSERTS` relationship while MERGEing the mentions either side, and
+`migrate_to_neo4j` did not delete before inserting. The module docstring promised "safe to
+re-run"; re-running it turned 633 triples into **1028** — 312 duplicates plus 83 facts from
+earlier extractions that SQLite had already dropped. `CREATE` looked safe only because the
+extraction path deletes a note's triples first.
+
+Fixed both ways: `insert_triples` MERGEs on `(subject, relation, object, sourceNoteId)`,
+and migration deletes each note's triples before re-inserting, so it mirrors instead of
+unioning.
+
+**Neo4j settles at 623 triples where SQLite reports 633, and 623 is the correct number.**
+SQLite's `raw_triples` has no uniqueness constraint, so a fact the extractor emits twice
+from one note is stored twice; ten such rows exist today. Neo4j's MERGE enforces the
+constraint structurally. Worth adding the same uniqueness to SQLite.
+
+### Deployment readiness
+Ready: pluggable storage verified on both backends, pluggable LLM, workspace isolation
+enforced in three layers, per-store pipeline lock, seven stages green on Neo4j.
+
+Not done: no deployment branch yet (agreed to keep it off this branch), no container or
+process manager, no health-check wiring beyond `/health`, secrets still only in
+`backend/.env`. Aura Free suspending after ~3 days idle is a real operational constraint
+for anything long-lived.
 
 ### Open and unexplained
 - **Three workspace MCP tools are invisible to the client.** The server registers all ten

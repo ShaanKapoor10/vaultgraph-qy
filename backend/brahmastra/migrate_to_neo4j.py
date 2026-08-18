@@ -6,8 +6,12 @@ Copy everything from the SQLite store into the Neo4j store.
     python -m brahmastra.migrate_to_neo4j --apply --wipe   # clear target first
 
 Reads through the GraphStore contract rather than raw SQL, so it stays correct
-if either backend changes. Safe to re-run: notes and mentions are MERGEd, and
---wipe clears the target when you want a clean copy instead of a union.
+if either backend changes.
+
+Re-runnable: the target ends up mirroring the source. Notes and mentions are
+MERGEd, and each note's triples are deleted before re-insert, so a second run
+neither duplicates facts nor leaves behind ones the source has since dropped.
+--wipe additionally clears entities and the cached graph, for a cold rebuild.
 
 The source is always SQLite and the target always Neo4j; GRAPH_BACKEND is
 ignored here so running this cannot accidentally copy a store onto itself.
@@ -73,7 +77,15 @@ def migrate(apply: bool = False, wipe: bool = False) -> dict[str, int]:
         if n.get("extraction_status") in ("done", "error"):
             dst.set_note_status(n["id"], n["extraction_status"])
 
-    print("  triples ...")
+    # Mirror, do not union. Without the delete this is additive: re-running it
+    # once turned 633 triples in SQLite into 1028 in Neo4j — 312 duplicates
+    # plus 83 facts from earlier extractions that SQLite had already dropped
+    # when those notes were re-extracted. Deleting per note is what the
+    # extraction path already does; it touches only triples, leaving notes,
+    # entities and the cached graph intact.
+    print("  triples (replacing per note) ...")
+    for n in notes:
+        dst.delete_triples_for_note(n["id"])
     dst.insert_triples(triples)
 
     print("  canonical map ...")
