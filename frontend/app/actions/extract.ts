@@ -1,6 +1,7 @@
 "use server"
 
 import type { RawTriple } from "@/lib/types"
+import { backendFetch } from "@/lib/backend"
 
 export interface ExtractResult {
   ok: boolean
@@ -17,11 +18,10 @@ export interface ExtractResult {
  * frontend (which required a Vercel AI Gateway and a non-existent model name).
  */
 export async function extractTriples(noteId: string, content: string): Promise<ExtractResult> {
-  const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8001"
 
   try {
     // 1. Persist the note — backend marks it as pending for extraction.
-    const noteRes = await fetch(`${backendUrl}/notes`, {
+    const noteRes = await backendFetch("/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -40,7 +40,7 @@ export async function extractTriples(noteId: string, content: string): Promise<E
     //    /pipeline/run kicks the run off in the background and returns
     //    immediately (a run can take minutes, longer than a request should
     //    stay open), so poll /pipeline/status until it finishes.
-    const pipelineRes = await fetch(`${backendUrl}/pipeline/run`, {
+    const pipelineRes = await backendFetch("/pipeline/run", {
       method: "POST",
     })
     if (!pipelineRes.ok) {
@@ -51,7 +51,7 @@ export async function extractTriples(noteId: string, content: string): Promise<E
     const PIPELINE_TIMEOUT_MS = 5 * 60 * 1000
     const deadline = Date.now() + PIPELINE_TIMEOUT_MS
     for (;;) {
-      const statusRes = await fetch(`${backendUrl}/pipeline/status`, { cache: "no-store" })
+      const statusRes = await backendFetch("/pipeline/status", { cache: "no-store" })
       if (statusRes.ok) {
         const status = await statusRes.json()
         if (status.state === "done" || status.state === "skipped") break
@@ -62,7 +62,7 @@ export async function extractTriples(noteId: string, content: string): Promise<E
     }
 
     // 3. Fetch all triples and return those belonging to this note.
-    const triplesRes = await fetch(`${backendUrl}/graph/triples`)
+    const triplesRes = await backendFetch("/graph/triples")
     if (!triplesRes.ok) throw new Error(`/graph/triples returned ${triplesRes.status}`)
 
     const allTriples: Array<{

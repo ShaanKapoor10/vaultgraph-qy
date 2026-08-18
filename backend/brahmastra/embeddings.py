@@ -47,11 +47,30 @@ _model: Any | None = None
 _load_failed = False
 
 
+def embeddings_enabled() -> bool:
+    """
+    Whether semantic matching is wanted at all.
+
+    Loading torch plus all-MiniLM-L6-v2 costs ~460 MB RSS, measured — which
+    OOMs a 512 MB instance at startup rather than degrading. Setting
+    EMBEDDINGS_ENABLED=0 keeps the process inside a small instance: entity
+    resolution falls back to exact matching plus Jaro-Winkler, so "Sarah" and
+    "sarah" still merge, but "payments integration" and "the payments work"
+    no longer do. A deliberate, documented downgrade beats a crash loop.
+    """
+    return os.environ.get("EMBEDDINGS_ENABLED", "1").strip().lower() not in {
+        "0", "false", "no",
+    }
+
+
 def get_model() -> Any | None:
     """Load the model once per process. Returns None if unavailable."""
     global _model, _load_failed
     if _model is not None or _load_failed:
         return _model
+    if not embeddings_enabled():
+        _load_failed = True
+        return None
     try:
         from sentence_transformers import SentenceTransformer
         _model = SentenceTransformer(MODEL_NAME, cache_folder=str(cache_dir()))

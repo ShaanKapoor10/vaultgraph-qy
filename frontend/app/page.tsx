@@ -2,6 +2,7 @@ import { Dashboard } from "@/components/dashboard"
 import { SAMPLE_NOTES, SAMPLE_TRIPLES } from "@/lib/sample-notes"
 import type { Note, RawTriple, PipelineResult } from "@/lib/types"
 import { adaptBackendGraph } from "@/lib/backend-adapter"
+import { backendFetch } from "@/lib/backend"
 import type { BackendGraphResponse } from "@/lib/backend-adapter"
 
 /**
@@ -15,11 +16,12 @@ async function loadFromBackend(): Promise<{
   result: PipelineResult | null
 } | null> {
   try {
-    const base = process.env.BACKEND_URL ?? "http://localhost:8001"
+    // backendFetch attaches BRAHMASTRA_API_KEY; this runs on the server, so
+    // the key never reaches the browser.
     const [notesRes, triplesRes, graphRes] = await Promise.all([
-      fetch(`${base}/notes`, { cache: "no-store" }),
-      fetch(`${base}/graph/triples`, { cache: "no-store" }),
-      fetch(`${base}/graph`, { cache: "no-store" }),
+      backendFetch("/notes", { cache: "no-store" }),
+      backendFetch("/graph/triples", { cache: "no-store" }),
+      backendFetch("/graph", { cache: "no-store" }),
     ])
     if (!notesRes.ok || !triplesRes.ok || !graphRes.ok) return null
 

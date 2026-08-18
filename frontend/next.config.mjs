@@ -10,17 +10,10 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
-  // In local dev (outside Vercel), proxy /api/* to the FastAPI backend.
-  // On Vercel, experimentalServices handles the routing automatically.
-  async rewrites() {
-    const backendUrl = process.env.BACKEND_URL ?? "http://localhost:8001"
-    return [
-      {
-        source: "/api/:path*",
-        destination: `${backendUrl}/:path*`,
-      },
-    ]
-  },
+  // No /api rewrite here on purpose: it forwards requests untouched and
+  // cannot attach an Authorization header, so it 401s the moment the API
+  // requires a key. app/api/[...path]/route.ts proxies instead, keeping
+  // BRAHMASTRA_API_KEY server-side.
 }
 
 export default nextConfig

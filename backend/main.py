@@ -26,6 +26,7 @@ from typing import Any
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 
+from brahmastra.auth import auth_status, require_api_key
 from brahmastra.db import init_db
 from brahmastra.routers import notes, pipeline, graph, ask, paths, workspaces
 
@@ -53,6 +54,21 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Authentication. Registered after CORS so a rejected request still carries
+# CORS headers — otherwise a browser reports an opaque network error instead of
+# the 401 that would tell you what is wrong.
+app.middleware("http")(require_api_key)
+
+# Remote MCP. The same tools a local stdio server exposes, over HTTP, mounted
+# inside this app on purpose: it inherits the auth middleware above, so there
+# is ONE authentication boundary rather than a second unprotected door into the
+# same graph. Enabled only when asked for, because a local stdio server needs
+# nothing of the sort.
+if os.environ.get("MCP_HTTP", "").strip().lower() in {"1", "true", "yes"}:
+    from brahmastra.mcp_server import mcp as _mcp
+
+    app.mount("/mcp", _mcp.streamable_http_app())
 
 # Register routers
 app.include_router(notes.router)
@@ -90,7 +106,13 @@ async def ready(response: Response) -> dict[str, Any]:
     from brahmastra import db
     from brahmastra.stores import backend_name
 
-    detail: dict[str, Any] = {"service": "brahmastra", "backend": backend_name()}
+    detail: dict[str, Any] = {
+        "service": "brahmastra",
+        "backend": backend_name(),
+        # Visible on purpose: "unconfigured" means the API is refusing all
+        # traffic, and "anonymous" means it is open to anyone who can reach it.
+        "auth": auth_status(),
+    }
     try:
         stats = db.get_db_stats()
         detail.update(

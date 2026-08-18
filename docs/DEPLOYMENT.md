@@ -158,20 +158,129 @@ Two decisions dominate its size and cold-start time:
   machine, not on the server. It reads the same `backend/.env`, which is how it
   agrees with everything else about `GRAPH_BACKEND`. Pointing it at a deployed
   Neo4j is what lets a local agent write into the shared graph.
-- **Session checkpoint hooks.** Same reason — they fire in a local Claude Code
-  session.
-- **A scheduler.** Nothing runs the pipeline on a timer today; it is triggered
-  by `POST /pipeline/run`, the CLI, or MCP. For a deployment that syncs from
-  Notion regularly you want either a cron container calling `/pipeline/run`, or
-  `python -m brahmastra.live_sync` as a second process.
+- **Session checkpoint hooks** fire inside a local Claude Code session, so
+  they run on your machine and write through whichever store `.env` selects.
+
+Both of those are covered below: the scheduler ships as an opt-in compose
+profile, and MCP can additionally be served over HTTP when a client cannot
+reach the graph directly.
+
+---
+
+## Authentication
+
+The API exposes the whole graph, can spend LLM tokens and can write into a
+Notion workspace. It **fails closed**:
+
+| Configuration | Result |
+|---|---|
+| `BRAHMASTRA_API_KEY` set | `Authorization: Bearer <key>` required (or `X-API-Key`) |
+| nothing set | **503 on every route except health probes** |
+| `BRAHMASTRA_ALLOW_ANONYMOUS=1` | open — local development only |
+
+Forgetting to configure a deployment therefore breaks it loudly instead of
+publishing the graph quietly. That default is deliberate: this codebase has
+already shipped workspace isolation that leaked silently and a hardcoded CORS
+`*`, and both failed open.
+
+`/health` and `/health/ready` stay open, because an orchestrator's health
+checker cannot carry a token, and a probe that 503s on unset auth would mask
+the real cause. `/health/ready` reports which state it is in, so you can see a
+deployment is protected without reading its environment.
+
+The dashboard reaches a protected API through `app/api/[...path]/route.ts`,
+which proxies server-side and injects the key. The old `next.config.mjs`
+rewrite was removed for exactly this reason — a rewrite forwards the request
+untouched and cannot attach a header, so every browser call would 401.
+`BRAHMASTRA_API_KEY` never reaches the browser.
+
+---
+
+## Running the pipeline on a schedule
+
+`live_sync` already polls and runs the pipeline, so this is a process, not new
+code:
+
+```bash
+docker compose --profile scheduler up --build     # POLL_INTERVAL, default 900s
+```
+
+Off by default, and the reason is the storage choice. With
+`GRAPH_BACKEND=sqlite` the scheduler is a **second writer** against one file:
+the pipeline lock prevents overlapping runs, but not a long pipeline
+transaction making an API write wait on `busy_timeout`. Survivable at this data
+size, but on-demand runs are the safer default. With `GRAPH_BACKEND=neo4j`
+there is no such constraint — turn it on.
+
+---
+
+## Using MCP against a deployed instance
+
+Two ways, and the first needs no new infrastructure at all.
+
+### 1. Local MCP server, shared graph (recommended)
+
+The MCP server speaks stdio to a local client, so it keeps running on your
+machine — but it reads the same `backend/.env` as everything else. Point that
+at the deployed Neo4j and a local agent writes straight into the shared graph:
+
+```bash
+GRAPH_BACKEND=neo4j
+NEO4J_URI=neo4j://<instance>.databases.neo4j.io:7687
+NEO4J_USER=<instance-id>
+NEO4J_PASSWORD=...
+```
+
+Every device with those credentials sees the same graph. This is the
+multi-device story, and it is why `GRAPH_BACKEND` had to move into `.env`:
+the MCP server, uvicorn, the CLI and the session hooks all start
+independently, and they must agree on where the database is.
+
+### 2. Remote MCP over HTTP
+
+When a client cannot reach Neo4j directly, or you want a single authenticated
+door, set `MCP_HTTP=1` and the same ten tools are served at `/mcp`, mounted
+inside the FastAPI app so they inherit the API's authentication — one boundary,
+not a second unprotected way into the same graph. Verified: `/mcp` returns 401
+without a key.
+
+```json
+{
+  "mcpServers": {
+    "brahmastra": {
+      "type": "http",
+      "url": "https://your-host/mcp",
+      "headers": { "Authorization": "Bearer YOUR_API_KEY" }
+    }
+  }
+}
+```
+
+Session checkpoint hooks stay local either way — they fire inside a local
+Claude Code session and write through whichever store `.env` selects.
+
+---
+
+## Memory, and the 512 MB trap
+
+Loading torch plus the embedding model costs **461 MB RSS, measured**, before
+serving anything. A 512 MB instance is killed while starting, which reads as a
+crash loop rather than as "needs a bigger box". Give it **1 GB**, or set
+`EMBEDDINGS_ENABLED=0` to fall back to exact matching plus Jaro-Winkler —
+measured cost of that trade on the live graph: **417 entity clusters with
+embeddings, 475 without**, so about 58 merges are lost.
+
+See `docs/PLATFORMS.md` for which hosts can meet this.
 
 ---
 
 ## Before going public
 
 - [ ] `CORS_ORIGINS` set to a real allowlist, not `*`
-- [ ] The API has **no authentication** — put it behind a proxy, or on a
-      private network, before exposing it
+- [ ] At least 1 GB RAM, or `EMBEDDINGS_ENABLED=0`
+- [ ] TLS in front of it — a bearer token over plain HTTP is not a secret
+- [x] Authentication — set `BRAHMASTRA_API_KEY`, and make sure
+      `BRAHMASTRA_ALLOW_ANONYMOUS` is **not** set on the host
 - [ ] `backend/.env` present on the host and excluded from the image
       (`.dockerignore` already does this)
 - [ ] Volume mounted and backed up if using SQLite

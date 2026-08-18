@@ -55,6 +55,17 @@ services:
       # ---- web -----------------------------------------------------------
       # Lock this down before exposing the API publicly.
       CORS_ORIGINS: ${CORS_ORIGINS:-*}
+
+      # ---- authentication ------------------------------------------------
+      # Fails closed: with neither of these set the API returns 503 on every
+      # route except the health probes, so a misconfigured deployment breaks
+      # loudly instead of publishing the graph.
+      BRAHMASTRA_API_KEY: ${BRAHMASTRA_API_KEY:-}
+      BRAHMASTRA_ALLOW_ANONYMOUS: ${BRAHMASTRA_ALLOW_ANONYMOUS:-}
+
+      # Serve MCP over HTTP at /mcp, behind the same auth as the REST API.
+      # Off by default: a local stdio MCP server needs none of this.
+      MCP_HTTP: ${MCP_HTTP:-}
       # SQLite is a single file; concurrent writers give "database is locked".
       # Raise this ONLY with GRAPH_BACKEND=neo4j.
       WEB_CONCURRENCY: ${WEB_CONCURRENCY:-1}
@@ -76,9 +87,48 @@ services:
       # Service name, not localhost: inside the compose network "localhost"
       # is the frontend container itself.
       BACKEND_URL: http://backend:8001
+      # The dashboard proxies /api/* to a backend that may now require a key.
+      BRAHMASTRA_API_KEY: ${BRAHMASTRA_API_KEY:-}
     depends_on:
       backend:
         condition: service_healthy
+
+  # Runs the pipeline on a timer. Opt in:
+  #   docker compose --profile scheduler up --build
+  #
+  # Deliberately NOT on by default, and the reason is the storage choice. With
+  # GRAPH_BACKEND=sqlite this is a SECOND WRITER against one file: the pipeline
+  # lock stops two runs overlapping, but it does not stop a long pipeline
+  # transaction from making an API write wait on busy_timeout. At this data
+  # size that is survivable, but on-demand runs are the safer default.
+  # With GRAPH_BACKEND=neo4j there is no such constraint — turn it on.
+  scheduler:
+    profiles: ["scheduler"]
+    build:
+      context: ./backend
+    image: brahmastra-backend
+    restart: unless-stopped
+    command: ["python", "-m", "brahmastra.live_sync"]
+    environment:
+      POLL_INTERVAL: ${POLL_INTERVAL:-900}
+      GRAPH_BACKEND: ${GRAPH_BACKEND:-sqlite}
+      BRAHMASTRA_DB: /data/concept_graph.db
+      BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
+      BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
+      NEO4J_URI: ${NEO4J_URI:-}
+      NEO4J_USER: ${NEO4J_USER:-}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-groq}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-}
+      NOTION_TOKEN: ${NOTION_TOKEN:-}
+      NOTION_DATABASE_ID: ${NOTION_DATABASE_ID:-}
+      # It never serves HTTP, so it needs no API key of its own.
+      BRAHMASTRA_ALLOW_ANONYMOUS: "1"
+    volumes:
+      - brahmastra-data:/data
+    depends_on:
+      - backend
 
   # Optional local Neo4j, for trying the other backend without Aura.
   #   docker compose --profile neo4j up --build
