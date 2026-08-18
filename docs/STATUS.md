@@ -1,12 +1,15 @@
 # Brahmastra — Status
 
-**Branch:** `feat/multi-workspace` · **18 commits ahead of the last pushed branch, none pushed yet**
-**Tests:** 92 passing across 8 files (`python -m pytest tests/ -q` from `backend/`)
-**Last verified:** 12 August 2026
+**Branch:** `feat/multi-workspace` · **19 commits ahead of the last pushed branch, none pushed yet**
+**Tests:** 94 passing across 8 files (`python -m pytest tests/ -q` from `backend/`)
+**Last verified:** 18 August 2026 — full pipeline run `status: ok`, no failed stages
 
-Live graph (workspace `default`): **53 notes**, 602 triples, **396 entities**, 61 concept
-clusters, 5 contradictions, 10 predicted links. Top entities by PageRank: Claude Code,
+Live graph (workspace `default`): **55 notes**, 633 triples, **417 entities**, 62 concept
+clusters, 6 contradictions, 10 predicted links. Top entities by PageRank: Claude Code,
 Brahmastra Insights toggle, MCP server, Shaan Kapoor, Brahmastra backend.
+
+All seven pipeline stages are green: Notion pull (3 pages), extract, resolve, build graph,
+cluster summaries (25), Notion write-back (3 pages).
 
 ---
 
@@ -102,13 +105,27 @@ result. The pull was being skipped while the push went ahead.
 ### Blocking a push
 - **16 commits are unpushed.** Nothing on this branch exists on any remote.
 
+### Model configuration is a recurring trap
+Fixing the retired model in `llm.py` did **not** fix extraction, because extraction never
+used `llm.py`'s model. Provider selection was centralised; the model was not, so each call
+site kept its own literal. One run had cluster summaries succeeding on the new model while
+every note failed 404 against the old one. Anthropic had drifted the same way.
+
+`llm.py` now exposes `groq_model()` / `anthropic_model()` and every call site uses them.
+**Never name a model outside `llm.py`.** Two related faults fixed at the same time: the
+Groq extraction path never requested `json_object` (it relied on the model volunteering
+JSON, and a reasoning model returns empty `content`), and `max_tokens=2048` truncated long
+notes mid-string — a cut-off reply is unparseable, so the note lost every triple. Now
+`EXTRACTION_MAX_TOKENS`, default 8192.
+
 ### Open and unexplained
 - **Three workspace MCP tools are invisible to the client.** The server registers all ten
   (`brahmastra_list_workspaces`, `_create_workspace`, `_search_all_workspaces` included —
   verified by listing them from the running module), but the client exposes seven. Survived
   a full restart. Cause unknown; it is client-side, not the server.
-- **One note fails extraction** — `879c07dd`, the checkpointing design record. It times out
-  on the local 7B because it is long. It extracts fine on Groq.
+- ~~One note fails extraction~~ — resolved. `879c07dd` failed for three separate reasons in
+  sequence: it timed out on the local 7B, then hit the retired Groq model, then truncated at
+  2048 tokens. All three are fixed; it now extracts cleanly.
 
 ### Known waste, worth fixing
 - **Timeouts are retried.** A timeout means the model cannot handle that input, so retrying
