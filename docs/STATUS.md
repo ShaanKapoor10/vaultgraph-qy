@@ -1,7 +1,7 @@
 # Brahmastra — Status
 
 **Branch:** `feat/multi-workspace` · **19 commits ahead of the last pushed branch, none pushed yet**
-**Tests:** 94 passing across 8 files (`python -m pytest tests/ -q` from `backend/`)
+**Tests:** 99 passing across 10 files (`python -m pytest tests/ -q` from `backend/`)
 **Last verified:** 18 August 2026 — full pipeline run `status: ok`, no failed stages
 
 Live graph (workspace `default`): **55 notes**, 633 triples, **417 entities**, 62 concept
@@ -103,7 +103,7 @@ result. The pull was being skipped while the push went ahead.
 ## What is left
 
 ### Blocking a push
-- **20 commits are unpushed.** Nothing on this branch exists on any remote.
+- **22 commits are unpushed.** Nothing on this branch exists on any remote.
 
 ### Model configuration is a recurring trap
 Fixing the retired model in `llm.py` did **not** fix extraction, because extraction never
@@ -118,25 +118,36 @@ JSON, and a reasoning model returns empty `content`), and `max_tokens=2048` trun
 notes mid-string — a cut-off reply is unparseable, so the note lost every triple. Now
 `EXTRACTION_MAX_TOKENS`, default 8192.
 
-### Notion holds 3 of 54 notes — the loop is one-way for everything else
+### Architecture settled: Neo4j is the record, Notion is a surface
+
+Decided 18 August. **Neo4j Aura is the system of record**; Notion is an optional
+per-workspace human surface. A deployable system cannot have its source of truth behind a
+personal Notion token, and Notion cannot represent a graph anyway — it is pages and blocks,
+so the intelligence has to live elsewhere regardless.
+
+What Notion genuinely earns: a writing surface we will never match, and human-readable
+durability. The graph is derived — triples, clusters and PageRank all rebuild from notes.
+The prose does not rebuild from the graph.
+
+The pipeline is **directional by kind**, which removes conflict resolution entirely:
 
 ```
-from/to Notion :  3   Sarah Location, Team Structure, Apollo Project
-local only     : 51   every note added via MCP — session records, checkpoints, design notes
+Notion prose        ──pull──▶  graph          (content in)
+graph insights      ──push──▶  Notion pages   (annotations out)
+curated notes       ──push──▶  new Notion pages
+session checkpoints ─────────  graph only     (working memory, never published)
 ```
 
-Write-back only touches notes whose ID is a Notion page UUID (`_is_notion_page_id`), so a
-note that originated in Brahmastra has nowhere to be written. **Nothing creates a Notion
-page for a Brahmastra-originated note.** The bidirectional brain is bidirectional only for
-pages that started in Notion.
+Publishing is opt-in per note (`publish`), so Notion stays readable rather than filling
+with agent transcripts. `notion_page_id` persists the created page so re-runs update
+instead of duplicating — without it the feature is worse than not having it. `publish` is
+tri-state: `None` means "no opinion", because a sync re-upserts every note and treating
+that as `False` would silently unpublish anything a person had published.
 
-To close it, write-back needs to `pages.create` in the workspace's data source for notes
-with no Notion ID, then store the returned page ID so the next run updates rather than
-duplicates. That last part is the whole difficulty: without persisting the returned ID,
-every run creates the page again.
-
-This also forces the question in the next section — if Brahmastra can create Notion pages,
-which of the two is the system of record?
+Published pages live in the database sync reads from, so **sync skips its own
+projections** — otherwise the same content is stored twice, under the local id and the page
+id, doubling every triple. Verified live: 4 pages in Notion, 0 duplicate notes, write-back
+pushed 4.
 
 ### Neo4j is live and verified — but migration was not idempotent
 The Aura instance had **paused**, not been deleted; Aura Free suspends after ~3 days idle
@@ -174,10 +185,12 @@ process manager, no health-check wiring beyond `/health`, secrets still only in
 for anything long-lived.
 
 ### Open and unexplained
-- **Three workspace MCP tools are invisible to the client.** The server registers all ten
-  (`brahmastra_list_workspaces`, `_create_workspace`, `_search_all_workspaces` included —
-  verified by listing them from the running module), but the client exposes seven. Survived
-  a full restart. Cause unknown; it is client-side, not the server.
+- ~~Three workspace MCP tools invisible~~ — **solved**. `if __name__ == "__main__":
+  mcp.run()` sat in the *middle* of `mcp_server.py`, above the three workspace tools.
+  `mcp.run()` blocks forever, so the running server registered only the seven above it,
+  while importing the module listed all ten — an import never executes `__main__`. That
+  is why the code and the server disagreed. Entrypoint moved to the end, with a test
+  that runs the module as `__main__` and one asserting no `@mcp.tool` follows it.
 - ~~One note fails extraction~~ — resolved. `879c07dd` failed for three separate reasons in
   sequence: it timed out on the local 7B, then hit the retired Groq model, then truncated at
   2048 tokens. All three are fixed; it now extracts cleanly.
