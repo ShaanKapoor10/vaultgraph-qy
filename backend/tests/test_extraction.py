@@ -282,3 +282,62 @@ def test_extraction_aborts_on_quota_instead_of_grinding(temp_db, monkeypatch):
     assert result["aborted_after"] == 2
     assert result["remaining"] == 4
     assert "per day" in result["quota_exhausted"].lower()
+
+
+def test_a_per_minute_limit_is_retried_but_a_settled_failure_is_not(monkeypatch):
+    """
+    This path had no retry at all while llm.chat has always had one, so a TPM
+    429 failed the note outright. Observed: a pipeline run failed all three
+    pending notes and an immediate re-run succeeded with 55 triples — nothing
+    lost, but the run reported error and skipped write-back for a condition
+    that clears in seconds.
+
+    A daily cap or a retired model is a settled fact, not congestion: backing
+    off cannot make a spent quota refill or a deleted model exist, so those
+    must propagate immediately for run_extraction to stop the whole run.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+
+    def client_raising(error: Exception, succeed_on: int | None = None):
+        calls = {"n": 0}
+
+        def create(**_kwargs):
+            calls["n"] += 1
+            if succeed_on is not None and calls["n"] >= succeed_on:
+                msg = MagicMock(); msg.content = '{"triples": []}'
+                choice = MagicMock(); choice.message = msg
+                resp = MagicMock(); resp.choices = [choice]
+                return resp
+            raise error
+
+        client = MagicMock()
+        client.chat.completions.create = create
+        fake = types.ModuleType("groq")
+        fake.Groq = lambda **_: client
+        monkeypatch.setitem(sys.modules, "groq", fake)
+        return calls
+
+    from brahmastra import extraction
+    importlib.reload(extraction)
+
+    # Per-minute: transient, so retry and succeed.
+    calls = client_raising(RuntimeError("429 tokens per minute (TPM): Limit 12000"), succeed_on=2)
+    assert extraction._extract_with_groq("T", "C", "key") == []
+    assert calls["n"] == 2, "must retry a per-minute limit"
+
+    # Per-day: settled. Must NOT be retried.
+    calls = client_raising(RuntimeError("429 ... tokens per day (TPD): Limit 100000"))
+    with pytest.raises(Exception, match="per day"):
+        extraction._extract_with_groq("T", "C", "key")
+    assert calls["n"] == 1, "a spent daily quota must not be retried"
+
+    # Retired model: settled too.
+    calls = client_raising(RuntimeError(
+        "Error code: 404 - {'error': {'message': 'The model `x` does not exist'}}"))
+    with pytest.raises(Exception, match="does not exist"):
+        extraction._extract_with_groq("T", "C", "key")
+    assert calls["n"] == 1, "a retired model must not be retried"

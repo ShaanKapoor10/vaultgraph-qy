@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any
 
@@ -229,8 +230,10 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
 
     from brahmastra.llm import groq_model
 
+    from brahmastra.llm import _is_model_missing, _is_quota_exhausted
+
     client = Groq(api_key=api_key)
-    response = client.chat.completions.create(
+    kwargs: dict[str, Any] = dict(
         # NOT a literal: llm.py owns which model runs, or this call site drifts
         # and keeps hitting a retired one after llm.py has been fixed.
         model=groq_model(),
@@ -248,7 +251,30 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
             {"role": "user", "content": _build_user_message(title, content)},
         ],
     )
-    return _parse_llm_response(response.choices[0].message.content)
+
+    # Retry a PER-MINUTE limit; never retry a per-day one or a retired model.
+    #
+    # This path had no retry at all, while llm.chat has always had one — so a
+    # TPM 429 failed the note outright. Observed: a pipeline run failed all
+    # three pending notes, and running extraction again immediately afterwards
+    # succeeded with 55 triples. Nothing was lost (errored notes are retried on
+    # the next run) but the run reported `status: error` and skipped write-back
+    # for a condition that clears in seconds.
+    last: Exception | None = None
+    for attempt in range(3):
+        try:
+            response = client.chat.completions.create(**kwargs)
+            return _parse_llm_response(response.choices[0].message.content)
+        except Exception as e:
+            last = e
+            # Both of these are settled facts, not congestion: backing off
+            # cannot make a spent daily quota refill or a deleted model exist.
+            # run_extraction stops the whole run on them.
+            if _is_quota_exhausted(e) or _is_model_missing(e):
+                raise
+            time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
+
+    raise RuntimeError(f"Groq extraction failed after 3 attempts: {last}")
 
 
 def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict[str, Any]]:

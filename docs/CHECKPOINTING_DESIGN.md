@@ -2,7 +2,7 @@
 
 **Status:** shipped on `feat/multi-workspace` (`da89d17`, `c734fba`, `4544df0`, `f47b1ce`, `d29cace`)
 **Code:** `backend/brahmastra/checkpoint.py` · **Tests:** `backend/tests/test_checkpoint.py` (14) + `backend/tests/conftest.py`
-**Hooks:** `.claude/settings.json` → `PreCompact`, `SessionEnd`
+**Hooks:** `.claude/settings.json` → `Stop`, `PreCompact`, `SessionEnd`
 
 Turns a Claude Code conversation into a note before the context window discards it.
 
@@ -21,6 +21,34 @@ is about to run out of context — which it cannot observe. The one moment memor
 guaranteed to be lost is the one moment it has no agency.
 
 So the trigger moves off memory and onto a hook.
+
+### Why `Stop` exists: boundaries are not enough
+
+The hook originally fired only on `PreCompact` and `SessionEnd`, and a real day
+of work was lost through the gap between them. Both blind spots are structural,
+not accidental:
+
+- **A session long enough never to compact.** Nothing triggers, for hours.
+- **A crash.** A killed process never fires `SessionEnd`. Two laptop crashes in
+  one day meant two stretches recorded nowhere.
+
+Measured at the time: the hook had last read the session at line 3054 while the
+transcript stood at 3883 — 829 lines, an entire deployment build-out,
+uncaptured.
+
+`Stop` fires after every assistant turn, which closes both. It captures only:
+distilling every turn would spend an LLM call per reply and bury the graph in
+near-empty notes. The capture accumulates until `DRAIN_THRESHOLD_CHARS`, and a
+boundary event drains whatever is queued regardless of size.
+
+Two consequences fall out of firing that often, and both are load-bearing:
+
+- **Captures are named in nanoseconds.** With whole seconds, two captures in
+  the same second overwrote each other — silently losing the turns the hook
+  exists to preserve.
+- **`drain()` merges per session.** Many small slices distilled separately
+  would each restate the same work; merged, the model sees the whole arc of a
+  session and produces one note.
 
 ### This is a net, not a replacement
 

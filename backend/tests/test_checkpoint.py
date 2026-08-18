@@ -371,3 +371,91 @@ def test_queue_location_is_resolved_per_call(cp, tmp_path, monkeypatch):
 
     monkeypatch.delenv("BRAHMASTRA_CHECKPOINT_DIR")
     assert cp.queue_dir() == cp._BACKEND / "data" / "checkpoints"
+
+
+# ---------------------------------------------------------------------------
+# Per-turn capture (the Stop hook)
+# ---------------------------------------------------------------------------
+
+def test_a_session_becomes_one_note_not_many(cp, tmp_path):
+    """
+    With a per-turn Stop hook one session produces many small slices. Distilled
+    separately they would bury the graph in near-empty notes each restating the
+    same work, so captures are merged per session before distillation — which
+    also gives the model the whole arc of the session.
+    """
+    rows = []
+    for turn in range(3):
+        rows.append(_msg("user", [{"type": "text", "text": f"request {turn}. " * 40}]))
+        rows.append(_msg("assistant", [{"type": "text", "text": f"work {turn}. " * 40}]))
+        path = _transcript(tmp_path, rows)
+        assert cp.capture({"session_id": "s-merge", "transcript_path": path}) is not None
+
+    assert cp.pending_count() == 3, "each turn captured separately"
+
+    seen = {}
+
+    def record(conversation):
+        seen["text"] = conversation
+        return "# Merged Session\n\nThe file sync.py branches on the capability of the client."
+
+    with patch.object(cp, "_distil", side_effect=record):
+        result = cp.drain()
+
+    assert result["stored"] == 1, "three captures, one note"
+    assert cp.pending_count() == 0
+    for turn in range(3):
+        assert f"work {turn}." in seen["text"], "the merged record must span every slice"
+
+    from brahmastra import db
+    notes = [n for n in db.get_notes() if n["id"].startswith("checkpoint-")]
+    assert len(notes) == 1
+    assert notes[0]["source"] == "checkpoint"
+
+
+def test_two_sessions_do_not_get_merged_together(cp, tmp_path):
+    """Merging is per session; two people's work is not one note."""
+    for name in ("s-a", "s-b"):
+        path = _transcript(tmp_path, [
+            _msg("user", [{"type": "text", "text": f"{name} content. " * 40}]),
+        ])
+        cp.capture({"session_id": name, "transcript_path": path})
+
+    with patch.object(cp, "_distil",
+                      return_value="# A Session\n\nThe file sync.py branches on the capability."):
+        result = cp.drain()
+
+    assert result["stored"] == 2, "one note per session, not one note total"
+
+
+def test_stop_hook_captures_every_turn_but_defers_distillation(cp, tmp_path, monkeypatch):
+    """
+    The two gaps that lost a day of work: a session long enough never to
+    compact, and a crash — a killed process never fires SessionEnd. Capturing
+    on every turn closes both, but distilling on every turn would spend an LLM
+    call per reply, so below the threshold the capture only accumulates.
+    """
+    import io
+    import sys
+
+    path = _transcript(tmp_path, [
+        _msg("user", [{"type": "text", "text": "a short exchange. " * 40}]),
+    ])
+    payload = {"session_id": "s-stop", "transcript_path": path,
+               "hook_event_name": "Stop"}
+
+    drained = []
+    monkeypatch.setattr(cp, "_spawn_drain", lambda: drained.append(1))
+    monkeypatch.setattr(cp, "DRAIN_THRESHOLD_CHARS", 10_000)
+
+    sys.stdin = io.StringIO(json.dumps(payload))
+    assert cp.main([]) == 0
+
+    assert cp.pending_count() == 1, "the turn must still be captured to disk"
+    assert drained == [], "below threshold, distillation waits"
+
+    # A boundary event drains whatever is queued, however small.
+    monkeypatch.setattr(cp, "_load_offsets", lambda: {})   # re-read the transcript
+    sys.stdin = io.StringIO(json.dumps({**payload, "hook_event_name": "SessionEnd"}))
+    assert cp.main([]) == 0
+    assert drained == [1], "a boundary always drains"

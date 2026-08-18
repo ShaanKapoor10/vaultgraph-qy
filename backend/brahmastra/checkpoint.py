@@ -73,6 +73,13 @@ MAX_TRANSCRIPT_CHARS = 20_000
 MIN_TRANSCRIPT_CHARS = 400
 # Distillations to attempt before setting a capture aside as unsummarisable.
 MAX_ATTEMPTS = 3
+# On a per-turn Stop hook, capture every turn but only DISTIL once this much
+# conversation has accumulated. Distilling each turn would spend an LLM call
+# per reply and bury the graph in near-empty notes; waiting for a boundary
+# loses everything when one never comes. This is the middle.
+DRAIN_THRESHOLD_CHARS = 12_000
+# Blank line between merged slices and between a note's title and body.
+SEP = "\n\n"
 
 DISTIL_SYSTEM = (
     "You extract durable facts from a record of a software work session. The records "
@@ -239,7 +246,12 @@ def capture(payload: dict[str, Any]) -> Path | None:
         return None
 
     queue_dir().mkdir(parents=True, exist_ok=True)
-    path = queue_dir() / f"{int(time.time())}-{session[:8]}.json"
+    # Nanoseconds, not seconds. With a per-turn Stop hook two captures land in
+    # the same second routinely, and a whole-second name silently OVERWROTE the
+    # earlier one — losing exactly the turns the hook exists to preserve. The
+    # name still sorts chronologically, which drain() relies on to merge a
+    # session's slices in order.
+    path = queue_dir() / f"{time.time_ns()}-{session[:8]}.json"
     path.write_text(
         json.dumps(
             {
@@ -449,8 +461,16 @@ def _split_title(note: str) -> tuple[str, str]:
 
 def drain() -> dict[str, Any]:
     """
-    Distil every queued capture into a note. A file is deleted only once its
-    note is stored, so an LLM outage delays checkpointing instead of losing it.
+    Distil queued captures into notes, ONE NOTE PER SESSION.
+
+    Captures are merged before distillation rather than handled one by one.
+    With a per-turn Stop hook a single session produces many small slices, and
+    distilling each separately would bury the graph in near-empty notes that
+    each restate the same work. Merging also gives the model the whole arc of
+    a session, which is what makes a summary worth keeping.
+
+    A capture is deleted only once its note is stored, so an LLM outage delays
+    checkpointing instead of losing it.
     """
     queue = queue_dir()
     if not queue.exists():
@@ -458,47 +478,61 @@ def drain() -> dict[str, Any]:
 
     from brahmastra import db
 
-    stored, skipped, failed = 0, 0, []
-    files = sorted(_captures())
-
-    for path in files:
+    # Group by session, oldest first, so the merged record reads in order.
+    sessions: dict[str, list[tuple[Path, dict[str, Any]]]] = {}
+    for path in sorted(_captures()):
         try:
             item = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             path.unlink(missing_ok=True)  # unreadable; nothing to recover
             continue
+        sessions.setdefault(str(item.get("session_id") or "unknown"), []).append((path, item))
 
-        if item.get("workspace"):
-            os.environ["BRAHMASTRA_WORKSPACE"] = item["workspace"]
+    stored, skipped, failed = 0, 0, []
+
+    for session, batch in sessions.items():
+        paths = [p for p, _ in batch]
+        items = [i for _, i in batch]
+
+        if items[0].get("workspace"):
+            os.environ["BRAHMASTRA_WORKSPACE"] = items[0]["workspace"]
+
+        conversation = SEP.join(i.get("conversation", "") for i in items)
+        # Keep the tail: the same reason capture bounds itself, and the end of
+        # a session is where its conclusions are.
+        if len(conversation) > MAX_TRANSCRIPT_CHARS:
+            conversation = conversation[-MAX_TRANSCRIPT_CHARS:]
 
         try:
-            note = _distil(item["conversation"])
+            note = _distil(conversation)
         except Exception as e:
-            # The drain usually runs detached with its output discarded, so the
-            # log is the only trace. Without it a checkpoint that never lands
-            # looks identical to one that had nothing to say.
-            _log(f"drain failed for {path.name}: {type(e).__name__}: {str(e)[:300]}")
-            failed.append({"file": path.name, "error": str(e)[:200]})
-            _record_attempt(path, item, str(e))
-            continue  # keep the file; try again next drain
+            _log(f"drain failed for session {session[:8]} "
+                 f"({len(paths)} captures): {type(e).__name__}: {str(e)[:250]}")
+            failed.append({"session": session[:8], "captures": len(paths),
+                           "error": str(e)[:200]})
+            for path, item in batch:
+                _record_attempt(path, item, str(e))
+            continue
 
         if note is None:
             skipped += 1
-            path.unlink(missing_ok=True)
+            for path in paths:
+                path.unlink(missing_ok=True)
             continue
 
         title, body = _split_title(note)
-        captured = item.get("captured_at", "")[:10]
+        captured = items[-1].get("captured_at", "")[:10]
         db.init_db()
         db.upsert_note(
-            id=f"checkpoint-{path.stem}",
+            id=f"checkpoint-{paths[-1].stem}",
             title=f"{title} ({captured})" if captured else title,
-            content=f"{title}\n\n{body}",
+            content=f"{title}{SEP}{body}",
             mark_pending=True,
             source="checkpoint",
         )
         stored += 1
-        path.unlink(missing_ok=True)
+        for path in paths:
+            path.unlink(missing_ok=True)
 
     return {"stored": stored, "skipped": skipped, "failed": failed,
             "queued": pending_count()}
@@ -541,6 +575,17 @@ def pending_count() -> int:
     return len(_captures())
 
 
+def queued_chars() -> int:
+    """How much unqueued conversation is waiting, across all captures."""
+    total = 0
+    for path in _captures():
+        try:
+            total += len(json.loads(path.read_text(encoding="utf-8")).get("conversation", ""))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return total
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -570,12 +615,30 @@ def main(argv: list[str] | None = None) -> int:
         _log(f"could not parse hook payload ({e}); first 80 chars: {raw[:80]!r}")
         return 0
 
+    event = str(payload.get("hook_event_name") or payload.get("trigger") or "")
+
     try:
         queued = capture(payload)
         if queued is None:
-            _log(f"nothing new to checkpoint for session {payload.get('session_id')}")
-        else:
-            _spawn_drain()
+            # Only worth logging at a boundary. On a per-turn Stop hook this is
+            # the common case and would drown the log it exists to make useful.
+            if event != "Stop":
+                _log(f"nothing new to checkpoint for session {payload.get('session_id')}")
+            return 0
+
+        # Stop fires after EVERY assistant turn, which is what closes the two
+        # gaps that lost a day of work: a session long enough never to compact,
+        # and a crash — a killed process never fires SessionEnd, so everything
+        # since the last boundary went unrecorded.
+        #
+        # Capturing every turn is safe because capture is pure file I/O. What
+        # must not happen every turn is DISTILLING: that is an LLM call per
+        # reply and a graph full of near-empty notes. So on Stop the capture
+        # simply accumulates, and is drained once there is enough of it to be
+        # worth summarising. A boundary event always drains, whatever the size.
+        if event == "Stop" and queued_chars() < DRAIN_THRESHOLD_CHARS:
+            return 0
+        _spawn_drain()
     except Exception as e:
         _log(f"capture failed: {type(e).__name__}: {e}")
     return 0
