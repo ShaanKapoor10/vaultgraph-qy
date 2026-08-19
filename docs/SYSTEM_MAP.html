@@ -328,6 +328,13 @@
   .opt.is-default { border-color: var(--accent); background: var(--accent-bg); }
   .opt-name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; color: var(--ink); }
   .opt-why { font-size: 14px; color: var(--ink-soft); }
+  .opt-note {
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    margin: 14px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--line);
+  }
   .tag {
     font-family: var(--mono);
     font-size: 9.5px;
@@ -490,15 +497,15 @@
       <!-- sources -->
       <rect class="box" x="20" y="44" width="180" height="56" rx="4"/>
       <text class="svg-title" x="34" y="70">Notion database</text>
-      <text class="svg-sub" x="34" y="88">4 pages &middot; human prose</text>
+      <text class="svg-sub" x="34" y="88">3 tagged &middot; human prose</text>
 
       <rect class="box" x="20" y="122" width="180" height="56" rx="4"/>
       <text class="svg-title" x="34" y="148">AI agents (MCP)</text>
-      <text class="svg-sub" x="34" y="166">51 notes &middot; dominant path</text>
+      <text class="svg-sub" x="34" y="166">4 tagged &middot; 51 pre-provenance</text>
 
       <rect class="box" x="20" y="200" width="180" height="56" rx="4"/>
       <text class="svg-title" x="34" y="226">Session hooks</text>
-      <text class="svg-sub" x="34" y="244">PreCompact / SessionEnd</text>
+      <text class="svg-sub" x="34" y="244">Stop &middot; PreCompact &middot; SessionEnd</text>
 
       <!-- engine -->
       <rect class="box-accent" x="300" y="44" width="190" height="290" rx="5"/>
@@ -638,7 +645,9 @@
   <h3>Inside SQLite</h3>
   <p>
     Six tables, every one partitioned by <code>workspace_id</code>. The row counts tell you what
-    each stage produced.
+    each stage produced. <code>notes.extraction_error</code> holds the message from a failed
+    extraction and is cleared the moment the note succeeds, so a message can never outlive the
+    failure it describes.
   </p>
 
   <div class="table-wrap">
@@ -646,10 +655,10 @@
       <thead><tr><th>Table</th><th class="num">Rows</th><th>Written by</th><th>What a row is</th></tr></thead>
       <tbody>
         <tr><td><code>workspaces</code></td><td class="num">1</td><td>create workspace</td><td>One independent graph</td></tr>
-        <tr><td><code>notes</code></td><td class="num">55</td><td>sync, MCP, checkpoint drain</td><td>Title + body + extraction status + Notion projection</td></tr>
-        <tr><td><code>raw_triples</code></td><td class="num">633</td><td>stage 1 extract</td><td>One asserted fact, pre-resolution</td></tr>
-        <tr><td><code>canonical_map</code></td><td class="num">505</td><td>stage 2 resolve</td><td>Surface form &rarr; canonical name</td></tr>
-        <tr><td><code>entity_clusters</code></td><td class="num">417</td><td>stage 2 resolve</td><td>All spellings of one real thing</td></tr>
+        <tr><td><code>notes</code></td><td class="num">61</td><td>sync, MCP, checkpoint drain</td><td>Title + body + extraction status <em>and why it failed</em> + Notion projection</td></tr>
+        <tr><td><code>raw_triples</code></td><td class="num">742</td><td>stage 1 extract</td><td>One asserted fact, pre-resolution</td></tr>
+        <tr><td><code>canonical_map</code></td><td class="num">628</td><td>stage 2 resolve</td><td>Surface form &rarr; canonical name</td></tr>
+        <tr><td><code>entity_clusters</code></td><td class="num">520</td><td>stage 2 resolve</td><td>All spellings of one real thing</td></tr>
         <tr><td><code>graph_cache</code></td><td class="num">1</td><td>stage 3 &amp; 4</td><td>The whole computed graph as JSON</td></tr>
       </tbody>
     </table>
@@ -666,6 +675,7 @@
       <thead><tr><th>Label / type</th><th class="num">Count</th><th>Meaning</th></tr></thead>
       <tbody>
         <tr><td><code>(:Note)</code></td><td class="num">54</td><td>Source document</td></tr>
+        <!-- counts as at the last migrate_to_neo4j run; local pipeline runs do not update them -->
         <tr><td><code>(:Mention)</code></td><td class="num">505</td><td>A name exactly as written, before resolution</td></tr>
         <tr><td><code>(:Entity)</code></td><td class="num">417</td><td>The resolved thing a mention refers to</td></tr>
         <tr><td><code>-[:ASSERTS]-&gt;</code></td><td class="num">623</td><td>Raw fact between two mentions</td></tr>
@@ -679,9 +689,11 @@
   <div class="note warn">
     <span class="kicker">Live drift, right now</span>
     <p>
-      SQLite says 55 notes and 633 triples; Neo4j says 54 and 623. Both numbers are correct.
+      SQLite is now at 61 notes and 742 triples; the Neo4j figures above are from the last
+      migration and have not moved since. Both are correct.
       <strong>The pipeline writes only to the backend currently selected</strong>, so the copy you
-      are not using falls behind until you re-migrate. The 10-triple gap is different: SQLite has
+      are not using falls behind until you re-migrate — and every local run widens the gap. The
+      earlier 10-triple discrepancy is a different thing: SQLite has
       no uniqueness constraint on <code>raw_triples</code>, so a fact the extractor emitted twice
       from one note is stored twice, while Neo4j's <code>MERGE</code> collapses it. Neo4j's number
       is the more correct one.
@@ -791,6 +803,43 @@
           recovered is graphed in the same run. A queue file is deleted only once its note exists,
           so an LLM outage delays a checkpoint rather than losing it.
         </p>
+        <p>
+          The work is split deliberately. <strong>Capture</strong> is pure file I/O and cannot
+          fail slowly, so it runs after every assistant turn. <strong>Drain</strong> needs an LLM,
+          so it runs only at a boundary or once the queue is worth summarising — distilling every
+          turn would spend a model call per reply and fill the graph with near-empty notes.
+        </p>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Hook</th><th>Does</th><th>Why it cannot be dropped</th></tr></thead>
+            <tbody>
+              <tr><td><code>Stop</code></td><td>capture, every turn</td><td>The only event that survives a crash — a killed process never fires <code>SessionEnd</code>, so it bounds loss to one turn</td></tr>
+              <tr><td><code>PreCompact</code></td><td>drain</td><td>Forces the note to exist before the context that produced it is gone</td></tr>
+              <tr><td><code>SessionEnd</code></td><td>drain</td><td>Materialises whatever is still queued at the end</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p>
+          Capture resumes by <strong>byte offset</strong>, not line number. Re-reading the whole
+          transcript each turn merely to skip to the end was O(file) per turn and O(file&sup2;)
+          across a session; seeking made it <strong>78&nbsp;ms &rarr; 0.5&nbsp;ms, and flat</strong>,
+          which is what makes per-turn capture affordable indefinitely.
+        </p>
+        <div class="note warn">
+          <span class="kicker">Learned the hard way</span>
+          <p>
+            Adding <code>Stop</code> silently disabled the boundary drain. <code>Stop</code>
+            consumes the transcript bytes every turn, so a <code>PreCompact</code> arriving
+            afterwards found nothing new <em>by construction</em> and returned before draining —
+            a compaction passed with the capture still queued and no note written, while the hook
+            reported success. A boundary now drains whenever the queue is non-empty, whatever it
+            captured itself. <strong>A hook exiting 0 proves a process ran, not that a note
+            exists</strong>; only <code>--status</code> and <code>extraction_status</code> prove
+            that.
+          </p>
+        </div>
         <span class="writes">reads → <b>data/checkpoints/*.json</b> &nbsp;·&nbsp; writes → <b>notes</b></span>
       </div>
     </li>
@@ -956,9 +1005,16 @@
       </li>
       <li class="opt">
         <span class="opt-name">no Notion at all</span>
-        <span class="opt-why">Perfectly valid. MCP already supplies 51 of 55 notes; sync simply reports skipped.</span>
+        <span class="opt-why">Perfectly valid. Agents already supply the overwhelming majority of notes; sync simply reports skipped.</span>
       </li>
     </ul>
+    <p class="opt-note">
+      <code>notes.source</code> records which of these a note arrived by. It was added after most
+      of the graph existed, and the backfill claimed only what the data itself proves — a
+      Notion-shaped id, or the checkpoint drain&rsquo;s own id prefix. The remaining
+      <strong>51 notes stay <code>unknown</code> rather than being guessed at</strong>, because a
+      confidently wrong provenance is worse than an admitted gap.
+    </p>
   </div>
 
   <div class="swap">
@@ -1094,7 +1150,9 @@
   <h2>Open decisions</h2>
   <p class="lede">
     Five things the system currently does one way, where the other way is defensible and the
-    choice is genuinely yours.
+    choice is genuinely yours. Extraction failures used to be a sixth — they are now
+    <em>recorded</em> rather than guessed at, which is what turned the retry row below from a
+    suspicion into evidence.
   </p>
 
   <div class="table-wrap">
@@ -1120,6 +1178,11 @@
           <td><strong>Timeout retries</strong></td>
           <td>A timeout is retried three times</td>
           <td>A timeout means the model cannot handle that input; retrying identically cannot help. This burned 12 of 45 minutes on one run.</td>
+        </tr>
+        <tr>
+          <td><strong>Rate-limit backoff</strong></td>
+          <td>A per-minute 429 is retried inside the run, and the note is re-tried on the next run</td>
+          <td>Observed to be insufficient: one note failed <em>two consecutive pipeline runs</em> on a per-minute limit, then succeeded on a direct call minutes later. The in-run attempts are spent faster than the limit clears, so &ldquo;just run it again&rdquo; is not reliably enough on the free tier.</td>
         </tr>
         <tr>
           <td><strong>Duplicate triples in SQLite</strong></td>
