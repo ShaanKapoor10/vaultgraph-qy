@@ -511,3 +511,60 @@ def test_legacy_line_offsets_are_converted_not_misread(cp, tmp_path):
     # The new format is passed straight through.
     assert cp._resume_byte({"s": {"bytes": 42}}, "s", path) == 42
     assert cp._resume_byte({}, "missing", path) == 0
+
+
+def test_a_boundary_drains_a_backlog_it_did_not_itself_capture(cp, tmp_path, monkeypatch):
+    """
+    Nothing NEW is not nothing PENDING, and at a boundary the difference is the
+    whole feature.
+
+    Adding the Stop hook made this the normal ordering rather than an edge
+    case: Stop consumes the transcript bytes every turn, so a PreCompact
+    arriving afterwards finds nothing new by construction — and the early
+    return meant it never reached the drain it exists for. Observed for real: a
+    capture sat queued through a compaction, no note was written, and the hook
+    reported success either way.
+
+    The sibling test above hides this by resetting the offsets before the
+    boundary, which no real run does.
+    """
+    import io
+    import sys
+
+    path = _transcript(tmp_path, [
+        _msg("user", [{"type": "text", "text": "a short exchange. " * 40}]),
+    ])
+
+    drained = []
+    monkeypatch.setattr(cp, "_spawn_drain", lambda: drained.append(1))
+    monkeypatch.setattr(cp, "DRAIN_THRESHOLD_CHARS", 10_000)
+
+    payload = {"session_id": "s-backlog", "transcript_path": path}
+
+    sys.stdin = io.StringIO(json.dumps({**payload, "hook_event_name": "Stop"}))
+    assert cp.main([]) == 0
+    assert cp.pending_count() == 1
+    assert drained == [], "below threshold, Stop only accumulates"
+
+    # The compaction, with the offset left exactly where Stop put it.
+    sys.stdin = io.StringIO(json.dumps({**payload, "hook_event_name": "PreCompact"}))
+    assert cp.main([]) == 0
+    assert drained == [1], "the boundary must drain what is already queued"
+
+
+def test_a_boundary_with_an_empty_queue_does_not_spawn_a_drain(cp, tmp_path, monkeypatch):
+    """The drain costs an LLM call; a boundary with nothing to say must be free."""
+    import io
+    import sys
+
+    path = _transcript(tmp_path, [_msg("user", [{"type": "text", "text": "hi"}])])
+
+    drained = []
+    monkeypatch.setattr(cp, "_spawn_drain", lambda: drained.append(1))
+
+    sys.stdin = io.StringIO(json.dumps({
+        "session_id": "s-empty", "transcript_path": path,
+        "hook_event_name": "SessionEnd"}))
+    assert cp.main([]) == 0
+    assert cp.pending_count() == 0
+    assert drained == []

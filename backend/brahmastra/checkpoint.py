@@ -671,6 +671,15 @@ def main(argv: list[str] | None = None) -> int:
             # the common case and would drown the log it exists to make useful.
             if event != "Stop":
                 _log(f"nothing new to checkpoint for session {payload.get('session_id')}")
+                # Nothing NEW is not the same as nothing PENDING, and at a
+                # boundary the difference is the whole feature. Adding the Stop
+                # hook made this the normal path: Stop consumes the bytes every
+                # turn, so by the time PreCompact runs there is never anything
+                # new, and returning here skipped the drain the boundary exists
+                # for. Observed: a capture sat queued through a compaction and
+                # the note was never written, while the hook reported success.
+                if pending_count():
+                    _spawn_drain()
             return 0
 
         # Stop fires after EVERY assistant turn, which is what closes the two
