@@ -121,3 +121,50 @@ def test_db_stats(temp_db):
     assert stats["notes_total"] == 2
     assert stats["notes_pending"] == 1
     assert stats["graph_cached"] is False
+
+
+def test_a_failed_note_records_why_it_failed(temp_db):
+    """
+    Status alone said a note failed but never why.
+
+    Diagnosing one meant re-running extraction by hand to see the exception —
+    and a transient rate limit had usually cleared by then, so the run that
+    reproduced the failure succeeded and left no trace of the cause at all.
+    """
+    db = temp_db
+    db.upsert_note("n-err", "T", "C", mark_pending=True)
+
+    db.mark_note_error("n-err", "429 tokens per minute (TPM): Limit 12000")
+
+    note = db.get_note("n-err")
+    assert note["extraction_status"] == "error"
+    assert "tokens per minute" in note["extraction_error"]
+
+
+def test_a_recovered_note_does_not_keep_its_old_error(temp_db):
+    """
+    A message that outlives the failure it describes is worse than none: it
+    reads as a live failure and sends the next reader diagnosing something
+    already fixed. Observed for real — a note failed on a rate limit and
+    succeeded on retry minutes later.
+    """
+    db = temp_db
+    db.upsert_note("n-recover", "T", "C", mark_pending=True)
+    db.mark_note_error("n-recover", "429 rate limit")
+    assert db.get_note("n-recover")["extraction_error"]
+
+    db.mark_note_done("n-recover")
+
+    note = db.get_note("n-recover")
+    assert note["extraction_status"] == "done"
+    assert note["extraction_error"] is None, "a stale error must not survive success"
+
+
+def test_marking_an_error_without_a_message_is_still_allowed(temp_db):
+    """Every existing caller passes no message; none of them may break."""
+    db = temp_db
+    db.upsert_note("n-bare", "T", "C", mark_pending=True)
+    db.mark_note_error("n-bare")
+    note = db.get_note("n-bare")
+    assert note["extraction_status"] == "error"
+    assert note["extraction_error"] is None

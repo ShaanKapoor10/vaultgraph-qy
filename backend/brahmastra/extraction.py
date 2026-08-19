@@ -416,7 +416,7 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
     try:
         raw = _extract_with_llm(note["title"], note["content"])
     except Exception as e:
-        db.mark_note_error(note_id)
+        db.mark_note_error(note_id, str(e))
         return {"triples_added": 0, "triples_skipped": 0, "error": str(e)}
 
     # Delete previous triples for this note before re-inserting

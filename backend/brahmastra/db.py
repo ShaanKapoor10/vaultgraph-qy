@@ -143,17 +143,17 @@ def get_note(id: str) -> dict[str, Any] | None:
     return get_store().get_note(id)
 
 
-def set_note_status(id: str, status: str) -> None:
+def set_note_status(id: str, status: str, error: str | None = None) -> None:
     """Set extraction status: 'pending' | 'done' | 'error'."""
-    get_store().set_note_status(id, status)
+    get_store().set_note_status(id, status, error)
 
 
 def mark_note_done(id: str) -> None:
     get_store().set_note_status(id, "done")
 
 
-def mark_note_error(id: str) -> None:
-    get_store().set_note_status(id, "error")
+def mark_note_error(id: str, error: str | None = None) -> None:
+    get_store().set_note_status(id, "error", error)
 
 
 def delete_note(id: str) -> None:

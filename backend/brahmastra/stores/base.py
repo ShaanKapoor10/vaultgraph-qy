@@ -77,8 +77,14 @@ class GraphStore(ABC):
         """
         raise NotImplementedError
 
-    def set_note_status(self, id: str, status: str) -> None:
-        """Set extraction status: 'pending' | 'done' | 'error'."""
+    def set_note_status(self, id: str, status: str, error: str | None = None) -> None:
+        """
+        Set extraction status: 'pending' | 'done' | 'error'.
+
+        `error` is the failure message, stored only alongside 'error' and
+        cleared by any other status, so a message can never outlive the
+        failure it describes.
+        """
 
     @abstractmethod
     def delete_note(self, id: str) -> None:

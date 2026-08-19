@@ -510,6 +510,7 @@ class Neo4jStore(GraphStore):
                 "last_edited": n.get("lastEdited"),
                 "last_synced": n.get("lastSynced"),
                 "extraction_status": n.get("extractionStatus"),
+                "extraction_error": n.get("extractionError"),
                 "workspace_id": n.get("workspaceId"),
                 "publish": bool(n.get("publish")),
                 "notion_page_id": n.get("notionPageId"),
@@ -652,12 +653,14 @@ class Neo4jStore(GraphStore):
             id=note_id, ws=self.workspace, pid=page_id,
         )
 
-    def set_note_status(self, id: str, status: str) -> None:
+    def set_note_status(self, id: str, status: str, error: str | None = None) -> None:
         if status not in ("pending", "done", "error"):
             raise ValueError(f"invalid extraction status: {status!r}")
         self._run(
-            "MATCH (n:Note {id: $id, workspaceId: $ws}) SET n.extractionStatus = $status",
+            "MATCH (n:Note {id: $id, workspaceId: $ws}) "
+            "SET n.extractionStatus = $status, n.extractionError = $error",
             id=id, ws=self.workspace, status=status,
+            error=error if status == "error" else None,
         )
 
     def delete_note(self, id: str) -> None:

@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS notes (
     last_synced       TEXT,
     extraction_status TEXT NOT NULL DEFAULT 'pending'
         CHECK(extraction_status IN ('pending','done','error')),
+    extraction_error TEXT,
     -- Notion projection. `publish` is opt-in curation: a note is only given a
     -- Notion page when something asks for one, so session checkpoints and
     -- working memory stay in the graph instead of filling a human workspace.
@@ -178,6 +179,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE notes ADD COLUMN publish INTEGER NOT NULL DEFAULT 0")
     if "notion_page_id" not in have:
         conn.execute("ALTER TABLE notes ADD COLUMN notion_page_id TEXT")
+    if "extraction_error" not in have:
+        # Status alone said a note failed but never why. Diagnosing one meant
+        # re-running extraction by hand to see the exception, by which point a
+        # transient rate limit had usually cleared and left no trace at all.
+        conn.execute("ALTER TABLE notes ADD COLUMN extraction_error TEXT")
     if "source" not in have:
         conn.execute(
             "ALTER TABLE notes ADD COLUMN source TEXT NOT NULL DEFAULT 'unknown'"
@@ -552,13 +558,18 @@ class SQLiteStore(GraphStore):
                 (page_id, self.workspace, note_id),
             )
 
-    def set_note_status(self, id: str, status: str) -> None:
+    def set_note_status(self, id: str, status: str, error: str | None = None) -> None:
         if status not in ("pending", "done", "error"):
             raise ValueError(f"invalid extraction status: {status!r}")
+        # The message is written and cleared with the status, never separately.
+        # A stale error left on a note that has since succeeded is worse than
+        # no message at all: it reads as a live failure and sends the next
+        # reader diagnosing something that was already fixed.
         with self._connect() as conn:
             conn.execute(
-                "UPDATE notes SET extraction_status = ? WHERE workspace_id = ? AND id = ?",
-                (status, self.workspace, id),
+                "UPDATE notes SET extraction_status = ?, extraction_error = ? "
+                "WHERE workspace_id = ? AND id = ?",
+                (status, error if status == "error" else None, self.workspace, id),
             )
 
     def delete_note(self, id: str) -> None:
