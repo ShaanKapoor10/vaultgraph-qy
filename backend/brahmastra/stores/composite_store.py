@@ -136,15 +136,29 @@ class CompositeStore(GraphStore):
         """
         return self._notes.capabilities()
 
+    # Counts that describe the system of record. Whatever the graph store says
+    # about these is about its own provenance stubs, so it must not survive the
+    # merge even if the note store omits the key -- a stub count presented as a
+    # note count is worse than a missing number.
+    _NOTE_STAT_KEYS = ("notes_total", "notes_pending", "notes")
+
     def stats(self) -> dict[str, int]:
         """
         Merged, with the note counts authoritative.
 
-        Both halves report `notes`, but only one holds them -- the graph store
-        keeps stubs for provenance. Taking the union with graph precedence
-        would report the stub count as the note count.
+        Both halves report note counts, but only one holds notes -- the graph
+        store keeps stubs so triples can point back at their source. Observed
+        for real: Neo4j reported 54 stale stubs as `notes_total` while Postgres
+        reported 3 as `notes`, and because the KEY NAMES differed, precedence
+        overwrote nothing and both numbers appeared side by side looking
+        equally authoritative. The keys are aligned across backends now; this
+        strips them regardless, so a future backend inventing its own name
+        cannot reintroduce the same lie.
         """
-        merged = dict(self._graph.stats())
+        merged = {
+            k: v for k, v in self._graph.stats().items()
+            if k not in self._NOTE_STAT_KEYS
+        }
         merged.update(self._notes.stats())
         return merged
 

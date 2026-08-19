@@ -32,6 +32,18 @@ dependencies = [
     # context, because a TLS-intercepting root CA makes the driver's default
     # verification fail with "self-signed certificate in certificate chain".
     "certifi>=2024.2.2",
+    # Required whenever notes live in Postgres (NOTE_BACKEND=postgres), which
+    # is the deployed arrangement: the system of record has to be networked and
+    # has to support hybrid search. The [binary] extra avoids needing libpq and
+    # a compiler on the host.
+    "psycopg[binary]>=3.1",
+    # pgvector is what keeps hybrid search alive after notes move off Neo4j.
+    # NOTE: the Python package alone is not enough -- the SERVER needs the
+    # `vector` extension, which a stock PostgreSQL build does not ship. Use the
+    # pgvector/pgvector image (docker compose does). Without it PostgresStore
+    # still stores notes but reports itself lexical-only, and CompositeStore
+    # then refuses it rather than silently degrading search.
+    "pgvector>=0.2.5",
 ]
 
 [project.scripts]

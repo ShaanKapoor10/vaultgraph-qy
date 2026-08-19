@@ -568,3 +568,48 @@ def test_a_boundary_with_an_empty_queue_does_not_spawn_a_drain(cp, tmp_path, mon
     assert cp.main([]) == 0
     assert cp.pending_count() == 0
     assert drained == []
+
+
+def test_captures_sharing_a_clock_tick_do_not_overwrite_each_other(cp, monkeypatch):
+    """
+    Capture filenames lead with a timestamp, and a timestamp is not unique.
+
+    time_ns() is nanosecond-DENOMINATED, not nanosecond-GRANULAR: on Windows
+    the system clock advances in coarse ticks, so several captures in a tight
+    loop shared one value and the later write silently replaced the earlier --
+    losing exactly the turns the Stop hook exists to preserve. It surfaced only
+    as a flaky suite, three captures becoming one file about one run in six.
+
+    The clock is FROZEN here rather than raced. Writing this against the real
+    clock reproduces the original flakiness in the test itself: a run where the
+    tick happens to advance passes against the broken code and proves nothing.
+    Freezing states the actual invariant -- same timestamp, different files.
+    """
+    monkeypatch.setattr(cp.time, "time_ns", lambda: 1_787_000_000_000_000_000)
+
+    made = [cp._unique_capture_path("s-tick") for _ in range(20)]
+
+    assert len({p.name for p in made}) == 20, "captures within one tick collided"
+    for path in made:
+        path.write_text("{}", encoding="utf-8")
+    assert cp.pending_count() == 20
+
+
+def test_capture_filenames_sort_in_capture_order(cp, monkeypatch):
+    """
+    drain() merges a session's slices in sorted-filename order, so names must
+    sort chronologically -- including the ones disambiguated within one tick.
+
+    Appending a suffix ONLY on collision gets this wrong in a way that is easy
+    to miss: '-' is 0x2D and '.' is 0x2E, so `<stamp>-1.json` sorts BEFORE
+    `<stamp>.json` and a session's turns would be replayed out of order. That
+    is a subtler corruption than the overwrite it replaced, which is why the
+    counter is always present and fixed-width.
+    """
+    ticks = iter([100, 100, 100, 200, 200, 300])
+    monkeypatch.setattr(cp.time, "time_ns", lambda: next(ticks))
+
+    made = [cp._unique_capture_path("s-order") for _ in range(6)]
+    names = [p.name for p in made]
+
+    assert names == sorted(names), f"capture order is not filename order: {names}"

@@ -34,6 +34,17 @@ services:
       BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
 
+      # ---- the system of record -------------------------------------------
+      # Unset keeps notes wherever GRAPH_BACKEND puts them (single-store, the
+      # original arrangement). Set to `postgres` to split them off, so that
+      # choosing an engine stops being a decision about irreplaceable data.
+      NOTE_BACKEND: ${NOTE_BACKEND:-}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmastra}
+      POSTGRES_DB: ${POSTGRES_DB:-brahmastra}
+
       # ---- neo4j (ignored when GRAPH_BACKEND=sqlite) ----------------------
       NEO4J_URI: ${NEO4J_URI:-}
       NEO4J_USER: ${NEO4J_USER:-}
@@ -115,6 +126,12 @@ services:
       BRAHMASTRA_DB: /data/concept_graph.db
       BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
+      NOTE_BACKEND: ${NOTE_BACKEND:-}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmastra}
+      POSTGRES_DB: ${POSTGRES_DB:-brahmastra}
       NEO4J_URI: ${NEO4J_URI:-}
       NEO4J_USER: ${NEO4J_USER:-}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
@@ -129,6 +146,37 @@ services:
       - brahmastra-data:/data
     depends_on:
       - backend
+
+  # The system of record, when NOTE_BACKEND=postgres.
+  #   docker compose --profile postgres up -d postgres
+  #
+  # pgvector/pgvector, NOT the stock postgres image. The `vector` extension is
+  # what keeps hybrid search alive after the notes move off Neo4j, and a stock
+  # build does not ship it -- the Windows installer offers only pg_trgm. Without
+  # it PostgresStore still stores notes but reports itself lexical-only, and
+  # CompositeStore refuses it rather than degrading search invisibly.
+  postgres:
+    profiles: ["postgres"]
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    ports:
+      # Published so migrations and the MCP server can reach it from the host.
+      # Change the LEFT number if a native Postgres already holds 5432.
+      - "${POSTGRES_PORT_HOST:-5432}:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmastra}
+      POSTGRES_DB: ${POSTGRES_DB:-brahmastra}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The system of record must be accepting connections before anything
+      # tries to write a note to it.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-brahmastra} -d ${POSTGRES_DB:-brahmastra}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   # Optional local Neo4j, for trying the other backend without Aura.
   #   docker compose --profile neo4j up --build
@@ -154,3 +202,4 @@ services:
 volumes:
   brahmastra-data:
   neo4j-data:
+  postgres-data:

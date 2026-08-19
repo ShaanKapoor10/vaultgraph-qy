@@ -36,6 +36,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -271,6 +272,43 @@ def _save_offsets(offsets: dict[str, int]) -> None:
     _offsets_path().write_text(json.dumps(offsets, indent=2), encoding="utf-8")
 
 
+def _unique_capture_path(session: str) -> Path:
+    """
+    A queue filename that cannot collide, whatever the clock's resolution.
+
+    The name leads with a timestamp because drain() merges a session's slices
+    in filename order, and that order has to be chronological.
+
+    Timestamps alone are not enough, and nanoseconds did not fix it. time_ns()
+    is nanosecond-DENOMINATED, not nanosecond-GRANULAR: on Windows the system
+    clock advances in coarse ticks, so several captures share one value and the
+    later write silently overwrote the earlier -- losing exactly the turns this
+    hook exists to preserve. It reproduced as three captures becoming one file.
+
+    So the file is created O_EXCL and the suffix bumped until one is genuinely
+    new. That is a claim on the name rather than a guess about the clock, and
+    it holds against a second process capturing at the same moment too.
+    """
+    # Created here rather than relying on the caller: this function claims a
+    # name by creating the file, so it owns the directory that name lives in.
+    queue_dir().mkdir(parents=True, exist_ok=True)
+    stamp = time.time_ns()
+    for attempt in range(1000):
+        # The counter is always present and fixed-width so every name has one
+        # shape. Appending a suffix only on collision sorts WRONG: '-' (0x2D)
+        # precedes '.' (0x2E), so `<stamp>-1.json` would come before
+        # `<stamp>.json` and the merge would replay a session's turns out of
+        # order -- a subtler corruption than the overwrite it was fixing.
+        candidate = queue_dir() / f"{stamp}-{attempt:03d}-{session[:8]}.json"
+        try:
+            os.close(os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            return candidate
+        except FileExistsError:
+            continue
+    # Astronomically unlikely; a random suffix beats raising inside a hook.
+    return queue_dir() / f"{stamp}-999-{uuid.uuid4().hex[:8]}.json"
+
+
 def capture(payload: dict[str, Any]) -> Path | None:
     """
     Queue the unseen part of this session's transcript. Returns the queue file,
@@ -293,12 +331,8 @@ def capture(payload: dict[str, Any]) -> Path | None:
         return None
 
     queue_dir().mkdir(parents=True, exist_ok=True)
-    # Nanoseconds, not seconds. With a per-turn Stop hook two captures land in
-    # the same second routinely, and a whole-second name silently OVERWROTE the
-    # earlier one — losing exactly the turns the hook exists to preserve. The
-    # name still sorts chronologically, which drain() relies on to merge a
-    # session's slices in order.
-    path = queue_dir() / f"{time.time_ns()}-{session[:8]}.json"
+    path = _unique_capture_path(session)
+
     path.write_text(
         json.dumps(
             {

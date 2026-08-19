@@ -72,8 +72,12 @@ def _build_one(name: str, workspace: str, setting: str = "GRAPH_BACKEND") -> Gra
         # sqlite-only install must not need it present.
         from brahmastra.stores.neo4j_store import Neo4jStore
         return Neo4jStore(workspace=workspace)
+    if name == "postgres":
+        # Also lazy: psycopg is only needed by installs that use it.
+        from brahmastra.stores.postgres_store import PostgresStore
+        return PostgresStore(workspace=workspace)
     raise ValueError(
-        f"Unknown {setting} {name!r}. Expected 'sqlite' or 'neo4j'."
+        f"Unknown {setting} {name!r}. Expected 'sqlite', 'postgres' or 'neo4j'."
     )
 
 
