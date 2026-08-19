@@ -646,12 +646,37 @@ class Neo4jStore(GraphStore):
         got = self._note_rows(rows)
         return got[0] if got else None
 
+    def get_notes_by_ids(self, ids: list[str]) -> dict[str, dict[str, Any]]:
+        """One round trip instead of one per id -- the point of overriding this."""
+        if not ids:
+            return {}
+        rows = self._run(
+            "MATCH (n:Note) WHERE n.workspaceId = $ws AND n.id IN $ids RETURN n",
+            ws=self.workspace, ids=list(dict.fromkeys(ids)),
+        )
+        return {n["id"]: n for n in self._note_rows(rows) if n.get("id")}
+
     def set_notion_page_id(self, note_id: str, page_id: str) -> None:
         """Remember the Notion page created for this note."""
         self._run(
             "MATCH (n:Note {id: $id, workspaceId: $ws}) SET n.notionPageId = $pid",
             id=note_id, ws=self.workspace, pid=page_id,
         )
+
+    def capabilities(self) -> frozenset[str]:
+        """
+        Fulltext, vectors, and the RRF fusion of the two. Implemented in
+        _fulltext_notes / _vector_notes / search_notes; declared here so a
+        composite can check before trusting this store with note search.
+        """
+        from brahmastra.stores.base import (
+            CAP_FULLTEXT_SEARCH, CAP_HYBRID_SEARCH,
+            CAP_LEXICAL_SEARCH, CAP_VECTOR_SEARCH,
+        )
+        return frozenset({
+            CAP_LEXICAL_SEARCH, CAP_FULLTEXT_SEARCH,
+            CAP_VECTOR_SEARCH, CAP_HYBRID_SEARCH,
+        })
 
     def set_note_status(self, id: str, status: str, error: str | None = None) -> None:
         if status not in ("pending", "done", "error"):

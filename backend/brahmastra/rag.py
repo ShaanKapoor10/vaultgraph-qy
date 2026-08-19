@@ -184,14 +184,26 @@ _CITE_RE = re.compile(r"\[n:([^\]]+)\]")
 
 
 def _citations(note_ids: set[str]) -> list[dict[str, str]]:
-    """Map note_ids to {id, title} for the UI to link against."""
-    out = []
-    for nid in note_ids:
-        if not nid:
-            continue
-        note = db.get_note(nid)
-        out.append({"note_id": nid, "title": note["title"] if note else nid})
-    return out
+    """
+    Map note_ids to {id, title} for the UI to link against.
+
+    Fetched in one call rather than one per citation. That was invisible while
+    notes sat in the same local file as the graph; once the notes live on a
+    separate store, a well-cited answer turns into a round trip per citation on
+    the critical path of every /ask.
+
+    An id with no note still yields a citation, titled with the id: a fact was
+    genuinely extracted from it, and dropping the row would silently shorten
+    the evidence list rather than showing the gap.
+    """
+    wanted = [nid for nid in note_ids if nid]
+    if not wanted:
+        return []
+    found = db.get_notes_by_ids(wanted)
+    return [
+        {"note_id": nid, "title": (found.get(nid) or {}).get("title") or nid}
+        for nid in wanted
+    ]
 
 
 def _cited_in(answer: str, available: set[str]) -> set[str]:

@@ -27,7 +27,7 @@ __all__ = [
     "workspace", "for_workspace", "list_workspaces", "create_workspace",
     "get_workspace", "delete_workspace", "search_notes_across",
     "init_db", "upsert_note", "get_notes", "search_notes", "get_note",
-    "mark_note_done", "mark_note_error", "set_note_status", "delete_note",
+    "get_notes_by_ids", "mark_note_done", "mark_note_error", "set_note_status", "delete_note",
     "delete_triples_for_note", "insert_triples", "get_all_triples",
     "replace_canonical_map", "get_canonical_map", "get_entity_clusters",
     "cache_graph", "get_cached_graph", "get_entities", "search_entities",
@@ -141,6 +141,11 @@ def search_notes(query: str, limit: int = 10) -> list[dict[str, Any]]:
 
 def get_note(id: str) -> dict[str, Any] | None:
     return get_store().get_note(id)
+
+
+def get_notes_by_ids(ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Several notes in one call, keyed by id. Missing ids are simply absent."""
+    return get_store().get_notes_by_ids(ids)
 
 
 def set_note_status(id: str, status: str, error: str | None = None) -> None:

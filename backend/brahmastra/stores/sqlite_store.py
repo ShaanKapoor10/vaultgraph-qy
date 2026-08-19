@@ -550,6 +550,26 @@ class SQLiteStore(GraphStore):
             ).fetchone()
         return dict(row) if row else None
 
+    def get_notes_by_ids(self, ids: list[str]) -> dict[str, dict[str, Any]]:
+        """One statement instead of one per id. Missing ids are simply absent."""
+        if not ids:
+            return {}
+        # Deduplicated so a fact cited twice does not widen the query, and
+        # chunked because SQLite caps host parameters (999 on older builds).
+        unique = list(dict.fromkeys(ids))
+        found: dict[str, dict[str, Any]] = {}
+        with self._connect() as conn:
+            for i in range(0, len(unique), 500):
+                chunk = unique[i:i + 500]
+                marks = ",".join("?" * len(chunk))
+                rows = conn.execute(
+                    f"SELECT * FROM notes WHERE workspace_id = ? AND id IN ({marks})",
+                    (self.workspace, *chunk),
+                ).fetchall()
+                for row in rows:
+                    found[row["id"]] = dict(row)
+        return found
+
     def set_notion_page_id(self, note_id: str, page_id: str) -> None:
         """Remember the Notion page created for this note."""
         with self._connect() as conn:

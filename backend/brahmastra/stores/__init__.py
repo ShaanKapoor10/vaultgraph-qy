@@ -43,8 +43,38 @@ def backend_name() -> str:
     return os.environ.get("GRAPH_BACKEND", "sqlite").lower().strip() or "sqlite"
 
 
+def note_backend_name() -> str:
+    """
+    Where the system of record lives, read at call time.
+
+    Unset means "wherever the graph lives" -- the single-store arrangement,
+    unchanged. Setting it splits notes and workspaces off the engine, so that
+    choosing an engine stops being a decision about irreplaceable data.
+    """
+    return os.environ.get("NOTE_BACKEND", "").lower().strip()
+
+
 class WorkspaceBindingError(RuntimeError):
     """A backend did not bind to the workspace it was given."""
+
+
+def _build_one(name: str, workspace: str, setting: str = "GRAPH_BACKEND") -> GraphStore:
+    """
+    Construct a single backend by name. No binding check -- `_build` does that.
+
+    `setting` names the variable the value came from, so a typo in NOTE_BACKEND
+    does not send the reader to check GRAPH_BACKEND.
+    """
+    if name == "sqlite":
+        return SQLiteStore(workspace=workspace)
+    if name == "neo4j":
+        # Imported lazily: the neo4j driver is an optional dependency, so a
+        # sqlite-only install must not need it present.
+        from brahmastra.stores.neo4j_store import Neo4jStore
+        return Neo4jStore(workspace=workspace)
+    raise ValueError(
+        f"Unknown {setting} {name!r}. Expected 'sqlite' or 'neo4j'."
+    )
 
 
 def _build(name: str, workspace: str) -> GraphStore:
@@ -61,17 +91,24 @@ def _build(name: str, workspace: str) -> GraphStore:
     ignores or mishandles the argument now fails at construction, before it can
     write anything, rather than corrupting another workspace's data.
     """
-    if name == "sqlite":
-        store: GraphStore = SQLiteStore(workspace=workspace)
-    elif name == "neo4j":
-        # Imported lazily: the neo4j driver is an optional dependency, so a
-        # sqlite-only install must not need it present.
-        from brahmastra.stores.neo4j_store import Neo4jStore
-        store = Neo4jStore(workspace=workspace)
-    else:
-        raise ValueError(
-            f"Unknown GRAPH_BACKEND {name!r}. Expected 'sqlite' or 'neo4j'."
-        )
+    store = _build_one(name, workspace, setting="GRAPH_BACKEND")
+
+    notes_name = note_backend_name()
+    if notes_name and notes_name != name:
+        # Split arrangement: the engine keeps the derived cache, the note store
+        # keeps what cannot be recomputed. The note half is built through this
+        # same function, so the binding check below is applied to it too before
+        # the pair is assembled.
+        from brahmastra.stores.composite_store import CompositeStore
+        note_half = _build_one(notes_name, workspace, setting="NOTE_BACKEND")
+        note_bound = getattr(note_half, "workspace", None)
+        if note_bound != workspace:
+            raise WorkspaceBindingError(
+                f"{type(note_half).__name__} (NOTE_BACKEND) was asked for "
+                f"workspace {workspace!r} but bound to {note_bound!r}. Refusing "
+                f"to return a store that would write to the wrong graph."
+            )
+        store = CompositeStore(notes=note_half, graph=store)
 
     bound = getattr(store, "workspace", None)
     if bound != workspace:

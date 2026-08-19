@@ -16,15 +16,90 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any
 
+# ---------------------------------------------------------------------------
+# What is authoritative, and what is a cache
+# ---------------------------------------------------------------------------
+#
+# The contract below covers two kinds of data, and the difference decides how
+# much care each one is owed.
+#
+# SOURCE data cannot be recomputed. If the only copy of a note is lost, it is
+# gone -- no amount of running the pipeline brings it back.
+#
+# DERIVED data is a cache. Every triple, cluster, canonical mapping and cached
+# graph is a function of the notes; `run_pipeline(full=True)` regenerates all
+# of it. Losing it costs time and LLM calls, never information.
+#
+# This asymmetry is why they must not share a fate. Selecting a backend is a
+# decision about the ENGINE, and an engine decision must never put source data
+# at risk. Two real incidents came from treating them alike: a backend switch
+# left 61 notes in one store and 54 in another (the triple counts differed too,
+# but only the note gap was actual divergence), and a store built without its
+# workspace overwrote a note in `default` that belonged to `office`.
+#
+# Anything added here belongs in exactly one of these sets.
+SOURCE_DATA = ("notes", "workspaces")
+DERIVED_DATA = ("raw_triples", "canonical_map", "entity_clusters", "graph_cache")
+
+# Contract methods that read or write SOURCE data. A store may hold only these
+# (a note store), only the rest (a graph engine), or both. Kept as data rather
+# than prose so a composite store can route on it instead of hardcoding a list
+# that silently rots as the contract grows.
+SOURCE_METHODS = frozenset({
+    "upsert_note", "get_note", "get_notes_by_ids", "get_notes", "search_notes",
+    "search_notes_across",
+    "set_note_status", "set_notion_page_id", "delete_note",
+    "list_workspaces", "create_workspace", "get_workspace", "delete_workspace",
+})
+
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+#
+# Backends are not interchangeable in what they can SEARCH, only in what they
+# can store. Neo4j fuses BM25 fulltext with vector similarity (RRF) and so
+# finds notes sharing no keywords with the query; SQLite is lexical only.
+#
+# This matters the moment notes and graph can live in different stores: routing
+# note search to a lexical store is a silent, invisible downgrade -- the same
+# queries keep returning results, just worse ones. Declaring the capability
+# lets the composite refuse rather than quietly degrade.
+CAP_LEXICAL_SEARCH = "lexical_search"
+CAP_FULLTEXT_SEARCH = "fulltext_search"
+CAP_VECTOR_SEARCH = "vector_search"
+CAP_HYBRID_SEARCH = "hybrid_search"
+
+# What a store must offer to be trusted with the notes. Hybrid search is a
+# product feature, not an optimisation, so losing it is a regression rather
+# than a trade-off.
+REQUIRED_NOTE_CAPABILITIES = frozenset({CAP_HYBRID_SEARCH})
+
 
 class GraphStore(ABC):
-    """Persistence for notes, extracted triples, resolved entities and the graph."""
+    """
+    Persistence for notes, extracted triples, resolved entities and the graph.
+
+    See SOURCE_DATA / DERIVED_DATA above: the note and workspace methods carry
+    data that cannot be regenerated, the rest is a rebuildable cache.
+    """
 
     # -- lifecycle ---------------------------------------------------------
 
     @abstractmethod
     def init_schema(self) -> None:
         """Create whatever the backend needs. Must be idempotent."""
+
+    def capabilities(self) -> frozenset[str]:
+        """
+        What this backend can do beyond storing rows.
+
+        Defaults to the weakest honest answer: every store can match a
+        substring. A backend that overstates this does not fail -- it silently
+        returns worse results -- so the default is deliberately pessimistic and
+        each store opts in to what it has actually implemented.
+        """
+        return frozenset({CAP_LEXICAL_SEARCH})
 
     @abstractmethod
     def describe(self) -> str:
@@ -65,6 +140,23 @@ class GraphStore(ABC):
 
     @abstractmethod
     def get_note(self, id: str) -> dict[str, Any] | None: ...
+
+    def get_notes_by_ids(self, ids: list[str]) -> dict[str, dict[str, Any]]:
+        """
+        Fetch several notes at once, keyed by id. Missing ids are simply absent.
+
+        Concrete rather than abstract, with a correct-but-slow default, so an
+        existing backend keeps working without change. It exists because the
+        citation path asks for one note per cited fact: fine against a local
+        file, N network round trips once the notes live on a remote store.
+        A backend that can answer in one query should override it.
+        """
+        found = {}
+        for note_id in ids:
+            note = self.get_note(note_id)
+            if note is not None:
+                found[note_id] = note
+        return found
 
     @abstractmethod
     def set_notion_page_id(self, note_id: str, page_id: str) -> None:

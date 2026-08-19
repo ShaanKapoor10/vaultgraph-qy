@@ -168,3 +168,26 @@ def test_marking_an_error_without_a_message_is_still_allowed(temp_db):
     note = db.get_note("n-bare")
     assert note["extraction_status"] == "error"
     assert note["extraction_error"] is None
+
+
+def test_notes_are_fetched_in_bulk_not_one_at_a_time(temp_db):
+    """
+    The citation path asks for one note per cited fact. Against a local file
+    that is free; once notes live on a separate store it is a network round
+    trip per citation, on the critical path of every /ask.
+    """
+    db = temp_db
+    for i in range(3):
+        db.upsert_note(f"b{i}", f"Title {i}", "c", mark_pending=True)
+
+    found = db.get_notes_by_ids(["b0", "b2", "missing"])
+
+    assert set(found) == {"b0", "b2"}, "absent ids are simply absent, not errors"
+    assert found["b2"]["title"] == "Title 2"
+
+
+def test_bulk_fetch_handles_duplicates_and_an_empty_request(temp_db):
+    db = temp_db
+    db.upsert_note("b9", "Nine", "c", mark_pending=True)
+    assert db.get_notes_by_ids([]) == {}
+    assert set(db.get_notes_by_ids(["b9", "b9"])) == {"b9"}
