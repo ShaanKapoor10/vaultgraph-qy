@@ -20,7 +20,14 @@ dependencies = [
     # 2025-09-03 Notion API split a database into data sources. The old <3 pin
     # locked out the current API for no remaining reason.
     "notion-client>=2.2.1",
-    "mcp>=1.0.0",
+    # Pinned below 2: mcp 2.0 restructured the package and removed
+    # `mcp.server.fastmcp`, which this server is written against. Unpinned, a
+    # clean image resolved 2.0.0 and MCP-over-HTTP failed at import with
+    # ModuleNotFoundError -- so MCP_HTTP had never once worked in a container,
+    # while the local dev environment on 1.28 was fine. Same shape as the pnpm
+    # break: nothing here changed, the dependency shipped a major.
+    # Moving to 2.x means porting to its `mcpserver` API; do it deliberately.
+    "mcp>=1.0.0,<2",
     "groq>=1.0.0",
     "numpy>=1.26.0",
     "scipy>=1.13.0",

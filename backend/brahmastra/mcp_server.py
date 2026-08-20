@@ -46,36 +46,71 @@ from brahmastra import db
 # Written as an affordance, not a protocol. An agent that is told it MUST record
 # everything learns to treat it as ceremony and skips it under pressure; one
 # that knows what the thing is good for reaches for it when it actually helps.
-INSTRUCTIONS = """\
-Brahmastra is a persistent knowledge graph you can use as memory. It survives
-across sessions, machines and clients, and it is separate from whatever project
-you are currently working on — treat it as something you know, not as the code
-under your hands.
+INSTRUCTIONS = """Brahmastra is a persistent knowledge graph you can use as MEMORY. It outlives
+this session, this machine and this client, and it is separate from whatever
+project you are working on - treat it as something you already know, not as the
+code under your hands. Other agents and earlier sessions wrote into it; what you
+write is read by whoever comes next.
 
-Reach for it when:
+WHEN TO REACH FOR IT
 
-- Starting on unfamiliar or returning work. `brahmastra_search_notes` tells you
-  what was already decided, tried, or found broken here — including in sessions
-  you had no part in. This is the highest-value moment and the easiest to miss,
+- Starting on unfamiliar or returning work. brahmastra_search_notes tells you
+  what was already decided, tried, or found broken - including by sessions you
+  had no part in. This is the highest-value moment and the easiest to miss,
   because nothing about a fresh task announces that memory exists.
-- Something surprises you. Check whether it is already known before spending an
-  hour re-deriving it. Past failures are recorded with their causes.
-- You learn something durable: a root cause, an option you rejected and why, a
-  constraint discovered the hard way. `brahmastra_add_note` keeps it. Write it
-  as plain entity-rich sentences ("The file llm.py raises LLMQuotaExhausted") —
-  that extracts into a good graph. The WHY is the part worth writing; what
-  changed is usually recoverable from the code, and why it changed is not.
+- Something surprises you, or you are about to debug something odd. Check
+  whether it is already known before spending an hour re-deriving it; past
+  failures are stored together with their causes.
+- You learn something durable. brahmastra_add_note keeps it, and the note is
+  searchable the moment the call returns.
 
-Choosing between the two searches — this trips people up:
+WHICH TOOL
 
-- `brahmastra_search_notes` matches the FULL TEXT of every note. Use it to
-  recall what was written about a topic. This is the one you usually want.
-- `brahmastra_search_entities` matches entity NAMES only. Thin results mean the
-  name is absent, not that the knowledge is. Always follow up with
-  search_notes before concluding nothing is stored.
+  search_notes           Full text of every note. Recall what was WRITTEN about
+                         a topic. START HERE - it is the one you usually want.
+  search_entities        Entity NAMES only. Use when you know what a thing is
+                         called and want its connections. Thin results mean the
+                         NAME is absent, never that the knowledge is - fall back
+                         to search_notes before concluding nothing is stored.
+  get_entity_details     One entity with its relations, aliases and centrality.
+  get_graph_stats        What this memory contains. Good first orientation: the
+                         top entities summarise what it is actually about.
+  get_contradictions     Facts recorded once and contradicted later. Worth a
+                         look before trusting a single recalled fact about who
+                         reports to whom, what status something has, or where
+                         something lives.
+  add_note               Remember something.
+  run_pipeline           Rebuild the graph from all notes. Rarely needed, since
+                         adding a note already extracts it; use after a bulk
+                         import or an ontology change.
+  list_workspaces        Which graphs exist, and which one you are writing to.
+  create_workspace       A new, fully separate graph.
+  search_all_workspaces  Explicit cross-workspace search; each hit says which
+                         workspace it came from.
 
-Storing is one call and takes a few seconds; nothing further is required of you.
-Recall is one call and regularly saves an hour."""
+WRITING A NOTE THAT IS WORTH RECALLING
+
+Notes are parsed into (subject, relation, object) triples, so plain
+entity-rich sentences extract well and pronouns do not. Write "The file llm.py
+raises LLMQuotaExhausted when the daily quota is spent", not "it throws when
+that runs out". Name files, functions, services and people explicitly.
+
+Record the WHY above all - the root cause, the option you rejected and what
+ruled it out, the constraint discovered the hard way. What changed is usually
+recoverable later from the code and the git history; why it changed is not, and
+that is the part nobody can reconstruct.
+
+WORKSPACES
+
+Each workspace is a completely separate graph - notes and entities in one are
+invisible to the others, and the same name may mean different things in each.
+You write to the active one; list_workspaces says which that is. Cross-workspace
+search is deliberately explicit, never implicit.
+
+COST
+
+Recall is one call and regularly saves an hour. Storing is one call and a few
+seconds. Neither needs a follow-up step."""
 
 mcp = FastMCP("brahmastra", instructions=INSTRUCTIONS)
 

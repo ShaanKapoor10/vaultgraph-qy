@@ -36,10 +36,21 @@ def _isolate_storage_choice(monkeypatch):
     Tests that WANT another backend set it themselves; monkeypatch restores
     these afterwards either way.
     """
+    # SET to empty, never DELETE. Several modules call load_dotenv(backend/.env)
+    # at import, and python-dotenv does not override a variable that is already
+    # present -- but it happily fills in one that is absent. So deleting these
+    # left every importlib.reload() free to re-inject the developer's real
+    # configuration, and a test that reloads a module (many do) went straight
+    # back to the production Postgres.
+    #
+    # That hole was live and silent: the suite passed only because the real
+    # database happened to have nothing pending, and started failing the moment
+    # it did. An empty value is falsy everywhere it is read, so it survives the
+    # reload and still means "single store, sqlite".
     monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
-    monkeypatch.delenv("NOTE_BACKEND", raising=False)
-    monkeypatch.delenv("POSTGRES_DSN", raising=False)
-    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.setenv("NOTE_BACKEND", "")
+    monkeypatch.setenv("POSTGRES_DSN", "")
+    monkeypatch.setenv("DATABASE_URL", "")
 
 
 @pytest.fixture(autouse=True, scope="session")

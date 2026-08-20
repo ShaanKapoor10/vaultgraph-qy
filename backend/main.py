@@ -31,11 +31,29 @@ from brahmastra.db import init_db
 from brahmastra.routers import notes, pipeline, graph, ask, paths, workspaces, entities
 
 
+def _mcp_http_enabled() -> bool:
+    return os.environ.get("MCP_HTTP", "").strip().lower() in {"1", "true", "yes"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Initialise SQLite schema on startup."""
+    """
+    Initialise the store, and run the MCP session manager when serving MCP.
+
+    Mounting a sub-application does NOT run its lifespan — Starlette only runs
+    the outermost one. So the mounted MCP app came up with its task group
+    uninitialised and every call died on "Task group is not initialized",
+    which reads like an MCP bug rather than a wiring mistake. The session
+    manager has to be entered here, by the app that actually owns the lifespan.
+    """
     init_db()
-    yield
+    if _mcp_http_enabled():
+        from brahmastra.mcp_server import mcp as _mcp
+
+        async with _mcp.session_manager.run():
+            yield
+    else:
+        yield
 
 
 app = FastAPI(
@@ -65,9 +83,14 @@ app.middleware("http")(require_api_key)
 # is ONE authentication boundary rather than a second unprotected door into the
 # same graph. Enabled only when asked for, because a local stdio server needs
 # nothing of the sort.
-if os.environ.get("MCP_HTTP", "").strip().lower() in {"1", "true", "yes"}:
+if _mcp_http_enabled():
     from brahmastra.mcp_server import mcp as _mcp
 
+    # The sub-app serves at its own `streamable_http_path`, which defaults to
+    # "/mcp" — mounting that at "/mcp" puts the endpoint at /mcp/mcp, so a
+    # client pointed at /mcp gets a 404 and reports the server as unreachable.
+    # Serve it at the mount root instead, so the URL is exactly /mcp.
+    _mcp.settings.streamable_http_path = "/"
     app.mount("/mcp", _mcp.streamable_http_app())
 
 # Register routers

@@ -259,6 +259,74 @@ def _too_large_hint(note_id: str = "") -> str:
     )
 
 
+# ---------------------------------------------------------------------------
+# Fitting the request inside a per-minute token budget
+# ---------------------------------------------------------------------------
+#
+# Providers bill RESERVED output against the per-minute allowance, not the
+# tokens actually produced. A fixed max_tokens is therefore a bet on a limit
+# nobody wrote down: 8192 quietly made every request cost ~9.3k against an 8000
+# TPM tier and 413 before the note was read, while a number small enough to
+# always fit would truncate long notes into unparseable JSON.
+#
+# So neither guess. Ask for output proportional to the note, and learn the real
+# limit from the provider the first time it complains.
+
+# Learned at runtime from a 413/429 that states "Limit N". None until a provider
+# tells us; a paid tier simply never triggers it and nothing is throttled.
+_LEARNED_TPM: int | None = None
+
+# Reserve for the reply regardless of note size -- below this even a short note
+# risks truncation, and truncated JSON loses every triple in the note.
+MIN_OUTPUT_TOKENS = 1024
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count. Four characters per token is close enough to budget with."""
+    return len(text) // 4
+
+
+def _output_budget(system_prompt: str, user_message: str) -> int:
+    """
+    How many output tokens to reserve for this particular request.
+
+    Scales with the note, because the reply is a JSON array of triples and the
+    prompt asks for 8-20 of them -- a long note earns a bigger reply and a short
+    one does not need to reserve for it. Then clamped to whatever the provider
+    has told us it will actually allow.
+    """
+    est_in = _estimate_tokens(system_prompt) + _estimate_tokens(user_message)
+    # Triples are roughly as long as the prose they came from, and JSON overhead
+    # roughly doubles it; 2x input is generous without being a fixed ceiling.
+    want = max(MIN_OUTPUT_TOKENS, min(est_in * 2, EXTRACTION_MAX_TOKENS))
+    if _LEARNED_TPM:
+        # Leave the input room plus a margin, since our estimate is approximate
+        # and the provider counts differently.
+        allowed = _LEARNED_TPM - est_in - 256
+        want = min(want, allowed)
+    return want
+
+
+def _learn_tpm(error: Exception) -> bool:
+    """
+    Record a per-minute limit the provider just told us about.
+
+    Returns True when this is new information, meaning the same request is
+    worth one more attempt with a budget that now fits. That turns a 413 from a
+    dead note into a self-correcting one: the first oversized request teaches
+    every request after it.
+    """
+    global _LEARNED_TPM
+    found = _TPM_BUDGET.search(str(error))
+    if not found:
+        return False
+    limit = int(found.group(1))
+    if _LEARNED_TPM == limit:
+        return False
+    _LEARNED_TPM = limit
+    return True
+
+
 _TPM_BUDGET = re.compile(r"limit\s+(\d+)\s*,\s*requested\s+(\d+)", re.IGNORECASE)
 
 
@@ -327,14 +395,17 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
     from brahmastra.llm import _is_model_missing, _is_quota_exhausted
 
     client = Groq(api_key=api_key)
+    user_message = _build_user_message(title, content)
     kwargs: dict[str, Any] = dict(
         # NOT a literal: llm.py owns which model runs, or this call site drifts
         # and keeps hitting a retired one after llm.py has been fixed.
         model=groq_model(),
-        # A long note yields many triples, and a cut-off reply is not partial
-        # JSON — it is unparseable, so the whole note fails. At 2048 a 3KB note
-        # truncated mid-string at char 3151 and lost everything.
-        max_tokens=EXTRACTION_MAX_TOKENS,
+        # Sized to THIS note rather than fixed. A cut-off reply is not partial
+        # JSON — it is unparseable, so the whole note fails; but the reservation
+        # is billed against the per-minute allowance whether or not it is used,
+        # so a fixed ceiling large enough for the worst note made every request
+        # too expensive for the smallest tier.
+        max_tokens=_output_budget(SYSTEM_PROMPT, user_message),
         # Ollama has always asked for JSON; this path never did, and relied on
         # the model volunteering it. Reasoning-style models answer with prose
         # first and leave `content` empty, which parses as "no triples".
@@ -342,7 +413,7 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
         temperature=0.0,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_message(title, content)},
+            {"role": "user", "content": user_message},
         ],
     )
 
@@ -374,6 +445,15 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
             # that column was added for -- the failure had been read as a rate
             # limit until the message was actually recorded.
             if _is_too_large(e):
+                # The provider just stated its per-minute limit. If that is new
+                # information, the same note is worth one more attempt with a
+                # reservation that now fits -- otherwise the very first
+                # oversized request would kill a note that a smaller budget
+                # extracts perfectly well.
+                if _learn_tpm(e):
+                    kwargs["max_tokens"] = _output_budget(SYSTEM_PROMPT, user_message)
+                    if kwargs["max_tokens"] >= MIN_OUTPUT_TOKENS:
+                        continue
                 raise
             if attempt == 2:
                 break                      # no point sleeping before giving up

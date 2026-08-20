@@ -510,3 +510,62 @@ def test_an_oversized_request_is_not_retried_and_does_not_stop_the_run():
 
     assert calls["n"] == 1, f"an oversized request must not be retried ({calls['n']} calls)"
     assert slept == [], "and must not sleep before failing"
+
+
+# ---------------------------------------------------------------------------
+# Fitting inside a per-minute token budget
+# ---------------------------------------------------------------------------
+
+def test_the_output_reservation_scales_with_the_note():
+    """
+    max_tokens is RESERVED output and providers bill the reservation, not what
+    is produced. A fixed 8192 made every request cost ~9.3k against an 8000 TPM
+    tier and 413 before the note was even read -- extraction was impossible
+    there whatever the note said.
+    """
+    from brahmastra.extraction import (
+        EXTRACTION_MAX_TOKENS, SYSTEM_PROMPT, _build_user_message, _output_budget,
+    )
+
+    short = _output_budget(SYSTEM_PROMPT, _build_user_message("T", "a short note."))
+    long_ = _output_budget(SYSTEM_PROMPT, _build_user_message("T", "a long note. " * 400))
+
+    assert short < long_, "a bigger note earns a bigger reply"
+    assert long_ <= EXTRACTION_MAX_TOKENS, "and is still capped"
+
+
+def test_a_short_note_never_reserves_below_the_truncation_floor():
+    """Truncated JSON is unparseable, so the note loses every triple, not some."""
+    from brahmastra.extraction import MIN_OUTPUT_TOKENS, SYSTEM_PROMPT, _output_budget
+
+    assert _output_budget(SYSTEM_PROMPT, "x") >= MIN_OUTPUT_TOKENS
+
+
+def test_a_stated_limit_is_learned_and_then_constrains_the_reservation(monkeypatch):
+    """
+    The provider states its allowance in the error. Learning it turns a 413
+    from a dead note into a self-correcting one -- the first oversized request
+    teaches every request after it.
+    """
+    import brahmastra.extraction as ex
+
+    monkeypatch.setattr(ex, "_LEARNED_TPM", None)
+    prompt, msg = ex.SYSTEM_PROMPT, ex._build_user_message("T", "note. " * 300)
+    before = ex._output_budget(prompt, msg)
+
+    assert ex._learn_tpm(Exception("TPM: Limit 2000, Requested 9338")) is True
+    assert ex._LEARNED_TPM == 2000
+    after = ex._output_budget(prompt, msg)
+
+    assert after < before, "a tight limit must shrink the reservation"
+    # Learning the same value twice is not new information, so it must not
+    # trigger another retry of a request that already failed.
+    assert ex._learn_tpm(Exception("TPM: Limit 2000, Requested 9338")) is False
+
+
+def test_an_error_without_numbers_teaches_nothing(monkeypatch):
+    import brahmastra.extraction as ex
+
+    monkeypatch.setattr(ex, "_LEARNED_TPM", None)
+    assert ex._learn_tpm(Exception("Connection reset by peer")) is False
+    assert ex._LEARNED_TPM is None
