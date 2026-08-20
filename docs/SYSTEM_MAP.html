@@ -440,7 +440,7 @@
 <main>
 
 <header class="masthead">
-  <p class="eyebrow">System reference &middot; 18 August 2026</p>
+  <p class="eyebrow">System reference &middot; 20 August 2026</p>
   <h1>Brahmastra System Map</h1>
   <p class="standfirst">
     Every moving part, what it writes, and where that lands on disk — followed end to end
@@ -525,17 +525,18 @@
       <text class="svg-sub" x="316" y="316">+ failed_stages[]</text>
 
       <!-- store -->
-      <rect class="box-store" x="580" y="112" width="170" height="120" rx="5"/>
-      <text class="svg-title" x="596" y="138">Graph store</text>
-      <text class="svg-sub" x="596" y="158">GRAPH_BACKEND selects</text>
-      <text class="svg-label" x="596" y="182" fill="var(--store)">sqlite &nbsp;— local file</text>
-      <text class="svg-label" x="596" y="202" fill="var(--store)">neo4j &nbsp;&nbsp;— Aura, shared</text>
-      <text class="svg-sub" x="596" y="220">one active per process</text>
+      <rect class="box-store" x="580" y="104" width="170" height="136" rx="5"/>
+      <text class="svg-title" x="596" y="128">Storage, split</text>
+      <text class="svg-sub" x="596" y="146">source vs derived</text>
+      <text class="svg-label" x="596" y="170" fill="var(--store)">NOTE_BACKEND</text>
+      <text class="svg-sub" x="596" y="186">postgres — notes</text>
+      <text class="svg-label" x="596" y="208" fill="var(--store)">GRAPH_BACKEND</text>
+      <text class="svg-sub" x="596" y="224">neo4j — the cache</text>
 
       <!-- surfaces -->
       <rect class="box" x="800" y="44" width="140" height="46" rx="4"/>
       <text class="svg-title" x="814" y="66">REST :8001</text>
-      <text class="svg-sub" x="814" y="82">19 routes</text>
+      <text class="svg-sub" x="814" y="82">22 routes</text>
 
       <rect class="box" x="800" y="106" width="140" height="46" rx="4"/>
       <text class="svg-title" x="814" y="128">MCP</text>
@@ -655,8 +656,8 @@
       <thead><tr><th>Table</th><th class="num">Rows</th><th>Written by</th><th>What a row is</th></tr></thead>
       <tbody>
         <tr><td><code>workspaces</code></td><td class="num">1</td><td>create workspace</td><td>One independent graph</td></tr>
-        <tr><td><code>notes</code></td><td class="num">61</td><td>sync, MCP, checkpoint drain</td><td>Title + body + extraction status <em>and why it failed</em> + Notion projection</td></tr>
-        <tr><td><code>raw_triples</code></td><td class="num">742</td><td>stage 1 extract</td><td>One asserted fact, pre-resolution</td></tr>
+        <tr><td><code>notes</code></td><td class="num">60</td><td>sync, MCP, checkpoint drain</td><td>Title + body + extraction status <em>and why it failed</em> + Notion projection</td></tr>
+        <tr><td><code>raw_triples</code></td><td class="num">732</td><td>stage 1 extract</td><td>One asserted fact, pre-resolution</td></tr>
         <tr><td><code>canonical_map</code></td><td class="num">628</td><td>stage 2 resolve</td><td>Surface form &rarr; canonical name</td></tr>
         <tr><td><code>entity_clusters</code></td><td class="num">520</td><td>stage 2 resolve</td><td>All spellings of one real thing</td></tr>
         <tr><td><code>graph_cache</code></td><td class="num">1</td><td>stage 3 &amp; 4</td><td>The whole computed graph as JSON</td></tr>
@@ -689,14 +690,17 @@
   <div class="note warn">
     <span class="kicker">Live drift, right now</span>
     <p>
-      SQLite is now at 61 notes and 742 triples; the Neo4j figures above are from the last
+      SQLite is now at 60 notes and 732 triples; the Neo4j figures above are from the last
       migration and have not moved since. Both are correct.
-      <strong>The pipeline writes only to the backend currently selected</strong>, so the copy you
-      are not using falls behind until you re-migrate — and every local run widens the gap. The
-      earlier 10-triple discrepancy is a different thing: SQLite has
-      no uniqueness constraint on <code>raw_triples</code>, so a fact the extractor emitted twice
-      from one note is stored twice, while Neo4j's <code>MERGE</code> collapses it. Neo4j's number
-      is the more correct one.
+      <strong>The pipeline writes only to the backend currently selected</strong>, so the copy
+      you are not using falls behind until you re-migrate, and every local run widens the gap.
+      That is the whole of the difference now. The separate 10-triple discrepancy is
+      <strong>fixed</strong>: SQLite had no uniqueness constraint on <code>raw_triples</code>,
+      so a fact the extractor emitted twice from one note was stored twice while Neo4j's
+      <code>MERGE</code> collapsed it. SQLite now carries the same constraint, applied to
+      existing rows on migration, so the two backends can no longer disagree about their own
+      counts. Uniqueness is per NOTE: two notes asserting the same fact is corroboration, and
+      collapsing that would erase the evidence provenance depends on.
     </p>
   </div>
 </section>
@@ -949,21 +953,40 @@
   </p>
 
   <div class="swap">
-    <h3>Graph store</h3>
-    <code class="env">GRAPH_BACKEND</code>
+    <h3>Where each KIND of data lives</h3>
+    <code class="env">NOTE_BACKEND &middot; GRAPH_BACKEND</code>
+    <p style="margin:2px 0 12px; font-size:14.5px; color:var(--muted);">
+      Two variables, because there are two kinds of data. Notes and workspaces
+      <strong>cannot be recomputed</strong>; triples, clusters and the cached graph are a
+      function of the notes and rebuild from them. Choosing an engine is a decision about
+      the rebuildable half, and it must not put the other half at risk.
+    </p>
     <ul class="opts">
       <li class="opt is-default">
-        <span class="opt-name">sqlite <span class="tag">default</span></span>
-        <span class="opt-why">One file, zero setup, no network. Search is lexical only — no vector similarity. Right for local work and tests.</span>
+        <span class="opt-name">postgres notes + neo4j graph <span class="tag">deployed</span></span>
+        <span class="opt-why">The default. Notes in Postgres — networked, so several machines share one system of record, and the only other backend that can do hybrid search (<code>tsvector</code> + <code>pgvector</code>). Graph in Neo4j, where traversal is a query. Rebuild or replace the engine freely; the notes are not involved.</span>
       </li>
       <li class="opt">
-        <span class="opt-name">neo4j</span>
-        <span class="opt-why">Shared across machines. Native traversal, vector + BM25 hybrid search, real constraints. Required for deployment. Free tier suspends after ~3 days idle.</span>
+        <span class="opt-name">single store (NOTE_BACKEND unset)</span>
+        <span class="opt-why">Both halves in whichever <code>GRAPH_BACKEND</code> names — the original arrangement, unchanged. With <code>sqlite</code> that is one file, zero setup, no network: right for local work and what the tests use. Wrong for deployment, and <code>/health/ready</code> says so.</span>
       </li>
     </ul>
+    <div class="note warn">
+      <span class="kicker">A note store must be able to search</span>
+      <p>
+        Routing note search to a lexical-only store is an <strong>invisible</strong>
+        downgrade — every query still succeeds and quietly returns worse results. So
+        backends declare <code>capabilities()</code>, and <code>CompositeStore</code>
+        raises <code>CapabilityDowngrade</code> at construction rather than degrading.
+        <code>ALLOW_SEARCH_DOWNGRADE=1</code> accepts it out loud.
+      </p>
+    </div>
     <p style="margin:14px 0 0; font-size:14.5px; color:var(--muted);">
-      Adding a third means implementing one class against the <code>GraphStore</code> contract —
-      roughly 104 call sites go through <code>db.*</code> and none touch a backend directly.
+      Adding a backend still means implementing one class against the
+      <code>GraphStore</code> contract — roughly 104 call sites go through
+      <code>db.*</code> and none touch a backend directly. <code>CompositeStore</code>
+      routes each call by <code>SOURCE_METHODS</code>, and a test fails if a new contract
+      method is added without being classified.
     </p>
   </div>
 
@@ -1149,8 +1172,9 @@
   <span class="sec-num">06 — Yours to call</span>
   <h2>Open decisions</h2>
   <p class="lede">
-    Five things the system currently does one way, where the other way is defensible and the
-    choice is genuinely yours. Extraction failures used to be a sixth — they are now
+    Where the system does one thing and the other is defensible. Three of these have since
+    been decided and are kept here with what tipped them, because the reasoning is the part
+    worth having later. Extraction failures used to be a sixth — they are now
     <em>recorded</em> rather than guessed at, which is what turned the retry row below from a
     suspicion into evidence.
   </p>
@@ -1170,9 +1194,9 @@
           <td>This is the largest structural gap. Marking origin would let <code>/ask</code> weight human notes above machine ones, and let contradiction detection prefer the human side.</td>
         </tr>
         <tr>
-          <td><strong>Cluster summaries</strong></td>
-          <td>All 25 recomputed every run</td>
-          <td>Most clusters are unchanged since yesterday. Caching by membership would cut this to near zero on a typical run.</td>
+          <td><strong>Cluster summaries</strong> <em>(decided)</em></td>
+          <td>Reused when a cluster's membership is unchanged</td>
+          <td>Was 25 LLM calls every run regardless of change &mdash; enough to push one incremental run past a 30-minute timeout. Keyed on membership, never on cluster id: Louvain renumbers communities per run, so matching on id would hand a summary to the wrong cluster. Now reports <code>reused</code> vs <code>generated</code>; an unchanged graph is 25 and 0.</td>
         </tr>
         <tr>
           <td><strong>Timeout retries</strong></td>
@@ -1180,14 +1204,14 @@
           <td>A timeout means the model cannot handle that input; retrying identically cannot help. This burned 12 of 45 minutes on one run.</td>
         </tr>
         <tr>
-          <td><strong>Rate-limit backoff</strong></td>
-          <td>A per-minute 429 is retried inside the run, and the note is re-tried on the next run</td>
-          <td>Observed to be insufficient: one note failed <em>two consecutive pipeline runs</em> on a per-minute limit, then succeeded on a direct call minutes later. The in-run attempts are spent faster than the limit clears, so &ldquo;just run it again&rdquo; is not reliably enough on the free tier.</td>
+          <td><strong>Rate-limit backoff</strong> <em>(decided)</em></td>
+          <td>Honours the delay Groq states, capped at 45s</td>
+          <td>Guessing made retries useless: a blind 2s+4s covers six seconds of a limit the server says needs thirty, so all three attempts landed in the same closed window. Past the cap the note fails fast, because the next run retries errored notes for free.</td>
         </tr>
         <tr>
-          <td><strong>Duplicate triples in SQLite</strong></td>
-          <td>No uniqueness constraint</td>
-          <td>Neo4j already enforces it. Adding the same constraint to SQLite would make the two backends agree on counts.</td>
+          <td><strong>Duplicate triples in SQLite</strong> <em>(decided)</em></td>
+          <td>UNIQUE over (workspace, subject, relation, object, note)</td>
+          <td>Matches what Neo4j's <code>MERGE</code> already enforced, so the two backends can no longer disagree about their own counts. Existing rows are collapsed on migration, since the index would otherwise fail on exactly the databases needing it.</td>
         </tr>
       </tbody>
     </table>
