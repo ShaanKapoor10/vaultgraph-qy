@@ -23,11 +23,17 @@ services:
     restart: unless-stopped
     ports:
       - "8001:8001"
+    depends_on:
+      # Wait for the system of record to be ACCEPTING CONNECTIONS, not merely
+      # started. A container that is up but still initialising would have the
+      # backend's first note write fail on an empty database.
+      postgres:
+        condition: service_healthy
     environment:
       # ---- storage -------------------------------------------------------
       # One answer for every process. The MCP server, the CLI and the hooks
       # read this from backend/.env; inside the container it comes from here.
-      GRAPH_BACKEND: ${GRAPH_BACKEND:-sqlite}
+      GRAPH_BACKEND: ${GRAPH_BACKEND:-neo4j}
       # Both paths point INTO the volume. A database written to the image
       # layer instead is discarded on the next deploy, silently.
       BRAHMASTRA_DB: /data/concept_graph.db
@@ -35,10 +41,12 @@ services:
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
 
       # ---- the system of record -------------------------------------------
-      # Unset keeps notes wherever GRAPH_BACKEND puts them (single-store, the
-      # original arrangement). Set to `postgres` to split them off, so that
-      # choosing an engine stops being a decision about irreplaceable data.
-      NOTE_BACKEND: ${NOTE_BACKEND:-}
+      # Deployed default. Notes live in Postgres and the graph in Neo4j, so
+      # choosing or rebuilding an engine never risks irreplaceable data.
+      # Override to empty for the single-store arrangement, which is still
+      # supported but is NOT what a deployment should run: a SQLite system of
+      # record is one file on one container's disk, and its search is lexical.
+      NOTE_BACKEND: ${NOTE_BACKEND:-postgres}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
@@ -122,11 +130,11 @@ services:
     command: ["python", "-m", "brahmastra.live_sync"]
     environment:
       POLL_INTERVAL: ${POLL_INTERVAL:-900}
-      GRAPH_BACKEND: ${GRAPH_BACKEND:-sqlite}
+      GRAPH_BACKEND: ${GRAPH_BACKEND:-neo4j}
       BRAHMASTRA_DB: /data/concept_graph.db
       BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
-      NOTE_BACKEND: ${NOTE_BACKEND:-}
+      NOTE_BACKEND: ${NOTE_BACKEND:-postgres}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
@@ -145,10 +153,12 @@ services:
     volumes:
       - brahmastra-data:/data
     depends_on:
-      - backend
+      backend:
+        condition: service_started
+      postgres:
+        condition: service_healthy
 
-  # The system of record, when NOTE_BACKEND=postgres.
-  #   docker compose --profile postgres up -d postgres
+  # The system of record (NOTE_BACKEND=postgres, the deployed default).
   #
   # pgvector/pgvector, NOT the stock postgres image. The `vector` extension is
   # what keeps hybrid search alive after the notes move off Neo4j, and a stock
@@ -156,7 +166,10 @@ services:
   # it PostgresStore still stores notes but reports itself lexical-only, and
   # CompositeStore refuses it rather than degrading search invisibly.
   postgres:
-    profiles: ["postgres"]
+    # No profile: this is the system of record in the default arrangement, so
+    # `docker compose up` must bring it with everything else. Gating it behind
+    # a profile while the backend defaults to NOTE_BACKEND=postgres would ship
+    # a default configuration that points at a service nobody started.
     image: pgvector/pgvector:pg17
     restart: unless-stopped
     ports:

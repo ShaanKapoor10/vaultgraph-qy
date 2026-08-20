@@ -79,3 +79,50 @@ def test_readiness_is_503_when_the_store_is_unreachable(client, monkeypatch):
     body = r.json()
     assert body["status"] == "unavailable"
     assert "Failed to DNS resolve" in body["error"], "must say what went wrong"
+
+
+def test_readiness_names_the_system_of_record(monkeypatch, client):
+    """
+    `backend` alone stopped being the whole answer once notes and the graph
+    could live apart: it names the ENGINE, and the engine is the half that can
+    be rebuilt. Which store holds the irreplaceable half is the thing worth
+    checking after a deploy.
+    """
+    monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
+    monkeypatch.setenv("NOTE_BACKEND", "postgres")
+
+    body = client.get("/health/ready").json()
+
+    assert body["backend"] == "sqlite"
+    assert body["system_of_record"] == "postgres"
+
+
+def test_a_sqlite_system_of_record_is_flagged_but_still_serves(monkeypatch, client):
+    """
+    This misconfiguration looks perfectly healthy, which is exactly why it
+    needs saying: SQLite answers every probe normally while being one file on
+    one container's disk -- gone on redeploy, invisible to a second instance,
+    and lexical-only so hybrid search quietly degrades.
+
+    A warning, not a 503. Refusing traffic would turn a recoverable
+    misconfiguration into an outage, and single-store SQLite is still a
+    legitimate way to run this locally.
+    """
+    monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
+    monkeypatch.delenv("NOTE_BACKEND", raising=False)
+
+    resp = client.get("/health/ready")
+    body = resp.json()
+
+    assert resp.status_code == 200, "a warning must not take the service down"
+    assert body["system_of_record"] == "sqlite"
+    assert any("NOTE_BACKEND=postgres" in w for w in body["warnings"]), (
+        "the warning must name the fix, not merely the problem"
+    )
+
+
+def test_a_postgres_system_of_record_raises_no_warning(monkeypatch, client):
+    monkeypatch.setenv("GRAPH_BACKEND", "neo4j")
+    monkeypatch.setenv("NOTE_BACKEND", "postgres")
+    body = client.get("/health/ready").json()
+    assert "warnings" not in body

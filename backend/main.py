@@ -104,15 +104,35 @@ async def ready(response: Response) -> dict[str, Any]:
     suspends after roughly three days idle.
     """
     from brahmastra import db
-    from brahmastra.stores import backend_name
+    from brahmastra.stores import backend_name, note_backend_name
 
+    notes_on = note_backend_name() or backend_name()
     detail: dict[str, Any] = {
         "service": "brahmastra",
         "backend": backend_name(),
+        # Which store holds the data that cannot be recomputed. Reported
+        # separately from `backend` because they are now separable, and because
+        # the answer is the one thing worth checking after a deploy.
+        "system_of_record": notes_on,
         # Visible on purpose: "unconfigured" means the API is refusing all
         # traffic, and "anonymous" means it is open to anyone who can reach it.
         "auth": auth_status(),
     }
+
+    # A misconfiguration that looks completely healthy is the one worth
+    # surfacing. SQLite as the system of record answers every probe normally
+    # while being one file on one container's disk -- lost on redeploy, invisible
+    # to a second instance, and lexical-only, so hybrid search silently
+    # degrades. It stays a warning rather than a 503: refusing traffic would
+    # turn a recoverable misconfiguration into an outage, and single-store
+    # SQLite remains a legitimate way to run this locally.
+    if notes_on == "sqlite":
+        detail["warnings"] = [
+            "system of record is SQLite: a single file on this container's "
+            "disk, discarded on redeploy unless it is on a volume, unreadable "
+            "by any other instance, and lexical-only (no hybrid search). Set "
+            "NOTE_BACKEND=postgres for anything deployed."
+        ]
     try:
         stats = db.get_db_stats()
         detail.update(
