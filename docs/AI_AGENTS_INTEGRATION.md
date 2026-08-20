@@ -128,12 +128,12 @@ BASE_URL = "http://localhost:8001"
 # Define tools
 def query_graph(entity_name: str):
     """Search for entity and return details"""
-    resp = requests.get(f"{BASE_URL}/api/entities/search", params={"q": entity_name})
+    resp = requests.get(f"{BASE_URL}/api/entities", params={"q": entity_name})
     return resp.json()
 
 def get_entity_relations(entity_id: str):
     """Get all relations for an entity"""
-    resp = requests.get(f"{BASE_URL}/api/entities/{entity_id}/relations")
+    resp = requests.get(f"{BASE_URL}/api/entities/{entity_id}")  # includes relations
     return resp.json()
 
 def add_note_to_brahmastra(title: str, content: str):
@@ -167,10 +167,13 @@ result = agent.run("What is Sarah's role and who does she report to?")
 | POST | `/api/graph/triples` | Add triples |
 | GET | `/api/graph/triples` | List triples |
 | GET | `/api/graph` | Get full graph |
-| GET | `/api/entities/search` | Search entities |
-| GET | `/api/entities/{id}` | Get entity details |
+| GET | `/api/entities?q=&type=` | Search entities (PageRank order) |
+| GET | `/api/entities/{name}` | Entity details + in/outgoing relations |
 | POST | `/api/pipeline/run` | Run full pipeline |
-| GET | `/api/pipeline/stats` | Get pipeline stats |
+| GET | `/api/graph/stats` | Counts: notes, triples, clusters |
+| GET | `/api/notes?q=` | Hybrid search over notes |
+| POST | `/api/ask` | GraphRAG answer with citations |
+| GET | `/api/paths?source=&target=` | Shortest path between entities |
 
 **Best for:** LangChain, AutoGPT, custom agents, multi-language support
 
@@ -301,7 +304,7 @@ class BrahmastraTools:
         """Search for entities in the knowledge graph"""
         try:
             resp = requests.get(
-                f"{BrahmastraTools.BASE_URL}/api/entities/search",
+                f"{BrahmastraTools.BASE_URL}/api/entities",
                 params={"q": query},
                 timeout=5
             )
@@ -356,10 +359,12 @@ class BrahmastraTools:
         """Get conflicting facts in the knowledge graph"""
         try:
             resp = requests.get(
-                f"{BrahmastraTools.BASE_URL}/api/graph/contradictions",
+                # Contradictions travel inside the cached graph payload;
+                # there is no separate endpoint for them.
+                f"{BrahmastraTools.BASE_URL}/api/graph",
                 timeout=5
             )
-            contradictions = resp.json().get("contradictions", [])
+            contradictions = resp.json().get("stats", {}).get("contradictions", [])
             if not contradictions:
                 return "No contradictions found."
             
@@ -472,7 +477,7 @@ BASE_URL = "http://localhost:8001"
 @tool
 def search_knowledge(query: str) -> str:
     """Search Brahmastra knowledge graph for entities"""
-    resp = requests.get(f"{BASE_URL}/entities/search", params={"q": query})
+    resp = requests.get(f"{BASE_URL}/entities", params={"q": query})
     results = resp.json().get("results", [])
     return "\n".join([f"- {r['name']}" for r in results[:5]])
 
@@ -541,7 +546,7 @@ const tools = {
   search_entity: {
     description: "Search Brahmastra entities",
     parameters: { /* ... */ },
-    execute: async (params) => fetch("http://localhost:8001/entities/search", ...)
+    execute: async (params) => fetch("http://localhost:8001/entities?q=...", ...)
   }
 };
 ```

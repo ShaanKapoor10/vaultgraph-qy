@@ -200,8 +200,15 @@ services:
     restart: unless-stopped
     ports:
       # Published so migrations and the MCP server can reach it from the host.
-      # Change the LEFT number if a native Postgres already holds 5432.
-      - "${POSTGRES_PORT_HOST:-5432}:5432"
+      #
+      # 5433, not 5432, because a native PostgreSQL install takes 5432 and
+      # Windows lets BOTH processes bind 0.0.0.0:5432 without an error. The
+      # first binder wins, so Docker's mapping becomes a silent no-op: the
+      # containers still talk over the compose network and look perfectly
+      # healthy, while anything on the host that connects to localhost:5432
+      # reaches the OTHER database -- one with no pgvector and none of your
+      # notes. Nothing anywhere reports a conflict.
+      - "${POSTGRES_PORT_HOST:-5433}:5432"
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmastra}

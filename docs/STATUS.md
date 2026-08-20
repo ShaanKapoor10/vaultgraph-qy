@@ -218,8 +218,11 @@ for anything long-lived.
 - **Deployment** — to happen on its own branch, not this one.
 - **Per-workspace ontology** — the hook exists (`ontology` field, all set to `default`), the
   behaviour does not.
-- **Docs reference endpoints that do not exist**: `/entities/search`, `/entities/{id}`,
-  `/graph/contradictions`, `/pipeline/stats`.
+- ~~**Docs reference endpoints that do not exist**~~ — resolved. `/entities` and
+  `/entities/{name}` were implemented rather than deleted from the docs: without
+  them the REST API had no way to ask about an entity at all, which MCP could.
+  `/pipeline/stats` was corrected to `/graph/stats`, and contradictions travel
+  inside `GET /graph` rather than having a route of their own.
 
 ### Next level for checkpointing
 Ordered by value; detail in `docs/CHECKPOINTING_DESIGN.md` §6.

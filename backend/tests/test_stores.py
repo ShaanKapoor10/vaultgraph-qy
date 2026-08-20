@@ -392,3 +392,82 @@ def test_pipeline_runs_sync_when_only_a_per_workspace_source_exists(monkeypatch)
     monkeypatch.setenv("BRAHMASTRA_WORKSPACE", "apollo")
     reset_store()
     assert _missing_notion_config(need_database=True), "no source anywhere -> skip"
+
+
+def test_the_same_fact_from_one_note_is_stored_once():
+    """
+    Neo4j MERGEs :ASSERTS on (relation, sourceNoteId), so re-extracting a note
+    collapses repeats. SQLite had no such constraint and every repeat became a
+    row: 742 triples here against 623 there for identical data, so the two
+    backends disagreed about their own counts and neither could be trusted
+    without knowing which store produced it.
+    """
+    from brahmastra import db
+    db.upsert_note("n1", "T", "C")
+    fact = {
+        "subject_text": "Brahmastra", "subject_type": "concept",
+        "relation": "has_component", "object_text": "llm.py",
+        "object_type": "concept", "confidence": 0.9, "source_note_id": "n1",
+    }
+    # The extractor genuinely emits the same fact twice from one note.
+    db.insert_triples([fact, dict(fact)])
+    assert len(db.get_all_triples()) == 1
+
+    # And a re-extraction must not accumulate either.
+    db.insert_triples([dict(fact)])
+    assert len(db.get_all_triples()) == 1
+
+
+def test_the_same_fact_from_a_different_note_is_kept():
+    """
+    Uniqueness is per NOTE, not global. Two notes independently asserting a
+    fact is corroboration, and collapsing them would erase the evidence that
+    provenance and contradiction detection rely on.
+    """
+    from brahmastra import db
+    db.upsert_note("n1", "T", "C")
+    db.upsert_note("n2", "T", "C")
+    base = {
+        "subject_text": "Sarah", "subject_type": "person",
+        "relation": "reports_to", "object_text": "Mei",
+        "object_type": "person", "confidence": 0.9,
+    }
+    db.insert_triples([
+        {**base, "source_note_id": "n1"},
+        {**base, "source_note_id": "n2"},
+    ])
+    assert len(db.get_all_triples()) == 2
+
+
+def test_an_existing_database_is_deduplicated_when_the_constraint_arrives(tmp_path, monkeypatch):
+    """
+    The index cannot simply be added: creating it fails on exactly the
+    databases that need it. Existing rows are collapsed first.
+    """
+    import sqlite3
+    import importlib
+
+    path = tmp_path / "legacy.db"
+    monkeypatch.setenv("BRAHMASTRA_DB", str(path))
+    import brahmastra.db as db_mod
+    importlib.reload(db_mod)
+    db_mod.init_db()
+
+    # Write duplicates behind the store's back, as the old code path did.
+    raw = sqlite3.connect(path)
+    raw.execute("DROP INDEX IF EXISTS idx_triples_unique")
+    for _ in range(3):
+        raw.execute(
+            "INSERT INTO raw_triples (workspace_id, subject_text, subject_type, "
+            "relation, object_text, object_type, confidence, source_note_id, "
+            "extracted_at) VALUES ('default','A','concept','related_to','B',"
+            "'concept',1.0,'n1','2026-01-01')"
+        )
+    raw.commit()
+    assert raw.execute("select count(*) from raw_triples").fetchone()[0] == 3
+    raw.close()
+
+    importlib.reload(db_mod)
+    db_mod.init_db()          # migration runs here
+
+    assert len(db_mod.get_all_triples()) == 1, "legacy duplicates must be collapsed"

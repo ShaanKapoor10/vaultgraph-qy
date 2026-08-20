@@ -179,6 +179,7 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE notes ADD COLUMN publish INTEGER NOT NULL DEFAULT 0")
     if "notion_page_id" not in have:
         conn.execute("ALTER TABLE notes ADD COLUMN notion_page_id TEXT")
+    _dedupe_and_constrain_triples(conn)
     if "extraction_error" not in have:
         # Status alone said a note failed but never why. Diagnosing one meant
         # re-running extraction by hand to see the exception, by which point a
@@ -199,6 +200,38 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
         conn.execute(
             "UPDATE notes SET source = 'checkpoint' WHERE id LIKE 'checkpoint-%'"
         )
+
+
+def _dedupe_and_constrain_triples(conn: sqlite3.Connection) -> None:
+    """
+    Make a fact-from-a-note unique, the way Neo4j already does.
+
+    Neo4j MERGEs :ASSERTS on (relation, sourceNoteId) between two mentions, so
+    re-extracting a note collapses repeats. SQLite had no such constraint, so
+    every repeat became a row -- 742 triples here against 623 there for the
+    same data, which meant the two backends disagreed about their own counts
+    and neither number could be trusted without checking which store produced it.
+
+    Existing rows are deduplicated before the index is created, or adding it
+    would fail on precisely the databases that need it. The surviving row is
+    the lowest id: duplicates arrive within a single extraction batch, so they
+    are identical apart from that.
+    """
+    if any(r[1] == "idx_triples_unique" for r in conn.execute(
+            "PRAGMA index_list(raw_triples)")):
+        return
+    conn.execute(
+        """
+        DELETE FROM raw_triples WHERE id NOT IN (
+            SELECT MIN(id) FROM raw_triples
+            GROUP BY workspace_id, subject_text, relation, object_text, source_note_id
+        )
+        """
+    )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_unique ON raw_triples("
+        "workspace_id, subject_text, relation, object_text, source_note_id)"
+    )
 
 
 def _migrate_to_workspaces(conn: sqlite3.Connection) -> None:
@@ -618,7 +651,12 @@ class SQLiteStore(GraphStore):
         with self._connect() as conn:
             conn.executemany(
                 """
-                INSERT INTO raw_triples
+                -- OR IGNORE, matching Neo4j's MERGE on (relation, sourceNoteId).
+                -- The extractor sometimes emits the same fact twice from one
+                -- note, and without this each copy became a row: 742 triples in
+                -- SQLite against 623 in Neo4j for identical data, so the two
+                -- backends disagreed on their own counts.
+                INSERT OR IGNORE INTO raw_triples
                     (workspace_id, subject_text, subject_type, relation, object_text,
                      object_type, confidence, source_quote, source_note_id, extracted_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
