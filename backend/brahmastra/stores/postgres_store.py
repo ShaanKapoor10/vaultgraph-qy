@@ -142,6 +142,7 @@ class PostgresStore(GraphStore):
         self._dsn = dsn_override or dsn()
         self._conn = None
         self._has_vector: bool | None = None
+        self._extensions_ready = False
 
     # -- connection --------------------------------------------------------
 
@@ -195,6 +196,32 @@ class PostgresStore(GraphStore):
 
     # -- capabilities ------------------------------------------------------
 
+    def _ensure_extensions(self) -> None:
+        """
+        Install the extensions this store needs. Idempotent, once per process.
+
+        Called from has_vector() rather than only from init_schema() because of
+        the ORDER things happen in: the store factory builds CompositeStore,
+        which asks about capabilities, and only afterwards does anything call
+        init_schema(). Against a fresh database that meant the capability check
+        ran before `CREATE EXTENSION vector` ever had, so pgvector looked
+        absent and the composite refused to build -- `docker compose up` failed
+        on first boot every time, with an error blaming the image for lacking
+        an extension it actually had.
+
+        Failure is not fatal: a restricted user simply cannot install it, and
+        capabilities() then reports lexical-only, which is true.
+        """
+        if self._extensions_ready:
+            return
+        self._extensions_ready = True
+        for ext in ("vector", "pg_trgm"):
+            try:
+                with self._connect().cursor() as cur:
+                    cur.execute(f"CREATE EXTENSION IF NOT EXISTS {ext}")
+            except Exception:
+                continue
+
     def has_vector(self) -> bool:
         """
         Whether pgvector is installed. Cached: it cannot change mid-process.
@@ -205,6 +232,7 @@ class PostgresStore(GraphStore):
         """
         if self._has_vector is None:
             try:
+                self._ensure_extensions()
                 with self._connect().cursor() as cur:
                     cur.execute("SELECT 1 AS ok FROM pg_extension WHERE extname = 'vector'")
                     self._has_vector = cur.fetchone() is not None
@@ -228,16 +256,12 @@ class PostgresStore(GraphStore):
     # -- lifecycle ---------------------------------------------------------
 
     def init_schema(self) -> None:
+        # Extensions first: the vector column below depends on one. Shared with
+        # has_vector() so a capability check on a fresh database installs them
+        # too -- the factory asks about capabilities before anything calls this.
+        self._ensure_extensions()
         conn = self._connect()
         with conn.cursor() as cur:
-            # Extensions first: the vector column below depends on one.
-            for ext in ("vector", "pg_trgm"):
-                try:
-                    cur.execute(f"CREATE EXTENSION IF NOT EXISTS {ext}")
-                except Exception:
-                    # Not superuser, or the extension is unavailable. The store
-                    # still works; capabilities() will report the truth.
-                    conn.rollback() if not conn.autocommit else None
             cur.execute(SCHEMA)
 
             if self.has_vector():

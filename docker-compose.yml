@@ -1,19 +1,31 @@
-# Brahmastra — full stack, SQLite by default.
+# Brahmastra - full stack.
 #
 #   docker compose up --build
 #   dashboard  http://localhost:3000
 #   api        http://localhost:8001/health/ready
 #
-# The default profile deploys with SQLite, because it is a legitimate
-# production choice for this system: one writer, modest data (a 900 KB
-# database at 55 notes), and no second service to operate. What it requires is
-# a PERSISTENT VOLUME and a SINGLE WORKER — both are configured below, and
-# both are easy to lose by accident, which is the entire risk.
+# The default arrangement separates the two kinds of data, because they are not
+# owed the same care. Notes and workspaces are the SYSTEM OF RECORD: they cannot
+# be recomputed, and they live in Postgres, which is networked (several machines,
+# one source of truth) and supports hybrid search. Triples, clusters and the
+# cached graph are a CACHE -- every one is a function of the notes, and
+# run_pipeline(full=True) rebuilds them -- so they live in the Neo4j engine,
+# which can be replaced or rebuilt without risking anything irreplaceable.
 #
-# To run against Neo4j instead:
-#   docker compose --profile neo4j up --build
-# which starts a local Neo4j and points the backend at it. For Aura, leave the
-# profile off and set NEO4J_URI / NEO4J_USER / NEO4J_PASSWORD in .env.
+# Both backing services start by default. Gating either behind a profile while
+# the backend defaults to it would ship a configuration pointing at something
+# nobody started.
+#
+# To use Aura instead of the local engine, set NEO4J_URI / NEO4J_USER /
+# NEO4J_PASSWORD (Aura's username is the instance id, not "neo4j") and skip the
+# local container with `docker compose up --scale neo4j=0`.
+#
+# The single-store SQLite arrangement still works -- NOTE_BACKEND= and
+# GRAPH_BACKEND=sqlite -- and is fine locally. It is not what to deploy: the
+# system of record becomes one file on one container's disk, discarded on
+# redeploy unless it is on a volume, invisible to a second instance, and
+# lexical-only, so hybrid search silently degrades to substring matching.
+# /health/ready warns when it finds that arrangement.
 
 services:
   backend:
@@ -24,10 +36,14 @@ services:
     ports:
       - "8001:8001"
     depends_on:
-      # Wait for the system of record to be ACCEPTING CONNECTIONS, not merely
-      # started. A container that is up but still initialising would have the
-      # backend's first note write fail on an empty database.
+      # Wait for both stores to be ACCEPTING CONNECTIONS, not merely started.
+      # A container that is up but still initialising fails the first call
+      # against it: Postgres refuses the connection, and Neo4j -- which takes
+      # roughly 40s to elect itself -- raises "Unable to retrieve routing
+      # information" and takes the whole startup down with it.
       postgres:
+        condition: service_healthy
+      neo4j:
         condition: service_healthy
     environment:
       # ---- storage -------------------------------------------------------
@@ -54,9 +70,13 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-brahmastra}
 
       # ---- neo4j (ignored when GRAPH_BACKEND=sqlite) ----------------------
-      NEO4J_URI: ${NEO4J_URI:-}
-      NEO4J_USER: ${NEO4J_USER:-}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+      # Defaults to the service beside it, so `up` yields a working stack.
+      # Aura users override all three; note Aura's username is the instance id,
+      # not "neo4j", and the URI must be bare neo4j:// -- the +s schemes lock
+      # TLS config and forbid the certifi context this machine needs.
+      NEO4J_URI: ${NEO4J_URI:-neo4j://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-brahmastra}
 
       # ---- language model ------------------------------------------------
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
@@ -140,9 +160,13 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-brahmastra}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-brahmastra}
       POSTGRES_DB: ${POSTGRES_DB:-brahmastra}
-      NEO4J_URI: ${NEO4J_URI:-}
-      NEO4J_USER: ${NEO4J_USER:-}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-}
+      # Defaults to the service beside it, so `up` yields a working stack.
+      # Aura users override all three; note Aura's username is the instance id,
+      # not "neo4j", and the URI must be bare neo4j:// -- the +s schemes lock
+      # TLS config and forbid the certifi context this machine needs.
+      NEO4J_URI: ${NEO4J_URI:-neo4j://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-brahmastra}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-}
@@ -156,6 +180,8 @@ services:
       backend:
         condition: service_started
       postgres:
+        condition: service_healthy
+      neo4j:
         condition: service_healthy
 
   # The system of record (NOTE_BACKEND=postgres, the deployed default).
@@ -191,26 +217,41 @@ services:
       retries: 10
       start_period: 20s
 
-  # Optional local Neo4j, for trying the other backend without Aura.
-  #   docker compose --profile neo4j up --build
+  # The graph engine. Not profiled, for the same reason postgres is not: the
+  # backend defaults to GRAPH_BACKEND=neo4j, so gating this would ship a
+  # default configuration pointing at an engine nobody started -- `up` would
+  # resolve NEO4J_URI to the empty string and fail on the first graph call.
+  #
+  # Point NEO4J_URI at Aura to use the hosted instance instead; this service
+  # then just idles, or skip it with `docker compose up --scale neo4j=0`.
   neo4j:
-    profiles: ["neo4j"]
     image: neo4j:5-community
     restart: unless-stopped
     ports:
       - "7474:7474"   # browser
       - "7687:7687"   # bolt
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_LOCAL_PASSWORD:-brahmastra}
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-brahmastra}
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j-data:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null || exit 1"]
-      interval: 15s
+      # Probes BOLT, not the browser on 7474. HTTP answers well before Bolt is
+      # serving, so the old check reported healthy while the driver still got
+      # "Unable to retrieve routing information" -- and because the backend
+      # gates on this, it started too early and died. Running an actual query
+      # also proves auth is initialised, which a port check cannot.
+      #
+      # The password is interpolated by COMPOSE (single $), not read from the
+      # container's environment. The neo4j image turns every NEO4J_* variable
+      # into a server config setting, so passing NEO4J_PASSWORD in produced an
+      # unrecognised setting named PASSWORD and the server refused to boot at
+      # all -- a healthcheck that prevented the thing it was checking.
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-brahmastra} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      interval: 10s
       timeout: 10s
-      retries: 10
-      start_period: 40s
+      retries: 15
+      start_period: 30s
 
 volumes:
   brahmastra-data:

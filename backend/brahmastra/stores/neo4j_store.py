@@ -227,16 +227,42 @@ class Neo4jStore(GraphStore):
         import certifi
         return ssl.create_default_context(cafile=certifi.where())
 
+    def _encrypted(self) -> bool:
+        """
+        Whether to negotiate TLS at all.
+
+        Aura requires it; a local container speaks plaintext and rejects the
+        handshake. Forcing the SSL context unconditionally is why `docker
+        compose up` could not reach its own neo4j service -- the failure
+        surfaced as "Unable to retrieve routing information", which reads like
+        the server being absent rather than a TLS mismatch, and a driver
+        created by hand in the same container connected fine.
+
+        Inferred from the host so neither case needs configuring: a hostname
+        that is local to the deployment is plaintext, anything else is not.
+        NEO4J_ENCRYPTED=0/1 overrides when the guess is wrong.
+        """
+        override = os.environ.get("NEO4J_ENCRYPTED", "").strip().lower()
+        if override in ("0", "false", "no", "off"):
+            return False
+        if override in ("1", "true", "yes", "on"):
+            return True
+        host = (self._uri or "").split("//", 1)[-1].split(":", 1)[0].split("/", 1)[0]
+        local = host in ("localhost", "127.0.0.1", "::1", "neo4j", "host.docker.internal")
+        return not local
+
     @property
     def driver(self):
         if self._driver is None:
             from neo4j import GraphDatabase
             # A bare neo4j:// scheme (not neo4j+s://) because the +s schemes
             # lock TLS config and forbid supplying our own ssl_context.
-            kwargs: dict[str, Any] = {
-                "auth": (self._user, self._password),
-                "ssl_context": self._ssl_context(),
-            }
+            kwargs: dict[str, Any] = {"auth": (self._user, self._password)}
+            # Only supply an SSL context when TLS is actually in play. Passing
+            # one to a plaintext server does not downgrade gracefully -- the
+            # handshake fails and the driver reports it as a routing problem.
+            if self._encrypted():
+                kwargs["ssl_context"] = self._ssl_context()
             # Silence DEPRECATION notices. 5.27-aura reports
             # db.index.vector.queryNodes as "replaced by SEARCH", but the
             # SEARCH clause is a syntax error on this version — the notice is

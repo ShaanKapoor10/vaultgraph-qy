@@ -60,7 +60,13 @@ ENV PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/model-cache \
     # Defaults a deploy can override. The database lives on the mounted volume,
     # never in the image layer, or every redeploy would discard the graph.
-    GRAPH_BACKEND=sqlite \
+    #
+    # GRAPH_BACKEND is deliberately NOT set here. Baking `sqlite` in made the
+    # image's own default contradict the deployed one, so anything running this
+    # image without compose -- a `docker run`, a platform that ignores compose
+    # -- silently got a single-file store instead of the engine. The store
+    # factory already defaults to sqlite when it is unset, so leaving it out
+    # loses nothing and stops the image asserting an answer it should not have.
     BRAHMASTRA_DB=/data/concept_graph.db \
     BRAHMASTRA_CHECKPOINT_DIR=/data/checkpoints \
     PORT=8001

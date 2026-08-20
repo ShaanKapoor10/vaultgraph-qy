@@ -22,7 +22,26 @@ class NoteCreate(BaseModel):
 
 
 @router.get("")
-async def list_notes(status: str | None = None) -> list[dict[str, Any]]:
+async def list_notes(
+    status: str | None = None,
+    q: str | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """
+    List notes, or search them when `q` is given.
+
+    Search was reachable only over MCP until now: this route accepted `?q=` in
+    the sense that FastAPI ignored it, returning every note in last_edited
+    order. That looks exactly like a search returning everything as a weak
+    match, so the flagship feature appeared present and broken rather than
+    absent.
+
+    Results come back in RELEVANCE order and must not be re-sorted -- on the
+    hybrid backends this is the fused BM25-plus-vector ranking, and reordering
+    by date discards the entire point of it.
+    """
+    if q and q.strip():
+        return db.search_notes(q, limit=limit)
     return db.get_notes(status=status)
 
 

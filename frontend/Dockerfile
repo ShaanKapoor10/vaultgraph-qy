@@ -1,9 +1,15 @@
 # Brahmastra frontend — Next.js dashboard.
 #
-# The rewrite in next.config.mjs proxies /api/* to the backend, so BACKEND_URL
-# must be readable AT RUNTIME, not baked in at build. That is why it is an ENV
-# here and not a build ARG: the same image then runs against a local backend,
-# a staging one, and production.
+# The route handler in app/api/[...path] proxies /api/* to the backend, so
+# BACKEND_URL must be readable AT RUNTIME, not baked in at build. That is why
+# it is an ENV here and not a build ARG: the same image then runs against a
+# local backend, a staging one, and production.
+#
+# The pnpm version is pinned by `packageManager` in package.json, and corepack
+# honours it. Leaving it unpinned made this image depend on whatever pnpm was
+# newest at build time: it broke without a single line changing here when pnpm
+# 11 shipped, because that release requires Node >= 22.13 for `node:sqlite`
+# while this base is Node 20. Bump the base image and the pin together.
 
 FROM node:20-slim AS deps
 WORKDIR /app
@@ -37,6 +43,15 @@ COPY --from=builder /app/public ./public
 
 USER nextjs
 EXPOSE 3000
+
+# Next's standalone server binds to whatever HOSTNAME says, and Docker sets
+# HOSTNAME to the container id. Left alone it therefore listened only on the
+# container's own eth0 address: published traffic worked, so the dashboard
+# looked fine, while the loopback healthcheck below got ECONNREFUSED and the
+# container sat permanently unhealthy. Anything gating on that health -- a
+# depends_on, a load balancer, a platform's deploy check -- would refuse to
+# proceed against a server that was serving perfectly.
+ENV HOSTNAME=0.0.0.0
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000),r=>process.exit(r.statusCode<500?0:1)).on('error',()=>process.exit(1))"
 
