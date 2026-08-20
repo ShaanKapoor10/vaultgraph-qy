@@ -13,13 +13,9 @@ from pathlib import Path
 
 # Load .env so GROQ_API_KEY / ANTHROPIC_API_KEY are available when the
 # server is started directly with uvicorn (outside of the MCP process).
-_ENV = Path(__file__).resolve().parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass  # python-dotenv not installed — rely on shell env
+from brahmastra.env import load_env
+
+load_env()
 
 from typing import Any
 

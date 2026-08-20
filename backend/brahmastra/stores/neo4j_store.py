@@ -46,15 +46,11 @@ from brahmastra.workspace import (
 )
 
 # Load backend/.env so NEO4J_* are present no matter which entrypoint imports
-# us (server, CLI, migration script, MCP server). Same pattern as llm.py.
-# load_dotenv does not override already-set vars, so tests keep control.
-_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass
+# us (server, CLI, migration script, MCP server). Routed through env.py so
+# the suite can switch every one of these reads off at once.
+from brahmastra.env import load_env
+
+load_env()
 
 # The closed set of relation names is the injection boundary: relationship
 # types cannot be parameterised in Cypher, so every type we interpolate must

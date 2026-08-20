@@ -22,12 +22,9 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-# Load .env so keys are available when invoked via MCP client
-_HERE = Path(__file__).resolve().parent.parent
-_ENV = _HERE / ".env"
-if _ENV.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_ENV)
+from brahmastra.env import load_env
+
+load_env()
 
 from mcp.server.fastmcp import FastMCP
 from brahmastra import db

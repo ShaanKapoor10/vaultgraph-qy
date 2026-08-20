@@ -24,13 +24,9 @@ from pathlib import Path
 from typing import Any
 
 # Ensure NOTION_TOKEN is available regardless of entrypoint
-_ENV = Path(__file__).resolve().parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 from brahmastra import db
 

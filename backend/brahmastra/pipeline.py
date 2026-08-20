@@ -26,13 +26,9 @@ from brahmastra import db
 # Notion pull for "NOTION_TOKEN not set" and then — after the extract stage
 # imported llm and pulled .env in — happily push pages in the write-back stage
 # of the SAME run. Observed exactly that: sync skipped, writeback pushed 3.
-_ENV = Path(__file__).resolve().parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)  # never overrides an already-set var, so tests keep control
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 # Cross-process lock so the backend "run pipeline" button and the live_sync
 # watcher can't run the pipeline simultaneously (concurrent SQLite writers

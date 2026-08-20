@@ -62,9 +62,17 @@ def test_store_module_reads_dotenv():
     from brahmastra import stores
 
     src = inspect.getsource(stores)
-    assert "load_dotenv" in src, (
+    assert "load_env()" in src, (
         "stores/__init__.py must load .env itself; every other process relies "
         "on it to agree where the database is"
+    )
+    # Through brahmastra.env, not load_dotenv directly. Ten modules each called
+    # dotenv themselves, and the suite's isolation then depended on every test
+    # remembering to set (never delete) every storage variable -- which failed,
+    # and sent tests to the production Postgres. One loader, one off-switch.
+    assert "load_dotenv" not in src, (
+        "read .env via brahmastra.env.load_env(), or BRAHMASTRA_NO_DOTENV stops "
+        "covering this module and the suite can reach live infrastructure again"
     )
 
 

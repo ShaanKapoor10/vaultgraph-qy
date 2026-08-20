@@ -32,13 +32,9 @@ from pathlib import Path
 
 # Load backend/.env so config is present no matter which entrypoint imports
 # us (server, CLI, MCP server, a fresh `python -c`).
-_ENV = Path(__file__).resolve().parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 
 def _env(name: str, default: str) -> str:

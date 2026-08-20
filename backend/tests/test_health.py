@@ -81,6 +81,7 @@ def test_readiness_is_503_when_the_store_is_unreachable(client, monkeypatch):
     assert "Failed to DNS resolve" in body["error"], "must say what went wrong"
 
 
+@pytest.mark.config_only
 def test_readiness_names_the_system_of_record(monkeypatch, client):
     """
     `backend` alone stopped being the whole answer once notes and the graph
@@ -121,6 +122,7 @@ def test_a_sqlite_system_of_record_is_flagged_but_still_serves(monkeypatch, clie
     )
 
 
+@pytest.mark.config_only
 def test_a_postgres_system_of_record_raises_no_warning(monkeypatch, client):
     monkeypatch.setenv("GRAPH_BACKEND", "neo4j")
     monkeypatch.setenv("NOTE_BACKEND", "postgres")

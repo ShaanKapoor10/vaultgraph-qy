@@ -26,13 +26,9 @@ from brahmastra.stores.sqlite_store import SQLiteStore
 # The backend name must resolve the same way whether the caller is uvicorn, the
 # MCP server, a hook, the CLI or a bare `python -c`, and .env is the one place
 # they can all agree on.
-_ENV = Path(__file__).resolve().parent.parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)  # never overrides an already-set var; tests keep control
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 _store: GraphStore | None = None
 _store_backend: tuple[str, str] | None = None

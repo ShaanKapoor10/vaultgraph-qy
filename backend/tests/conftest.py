@@ -1,63 +1,110 @@
 """
 Suite-wide isolation.
 
-The tests already point BRAHMASTRA_DB at a temp file and clear the Notion and
-LLM credentials, because they once ran against the production database and
-pushed to the real Notion workspace. Session checkpointing added a third piece
-of real state they can reach: the capture queue on disk.
+The tests point BRAHMASTRA_DB at a temp file and clear the Notion and LLM
+credentials, because they once ran against the production database and pushed
+to the real Notion workspace. Session checkpointing added a third piece of real
+state they could reach: the capture queue on disk.
 
 That one is worse than it looks. `run_pipeline` drains the queue, so a test
 calling it distils a genuine conversation into a throwaway database and then
 DELETES the capture — the queue file is removed once its note is stored, and
 the note lives in a temp file that vanishes at teardown. It only failed loudly
 here because the suite clears the API keys, leaving no LLM to distil with.
+
+The fourth was backend/.env itself, and it is the reason for the belt AND
+braces below. Ten modules used to call load_dotenv at import; each was correct
+that dotenv "never overrides an already-set var", and each was undone by the
+half nobody wrote down: dotenv DOES fill in a variable that is absent. Deleting
+a variable therefore armed it rather than disarming it, and any
+`importlib.reload()` — which many tests do — pulled the developer's real
+configuration back in and sent the test to the production Postgres. It passed
+for as long as that database happened to have nothing pending.
+
+So there are now three independent defences, because this failure mode has
+recurred three times and each previous fix was also "careful enough":
+
+  1. BRAHMASTRA_NO_DOTENV stops the file being read AT ALL, in one place,
+     covering every variable that exists now or is added later.
+  2. The storage variables are SET to empty rather than deleted, so even a
+     module that somehow loads .env finds them already present.
+  3. `_refuse_real_infrastructure` fails the test outright if the resolved
+     database is the production one — catching any future route in, including
+     ones nobody has thought of.
 """
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 import pytest
+
+# The database the developer actually uses. Nothing in the suite may touch it.
+PRODUCTION_DB = (
+    Path(__file__).resolve().parent.parent / "data" / "concept_graph.db"
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_storage_choice(monkeypatch):
     """
-    Decide the backend here, not in backend/.env.
+    Decide configuration here, not in backend/.env.
 
-    `stores/__init__.py` loads that file, so whatever a developer happens to
-    have configured became the suite's backend. That was harmless while it said
-    sqlite; the moment it named the deployed arrangement, tests started
-    building a CompositeStore against a real Postgres and a real Neo4j, and
-    seven of them failed on the wrong error entirely.
-
-    This is the same class of leak as the ones already guarded here -- the
-    suite once ran against the production database and pushed to the real
-    Notion workspace. A test that reaches live infrastructure because of a
-    local config file is not a test.
-
-    Tests that WANT another backend set it themselves; monkeypatch restores
-    these afterwards either way.
+    Tests that want another backend set it themselves; monkeypatch restores
+    all of this afterwards either way.
     """
-    # SET to empty, never DELETE. Several modules call load_dotenv(backend/.env)
-    # at import, and python-dotenv does not override a variable that is already
-    # present -- but it happily fills in one that is absent. So deleting these
-    # left every importlib.reload() free to re-inject the developer's real
-    # configuration, and a test that reloads a module (many do) went straight
-    # back to the production Postgres.
-    #
-    # That hole was live and silent: the suite passed only because the real
-    # database happened to have nothing pending, and started failing the moment
-    # it did. An empty value is falsy everywhere it is read, so it survives the
-    # reload and still means "single store, sqlite".
+    # Defence 1: the file is not read at all.
+    monkeypatch.setenv("BRAHMASTRA_NO_DOTENV", "1")
+
+    # Defence 2: present-but-empty, so a stray load finds nothing to fill in.
+    # Empty is falsy everywhere these are read, and means "single store, sqlite".
     monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
     monkeypatch.setenv("NOTE_BACKEND", "")
     monkeypatch.setenv("POSTGRES_DSN", "")
     monkeypatch.setenv("DATABASE_URL", "")
 
 
+@pytest.fixture(autouse=True)
+def _refuse_real_infrastructure(request, _isolate_storage_choice):
+    """
+    Fail the test if it resolved the production database.
+
+    Defence 3, and the only one that does not depend on predicting HOW a leak
+    happens. The previous two both guard a known mechanism; this one checks the
+    outcome, so a future route into real data fails on the test that opened it
+    rather than on whichever unlucky test runs when the data changes.
+
+    Checked after the test body, because a test may reconfigure mid-run — which
+    is exactly how the reload leak worked.
+
+    `@pytest.mark.config_only` opts out of the NOTE_BACKEND check, for tests
+    that set it to exercise how configuration is REPORTED without ever building
+    a store. The marker is deliberately explicit: it makes "this test names a
+    real backend on purpose" a visible claim rather than an accident.
+    """
+    declared_config_only = request.node.get_closest_marker("config_only") is not None
+    yield
+
+    db_path = os.environ.get("BRAHMASTRA_DB", "")
+    if db_path and Path(db_path).resolve() == PRODUCTION_DB:
+        pytest.fail(
+            f"this test resolved the PRODUCTION database at {PRODUCTION_DB}. "
+            "Point BRAHMASTRA_DB at tmp_path. The suite has reached live data "
+            "three times before; see tests/conftest.py."
+        )
+    if os.environ.get("NOTE_BACKEND", "").strip() and not declared_config_only:
+        pytest.fail(
+            "this test left NOTE_BACKEND set, so it may have been talking to a "
+            "real note store. Something re-loaded backend/.env — check the "
+            "module uses brahmastra.env.load_env() rather than load_dotenv. If "
+            "the test only exercises how configuration is REPORTED and never "
+            "builds a store, mark it @pytest.mark.config_only."
+        )
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _isolate_checkpoint_queue(tmp_path_factory):
     """Redirect the capture queue away from backend/data/checkpoints."""
-    import os
-
     queue = tmp_path_factory.mktemp("checkpoints")
     previous = os.environ.get("BRAHMASTRA_CHECKPOINT_DIR")
     os.environ["BRAHMASTRA_CHECKPOINT_DIR"] = str(queue)

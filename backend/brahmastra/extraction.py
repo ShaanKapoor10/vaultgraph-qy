@@ -26,13 +26,9 @@ from typing import Any
 # entrypoint runs extraction (pipeline, CLI, fresh `python -c`, tests).
 # Without this, a bare `python -c "run_pipeline()"` would miss the config and
 # fall through to the flaky auto-detect path.
-_ENV = Path(__file__).resolve().parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 from brahmastra import db
 from brahmastra.ontology import (

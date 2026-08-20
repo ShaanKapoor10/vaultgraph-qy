@@ -27,12 +27,9 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
-# Load .env from backend directory
-_HERE = Path(__file__).resolve().parent.parent
-_ENV_FILE = _HERE / ".env"
-if _ENV_FILE.exists():
-    from dotenv import load_dotenv
-    load_dotenv(_ENV_FILE)
+from brahmastra.env import load_env
+
+load_env()
 
 app = typer.Typer(
     name="brahmastra",

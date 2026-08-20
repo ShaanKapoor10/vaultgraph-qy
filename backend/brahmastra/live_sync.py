@@ -24,13 +24,9 @@ from datetime import datetime
 from pathlib import Path
 
 # Ensure env is loaded no matter how this is launched
-_ENV = Path(__file__).resolve().parent.parent / ".env"
-if _ENV.exists():
-    try:
-        from dotenv import load_dotenv
-        load_dotenv(_ENV)
-    except ImportError:
-        pass
+from brahmastra.env import load_env
+
+load_env()
 
 from brahmastra import db
 
