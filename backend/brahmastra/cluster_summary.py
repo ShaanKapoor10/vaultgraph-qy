@@ -85,6 +85,16 @@ def summarise_clusters(
         members = cluster["members"]
         if len(members) < MIN_CLUSTER_SIZE:
             continue
+        # Already summarised, and its membership has not changed since --
+        # concept_graph carries such summaries across the rebuild, keyed on who
+        # is in the cluster. Regenerating would spend an LLM call to produce a
+        # description of the same entities. This is what turned a routine
+        # incremental run from ~25 calls into, typically, none: one run of the
+        # pipeline used to exceed a 30-minute timeout on this stage alone.
+        carried = cluster.get("summary")
+        if carried:
+            summaries[cluster["id"]] = carried
+            continue
         member_set = set(members)
         internal_edges = [
             e for e in edges
@@ -119,6 +129,11 @@ def run_cluster_summaries() -> dict[str, Any]:
     if not clusters:
         return {"summarised": 0, "skipped": "no clusters"}
 
+    # Counted BEFORE summarising, because summarise_clusters fills the gaps in.
+    # Reporting only a total would hide the thing worth knowing: whether this
+    # run spent 25 LLM calls or none.
+    carried_in = sum(1 for c in clusters if c.get("summary"))
+
     summaries = summarise_clusters(clusters, edges)
 
     # Merge: every cluster gets a `summary` key (empty string if not generated)
@@ -127,8 +142,15 @@ def run_cluster_summaries() -> dict[str, Any]:
         c["summary"] = summaries.get(c["id"], "")
 
     db.cache_graph(cached["graph"], stats)
+    generated = max(len(summaries) - carried_in, 0)
     return {
         "summarised": len(summaries),
         "clusters_total": len(clusters),
-        "llm_used": bool(summaries),
+        # Split out because the total says nothing about cost. `generated` is
+        # the LLM calls this run actually paid for; on a run where nothing
+        # changed it should be 0, and a number that stays high run after run
+        # means the carry-forward has stopped matching.
+        "reused": carried_in,
+        "generated": generated,
+        "llm_used": generated > 0,
     }

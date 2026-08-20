@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -222,6 +223,61 @@ def _parse_llm_response(raw_text: str) -> list[dict[str, Any]]:
         raise ValueError(f"LLM returned invalid JSON: {e}\nRaw: {raw_text[:300]}") from e
 
 
+# Groq states how long to wait in the 429 itself: "Please try again in 7.5s",
+# or "in 1m14.2s". Honouring that beats guessing, and guessing is what made
+# retries useless -- 2s + 4s covers about six seconds of a limit the server
+# says needs thirty, so all three attempts land inside the same closed window
+# and the note fails as though the outage were permanent.
+_RETRY_AFTER = re.compile(
+    r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", re.IGNORECASE
+)
+
+# Upper bound on a single in-run wait. Past this, sleeping blocks the whole
+# pipeline for a note that the NEXT run will retry for free -- errored notes are
+# re-queued automatically. Better to fail this note fast and keep going.
+EXTRACT_MAX_BACKOFF = float(os.environ.get("EXTRACT_MAX_BACKOFF", "45"))
+
+
+def _too_large_hint(note_id: str = "") -> str:
+    return (
+        "note is too large for one extraction request. Split it, or lower "
+        "EXTRACTION_MAX_TOKENS / raise the model's context." + (f" ({note_id})" if note_id else "")
+    )
+
+
+def _is_too_large(error: Exception) -> bool:
+    """
+    HTTP 413: the request exceeds what the model accepts.
+
+    Settled, not transient -- waiting cannot make the request smaller. Kept
+    separate from _is_quota_error because the correct response differs: a spent
+    quota means every remaining note will fail and the run should stop, while
+    one oversized note says nothing about the next one.
+    """
+    text = str(error).lower()
+    return "413" in text and ("too large" in text or "request_too_large" in text)
+
+
+def _retry_delay(error: Exception, attempt: int) -> float:
+    """
+    How long to wait before retrying, preferring the server's own instruction.
+
+    Falls back to exponential backoff when the error carries no hint, and
+    always waits at least as long as that fallback: a suspiciously short hint
+    should not make us retry sooner than we otherwise would.
+    """
+    fallback = 2.0 * (attempt + 1)          # 2s, 4s
+    match = _RETRY_AFTER.search(str(error))
+    if not match:
+        return fallback
+    minutes = float(match.group(1) or 0)
+    seconds = float(match.group(2) or 0)
+    # A tenth of a second of slack: waking exactly on the boundary tends to
+    # land just inside the window that is still closed.
+    advised = minutes * 60 + seconds + 0.1
+    return min(max(advised, fallback), EXTRACT_MAX_BACKOFF)
+
+
 def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str, Any]]:
     try:
         from groq import Groq
@@ -272,7 +328,18 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
             # run_extraction stops the whole run on them.
             if _is_quota_exhausted(e) or _is_model_missing(e):
                 raise
-            time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
+            # A 413 is settled too -- waiting cannot make the request smaller,
+            # so three attempts just spend the backoff to fail identically.
+            # Unlike the two above it must NOT stop the run: one oversized note
+            # says nothing about the next one, so this fails just this note and
+            # extraction carries on. Found via extraction_error, which is what
+            # that column was added for -- the failure had been read as a rate
+            # limit until the message was actually recorded.
+            if _is_too_large(e):
+                raise
+            if attempt == 2:
+                break                      # no point sleeping before giving up
+            time.sleep(_retry_delay(e, attempt))
 
     raise RuntimeError(f"Groq extraction failed after 3 attempts: {last}")
 

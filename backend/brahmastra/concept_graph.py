@@ -23,6 +23,44 @@ import networkx as nx
 from brahmastra import db
 from brahmastra.ontology import is_functional
 
+
+def _membership_key(members: list[str]) -> str:
+    """
+    A stable identity for a cluster: exactly who is in it.
+
+    Not the cluster id. Louvain numbers communities per run, so the same set of
+    entities routinely reappears under a different id -- keying on id would
+    hand a cached summary to the wrong cluster, which is worse than paying to
+    regenerate it. Membership changing at all invalidates the summary, which is
+    the correct conservative rule: a summary describes the members it saw.
+    """
+    # Joined on a unit separator, which cannot occur in an entity name. An
+    # empty join would make ["ab", "c"] and ["a", "bc"] the same cluster.
+    return chr(0x1f).join(sorted(members))
+
+
+def _previous_summaries_by_membership() -> dict[str, str]:
+    """
+    Summaries from the last cached graph, keyed by membership.
+
+    Returns empty on any failure -- a missing cache just means everything gets
+    resummarised, which is the old behaviour and merely slow.
+    """
+    try:
+        cached = db.get_cached_graph()
+    except Exception:
+        return {}
+    if not cached:
+        return {}
+    out: dict[str, str] = {}
+    for cluster in (cached.get("stats") or {}).get("concept_clusters") or []:
+        summary = cluster.get("summary")
+        members = cluster.get("members")
+        if summary and members:
+            out[_membership_key(members)] = summary
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Louvain (python-louvain / community package)
 # ---------------------------------------------------------------------------
@@ -289,14 +327,29 @@ def run_build_graph() -> dict[str, Any]:
     for node, cid in partition.items():
         cluster_members[cid].append(node)
 
-    concept_clusters = [
-        {
-            "id": cid,
-            "members": sorted(members),
-            "size": len(members),
-        }
-        for cid, members in sorted(cluster_members.items(), key=lambda x: -len(x[1]))
-    ]
+    # Carry forward the summary of any cluster whose membership is unchanged.
+    #
+    # Summarising costs one LLM call per cluster and used to run for all of
+    # them on every pipeline run, however little had changed -- 25 calls a run,
+    # which is what made a single incremental run exceed a 30-minute timeout.
+    #
+    # This is done HERE, not in cluster_summary, because caching the graph is
+    # what destroys the previous summaries: by the time that stage reads the
+    # cache, it is already looking at the clusters this function just wrote.
+    #
+    # Keyed on membership, never on cluster id. Louvain numbers communities per
+    # run, so the same set of entities routinely comes back under a different
+    # id -- matching on id would reuse summaries for the wrong clusters, which
+    # is far worse than recomputing them.
+    previous = _previous_summaries_by_membership()
+    concept_clusters = []
+    for cid, members in sorted(cluster_members.items(), key=lambda x: -len(x[1])):
+        ordered = sorted(members)
+        cluster = {"id": cid, "members": ordered, "size": len(ordered)}
+        carried = previous.get(_membership_key(ordered))
+        if carried:
+            cluster["summary"] = carried
+        concept_clusters.append(cluster)
 
     # Entity resolution summary for the stats payload
     er_summary = [

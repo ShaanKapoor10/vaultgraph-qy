@@ -341,3 +341,161 @@ def test_a_per_minute_limit_is_retried_but_a_settled_failure_is_not(monkeypatch)
     with pytest.raises(Exception, match="does not exist"):
         extraction._extract_with_groq("T", "C", "key")
     assert calls["n"] == 1, "a retired model must not be retried"
+
+
+# ---------------------------------------------------------------------------
+# Backing off for as long as the server actually asks
+# ---------------------------------------------------------------------------
+
+def test_the_backoff_honours_the_delay_groq_states():
+    """
+    Groq puts the wait in the 429: "Please try again in 7.5s".
+
+    Guessing instead is what made retries useless. A blind 2s + 4s covers about
+    six seconds of a limit the server says needs thirty, so all three attempts
+    land inside the same closed window and the note fails as though the outage
+    were permanent. Observed exactly that: one note failed two consecutive
+    pipeline runs, then succeeded on a direct call minutes later.
+    """
+    from brahmastra.extraction import _retry_delay
+
+    assert _retry_delay(Exception("Rate limit ... Please try again in 7.456s"), 0) == pytest.approx(7.556)
+    # Minutes are parsed too. Kept under EXTRACT_MAX_BACKOFF so this tests the
+    # parsing rather than the cap -- the cap has its own test below.
+    assert _retry_delay(Exception("Rate limit ... Please try again in 0m32s"), 0) == pytest.approx(32.1)
+
+
+def test_a_hint_shorter_than_the_fallback_does_not_shorten_the_wait():
+    """A suspiciously brief hint must not retry sooner than we otherwise would."""
+    from brahmastra.extraction import _retry_delay
+
+    assert _retry_delay(Exception("try again in 0.2s"), 0) == 2.0
+    assert _retry_delay(Exception("try again in 0.2s"), 1) == 4.0
+
+
+def test_without_a_hint_it_still_backs_off_exponentially():
+    from brahmastra.extraction import _retry_delay
+
+    assert _retry_delay(Exception("Connection reset by peer"), 0) == 2.0
+    assert _retry_delay(Exception("Connection reset by peer"), 1) == 4.0
+
+
+def test_a_very_long_wait_is_capped_rather_than_blocking_the_run(monkeypatch):
+    """
+    Sleeping out a twenty-minute window blocks every remaining note for one
+    that the NEXT run retries for free -- errored notes are re-queued
+    automatically. Better to fail this note fast and keep going.
+    """
+    from brahmastra.extraction import EXTRACT_MAX_BACKOFF, _retry_delay
+
+    assert _retry_delay(Exception("try again in 20m5s"), 0) == EXTRACT_MAX_BACKOFF
+
+
+def test_the_retry_actually_waits_the_advised_time(monkeypatch):
+    """The delay is computed correctly AND reaches time.sleep."""
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    slept: list[float] = []
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+
+    calls = {"n": 0}
+
+    def create(**_kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError(
+                "Error code: 429 - Rate limit reached ... on tokens per minute "
+                "(TPM): Limit 12000. Please try again in 8.5s"
+            )
+        msg = MagicMock(); msg.content = '{"triples": []}'
+        choice = MagicMock(); choice.message = msg
+        resp = MagicMock(); resp.choices = [choice]
+        return resp
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    fake = types.ModuleType("groq")
+    fake.Groq = lambda **_: client
+    monkeypatch.setitem(sys.modules, "groq", fake)
+
+    from brahmastra import extraction
+    importlib.reload(extraction)
+    monkeypatch.setattr(extraction.time, "sleep", lambda s: slept.append(s))
+
+    assert extraction._extract_with_groq("T", "C", "key") == []
+    assert slept and slept[0] == pytest.approx(8.6), (
+        f"waited {slept} instead of the 8.5s the server asked for"
+    )
+
+
+def test_the_last_attempt_does_not_sleep_before_giving_up():
+    """Sleeping after the final failure delays the error and changes nothing."""
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    def create(**_kwargs):
+        raise RuntimeError("429 tokens per minute (TPM). Please try again in 5s")
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    fake = types.ModuleType("groq")
+    fake.Groq = lambda **_: client
+
+    slept: list[float] = []
+    with patch.dict(sys.modules, {"groq": fake}):
+        from brahmastra import extraction
+        importlib.reload(extraction)
+        with patch.object(extraction.time, "sleep", lambda s: slept.append(s)):
+            with pytest.raises(Exception, match="after 3 attempts"):
+                extraction._extract_with_groq("T", "C", "key")
+
+    assert len(slept) == 2, f"3 attempts need 2 sleeps, not {len(slept)}"
+
+
+def test_an_oversized_request_is_not_retried_and_does_not_stop_the_run():
+    """
+    A 413 is settled: waiting cannot make the request smaller, so three
+    attempts spend the backoff to fail identically.
+
+    But unlike a spent quota or a retired model it must NOT abort the run --
+    one oversized note says nothing about the next one. Found only because
+    extraction_error recorded the message; the failure had been read as a rate
+    limit until then.
+    """
+    import sys
+    import types
+    from unittest.mock import MagicMock, patch
+
+    from brahmastra.extraction import _is_quota_error, _is_too_large
+
+    msg = ("Error code: 413 - {'error': {'message': 'Request too large for model "
+           "`openai/gpt-oss-120b`', 'code': 'request_too_large'}}")
+
+    assert _is_too_large(Exception(msg))
+    assert not _is_too_large(Exception("429 tokens per minute"))
+    assert not _is_quota_error(msg), "a 413 must not stop the whole run"
+
+    calls = {"n": 0}
+
+    def create(**_kwargs):
+        calls["n"] += 1
+        raise RuntimeError(msg)
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    fake = types.ModuleType("groq")
+    fake.Groq = lambda **_: client
+
+    slept = []
+    with patch.dict(sys.modules, {"groq": fake}):
+        from brahmastra import extraction
+        importlib.reload(extraction)
+        with patch.object(extraction.time, "sleep", lambda s: slept.append(s)):
+            with pytest.raises(Exception, match="413"):
+                extraction._extract_with_groq("T", "C", "key")
+
+    assert calls["n"] == 1, f"an oversized request must not be retried ({calls['n']} calls)"
+    assert slept == [], "and must not sleep before failing"
