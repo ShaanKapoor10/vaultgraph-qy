@@ -156,7 +156,22 @@ class PostgresStore(GraphStore):
         import psycopg
 
         if self._conn is None or self._conn.closed:
-            self._conn = psycopg.connect(self._dsn, autocommit=True)
+            # connect_timeout is not optional. A networked system of record
+            # introduces a failure mode a file cannot have: an unreachable
+            # server that never refuses, just never answers. Without this the
+            # connect blocks indefinitely -- measured at over 300 seconds
+            # against a filtered port, with no output and no error.
+            #
+            # That matters most where the caller has a deadline it cannot
+            # extend: the Stop hook runs on every assistant turn with a 15s
+            # budget, and a hung store would stall the session it exists to
+            # protect. Failing fast turns an invisible hang into an error
+            # somebody can act on.
+            self._conn = psycopg.connect(
+                self._dsn,
+                autocommit=True,
+                connect_timeout=int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")),
+            )
             self._conn.row_factory = __import__(
                 "psycopg.rows", fromlist=["dict_row"]
             ).dict_row
@@ -194,7 +209,14 @@ class PostgresStore(GraphStore):
                     cur.execute("SELECT 1 AS ok FROM pg_extension WHERE extname = 'vector'")
                     self._has_vector = cur.fetchone() is not None
             except Exception:
-                self._has_vector = False
+                # A failure to ASK is not an answer. Caching False here made a
+                # transient outage permanent: the store would report
+                # lexical-only for the rest of the process even once the server
+                # came back, so CompositeStore would refuse it -- or, if the
+                # downgrade were accepted, semantic search would stay switched
+                # off with nothing indicating why. Only a definitive reply is
+                # cached; an unreachable server is re-asked next time.
+                return False
         return self._has_vector
 
     def capabilities(self) -> frozenset[str]:
@@ -526,25 +548,47 @@ class PostgresStore(GraphStore):
         return [by_id[i] for i in ordered if i in by_id]
 
     def _search_notes_substring(self, query: str, limit: int) -> list[dict[str, Any]]:
-        """Last-resort scan, matching the other backends' semantics."""
+        """
+        Last-resort scan, matching the other backends' semantics exactly.
+
+        Those semantics are: match ANY term, score by how many matched, prefer
+        notes containing all of them but FALL BACK to partial matches when none
+        does. Joining the terms with AND instead -- the obvious way to write
+        this -- silently changes the contract: a two-word query where no single
+        note holds both words returns nothing here while SQLite and Neo4j both
+        return the partial hits. A fallback that returns less than the thing it
+        is a fallback for is worse than no fallback.
+        """
         terms = [t for t in (query or "").lower().split() if t]
         if not terms:
             return []
-        clauses = " AND ".join(
-            ["(lower(title) LIKE %s OR lower(content) LIKE %s)"] * len(terms)
-        )
-        params: list[Any] = [self.workspace]
-        for t in terms:
-            params.extend([f"%{t}%", f"%{t}%"])
-        params.append(limit)
+
+        hay = "lower(coalesce(title,'') || ' ' || coalesce(content,''))"
+        score = " + ".join([f"(CASE WHEN {hay} LIKE %s THEN 1 ELSE 0 END)"] * len(terms))
+
+        # Scored in a subquery so the expression -- and its parameters -- appear
+        # exactly once. Repeating it in SELECT and WHERE means two interleaved
+        # copies of the term list, which is correct only until someone edits one
+        # of them.
         with self._connect().cursor() as cur:
             cur.execute(
-                f"SELECT {self._NOTE_COLS} FROM notes "
-                f"WHERE workspace_id = %s AND {clauses} "
-                "ORDER BY last_edited DESC NULLS LAST LIMIT %s",
-                params,
+                f"""
+                SELECT * FROM (
+                    SELECT {self._NOTE_COLS}, ({score}) AS matched
+                    FROM notes WHERE workspace_id = %s
+                ) scored
+                WHERE matched > 0
+                ORDER BY matched DESC, last_edited DESC NULLS LAST
+                """,
+                [f"%{t}%" for t in terms] + [self.workspace],
             )
-            return [dict(r) for r in cur.fetchall()]
+            rows = [dict(r) for r in cur.fetchall()]
+
+        full = [r for r in rows if r["matched"] == len(terms)]
+        pool = full if full else rows
+        for row in pool:
+            row.pop("matched", None)
+        return pool[:limit]
 
     def search_notes_across(
         self, query: str, workspaces: list[str] | None = None, limit: int = 10

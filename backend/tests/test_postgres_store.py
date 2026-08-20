@@ -246,3 +246,75 @@ def test_the_derived_half_is_refused_rather_than_half_implemented(store):
         store.get_all_triples()
     with pytest.raises(NotImplementedError, match="NOTE_BACKEND=postgres"):
         store.save_graph({}, {})
+
+
+def test_an_unreachable_server_fails_fast_instead_of_hanging():
+    """
+    A networked system of record has a failure mode a file cannot: a server
+    that never refuses and never answers. Measured at over 300 seconds against
+    a filtered port before connect_timeout was set -- no output, no error.
+
+    It matters most where the caller cannot extend its deadline: the Stop hook
+    runs every assistant turn on a 15s budget.
+    """
+    import time
+
+    from brahmastra.stores.postgres_store import PostgresStore
+
+    s = PostgresStore(
+        workspace="ws",
+        # Reserved-for-documentation address: routes nowhere, so the connect
+        # hangs rather than being refused. A closed local port would be
+        # refused instantly and prove nothing.
+        dsn_override="postgresql://u:p@192.0.2.1:5432/db?connect_timeout=2",
+    )
+    started = time.perf_counter()
+    with pytest.raises(Exception):
+        s.get_notes()
+    assert time.perf_counter() - started < 30, "must fail fast, not hang"
+
+
+def test_an_unreachable_server_does_not_permanently_disable_semantic_search():
+    """
+    has_vector() cached its answer, and caching False on a CONNECTION failure
+    made a transient outage permanent: the store reported lexical-only for the
+    rest of the process even after the server returned, so the composite would
+    refuse it -- or, with the downgrade accepted, semantic search stayed off
+    with nothing saying why. A failure to ask is not an answer.
+    """
+    from brahmastra.stores.postgres_store import PostgresStore
+
+    s = PostgresStore(
+        workspace="ws",
+        dsn_override="postgresql://u:p@192.0.2.1:5432/db?connect_timeout=2",
+    )
+    assert s.has_vector() is False          # cannot ask
+    assert s._has_vector is None, "a connection failure must not be cached as fact"
+
+
+@needs_pg
+def test_the_substring_fallback_keeps_partial_matches(store):
+    """
+    SQLite and Neo4j both match ANY term, rank by how many matched, and prefer
+    all-term hits while still returning partial ones. Joining the terms with
+    AND -- the obvious way to write it in SQL -- quietly changes the contract:
+    a two-word query where no single note holds both words returned nothing
+    here while the other two backends returned the partial hits.
+
+    A fallback that returns less than the thing it falls back FROM is worse
+    than no fallback.
+    """
+    store.upsert_note("n-tls", "TLS", "The driver needs an explicit certifi context.")
+    store.upsert_note("n-pasta", "Dinner", "Drain the pasta after nine minutes.")
+
+    both = store._search_notes_substring("certifi pasta", 10)
+    assert [n["id"] for n in both] == ["n-tls", "n-pasta"] or \
+           sorted(n["id"] for n in both) == ["n-pasta", "n-tls"], (
+        "no note has both terms, so both partial matches must still come back"
+    )
+
+    # An all-term match outranks partial ones and suppresses them.
+    store.upsert_note("n-both", "Both", "certifi and pasta together.")
+    top = store._search_notes_substring("certifi pasta", 10)
+    assert top[0]["id"] == "n-both"
+    assert len(top) == 1, "a full match suppresses the partial ones"
