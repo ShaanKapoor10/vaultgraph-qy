@@ -135,12 +135,16 @@ services:
   # Runs the pipeline on a timer. Opt in:
   #   docker compose --profile scheduler up --build
   #
-  # Deliberately NOT on by default, and the reason is the storage choice. With
-  # GRAPH_BACKEND=sqlite this is a SECOND WRITER against one file: the pipeline
-  # lock stops two runs overlapping, but it does not stop a long pipeline
-  # transaction from making an API write wait on busy_timeout. At this data
-  # size that is survivable, but on-demand runs are the safer default.
-  # With GRAPH_BACKEND=neo4j there is no such constraint — turn it on.
+  # It used to be off because of the storage choice: with GRAPH_BACKEND=sqlite
+  # this is a SECOND WRITER against one file, and while the pipeline lock stops
+  # two runs overlapping, it does not stop a long transaction making an API
+  # write wait on busy_timeout.
+  #
+  # That constraint is GONE in the default arrangement — notes in Postgres, the
+  # graph in Neo4j, both fine with concurrent writers. Still opt-in for one
+  # remaining reason, which is outward-facing rather than technical: each tick
+  # pulls from Notion AND the pipeline's write-back stage pushes pages to it, so
+  # turning this on means a process editing your Notion every POLL_INTERVAL.
   scheduler:
     profiles: ["scheduler"]
     build:
@@ -238,7 +242,14 @@ services:
       - "7474:7474"   # browser
       - "7687:7687"   # bolt
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-brahmastra}
+      # NEO4J_LOCAL_PASSWORD, not NEO4J_PASSWORD. The two were briefly unified
+      # and it broke the moment NEO4J_URI pointed at Aura: NEO4J_PASSWORD then
+      # holds the AURA credential, the healthcheck below tried to log into this
+      # container with it, the container went unhealthy, and the backend --
+      # which does not even use this container in that arrangement -- refused
+      # to start behind its depends_on. A remote credential and a local one are
+      # different facts and need different names.
+      NEO4J_AUTH: neo4j/${NEO4J_LOCAL_PASSWORD:-brahmastra}
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j-data:/data
@@ -254,7 +265,7 @@ services:
       # into a server config setting, so passing NEO4J_PASSWORD in produced an
       # unrecognised setting named PASSWORD and the server refused to boot at
       # all -- a healthcheck that prevented the thing it was checking.
-      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_PASSWORD:-brahmastra} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "cypher-shell -u neo4j -p ${NEO4J_LOCAL_PASSWORD:-brahmastra} 'RETURN 1' >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 15

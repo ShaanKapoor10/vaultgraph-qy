@@ -41,11 +41,20 @@ def tick() -> dict:
     from brahmastra.pipeline import run_pipeline
 
     summary: dict = {}
-    sync_res = run_sync()
-    summary["synced"] = sync_res.get("synced", 0)
+    # Notion is one SOURCE of notes, not the reason to run. Agents write through
+    # MCP, the dashboard writes through the REST route, and the checkpoint hook
+    # writes from sessions -- all of which leave notes needing extraction whether
+    # or not Notion is connected. Skipping the pull when it is not configured
+    # keeps the rest of the loop working, exactly as run_pipeline already does.
+    if os.environ.get("NOTION_TOKEN"):
+        sync_res = run_sync()
+        summary["synced"] = sync_res.get("synced", 0)
+    else:
+        summary["synced"] = 0
+        summary["notion"] = "not configured"
 
     pending = db.get_notes(status="pending")
-    if sync_res.get("synced", 0) > 0 or pending:
+    if summary["synced"] > 0 or pending:
         pipe = run_pipeline(full=False)
         summary["extracted"] = pipe["stages"]["extract"].get("extracted", 0)
         summary["nodes"] = pipe["stages"]["graph"]["nodes"]
@@ -62,11 +71,14 @@ def watch(interval: int | None = None) -> None:
     if interval is None:
         interval = int(os.environ.get("POLL_INTERVAL", "120"))
 
-    if not os.environ.get("NOTION_TOKEN"):
-        raise RuntimeError("NOTION_TOKEN not set — live sync needs Notion connected")
-
-    print(f"[{_stamp()}] Brahmastra live sync started (every {interval}s). Ctrl-C to stop.",
-          flush=True)
+    # Deliberately NOT a hard requirement any more. This refused to start without
+    # Notion, which made "run the pipeline on a timer" impossible for anyone not
+    # using Notion -- and the notes needing extraction mostly do not come from
+    # Notion at all. It now runs the pipeline regardless and simply skips the
+    # pull, which is what the pipeline itself already does.
+    notion = "with Notion sync" if os.environ.get("NOTION_TOKEN") else "pipeline only (no NOTION_TOKEN)"
+    print(f"[{_stamp()}] Brahmastra live sync started (every {interval}s, {notion}). "
+          f"Ctrl-C to stop.", flush=True)
 
     n = 0
     while True:
