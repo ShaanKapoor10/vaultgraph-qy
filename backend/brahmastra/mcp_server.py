@@ -32,7 +32,52 @@ if _ENV.exists():
 from mcp.server.fastmcp import FastMCP
 from brahmastra import db
 
-mcp = FastMCP("brahmastra")
+# Sent to every client in the MCP `initialize` response, so any agent that
+# connects — Claude Code, Claude Desktop, Cursor, anything speaking MCP — knows
+# this memory exists without being told again per session.
+#
+# This was empty for a long time, and that was the whole reason the tools went
+# unused. They were present and reachable, but nothing said what they were FOR,
+# so an agent scanning its toolset for "what solves this problem" saw
+# "search the graph for entities matching a name substring" and moved on. The
+# tools were never the missing piece; the sentence explaining when to reach for
+# them was.
+#
+# Written as an affordance, not a protocol. An agent that is told it MUST record
+# everything learns to treat it as ceremony and skips it under pressure; one
+# that knows what the thing is good for reaches for it when it actually helps.
+INSTRUCTIONS = """\
+Brahmastra is a persistent knowledge graph you can use as memory. It survives
+across sessions, machines and clients, and it is separate from whatever project
+you are currently working on — treat it as something you know, not as the code
+under your hands.
+
+Reach for it when:
+
+- Starting on unfamiliar or returning work. `brahmastra_search_notes` tells you
+  what was already decided, tried, or found broken here — including in sessions
+  you had no part in. This is the highest-value moment and the easiest to miss,
+  because nothing about a fresh task announces that memory exists.
+- Something surprises you. Check whether it is already known before spending an
+  hour re-deriving it. Past failures are recorded with their causes.
+- You learn something durable: a root cause, an option you rejected and why, a
+  constraint discovered the hard way. `brahmastra_add_note` keeps it. Write it
+  as plain entity-rich sentences ("The file llm.py raises LLMQuotaExhausted") —
+  that extracts into a good graph. The WHY is the part worth writing; what
+  changed is usually recoverable from the code, and why it changed is not.
+
+Choosing between the two searches — this trips people up:
+
+- `brahmastra_search_notes` matches the FULL TEXT of every note. Use it to
+  recall what was written about a topic. This is the one you usually want.
+- `brahmastra_search_entities` matches entity NAMES only. Thin results mean the
+  name is absent, not that the knowledge is. Always follow up with
+  search_notes before concluding nothing is stored.
+
+Storing is one call and takes a few seconds; nothing further is required of you.
+Recall is one call and regularly saves an hour."""
+
+mcp = FastMCP("brahmastra", instructions=INSTRUCTIONS)
 
 
 # ---------------------------------------------------------------------------
@@ -53,7 +98,13 @@ def brahmastra_run_pipeline(mode: str = "incremental") -> str:
 
 @mcp.tool()
 def brahmastra_get_graph_stats() -> str:
-    """Return current graph statistics: node count, edge count, top entities, clusters, etc."""
+    """
+    See what this memory contains before relying on it — or on finding it empty.
+
+    Node and edge counts, top entities by PageRank, cluster count. Useful as a
+    first orientation on a returning project: the top entities are a fair
+    summary of what the graph is actually about.
+    """
     db.init_db()
     cached = db.get_cached_graph()
     stats = db.get_db_stats()
@@ -76,7 +127,13 @@ def brahmastra_get_graph_stats() -> str:
 @mcp.tool()
 def brahmastra_search_entities(query: str = "", entity_type: str = "", limit: int = 10) -> str:
     """
-    Search the graph for entities matching a name substring and/or type.
+    Find a NAMED thing in the graph — a person, file, service, project.
+
+    Matches entity names only, so use it when you know what something is called
+    and want its connections. To recall what was WRITTEN about a subject, use
+    brahmastra_search_notes instead: an empty result here means the name is
+    absent, never that the knowledge is.
+
     entity_type options: person, project, concept, tool, organisation, event, date, unknown.
     """
     db.init_db()
@@ -100,12 +157,15 @@ def brahmastra_search_entities(query: str = "", entity_type: str = "", limit: in
 @mcp.tool()
 def brahmastra_search_notes(query: str, limit: int = 10) -> str:
     """
-    Search the FULL TEXT of stored notes (title + content), not just the entity graph.
+    RECALL what is already known about a topic. Start here on unfamiliar work.
 
-    Use this to recall what was written about a topic — decisions, bug fixes, changes —
-    when entity search comes up empty. Entity search only matches entity names; this
-    matches the actual prose of every note, so it surfaces content even when the LLM
-    extraction produced few triples for it.
+    Searches the full text of every stored note, so it finds decisions, root
+    causes, rejected options and past breakages — including from sessions you
+    had no part in. On a backend that supports it this is hybrid search, so a
+    note phrased differently from your query still surfaces.
+
+    Prefer this over brahmastra_search_entities, which matches entity NAMES only
+    and comes up thin whenever the name happens to differ from your wording.
     """
     db.init_db()
     notes = db.search_notes(query, limit=limit)
@@ -162,7 +222,13 @@ def brahmastra_get_entity_details(entity_name: str) -> str:
 
 @mcp.tool()
 def brahmastra_get_contradictions() -> str:
-    """Return all detected contradictions in the knowledge graph."""
+    """
+    Facts that conflict — where something recorded once was later contradicted.
+
+    Worth checking before trusting a single recalled fact about a functional
+    relation (who reports to whom, what status something has, where it lives):
+    the graph may hold both the old answer and the new one.
+    """
     db.init_db()
     cached = db.get_cached_graph()
     if not cached:
@@ -175,7 +241,19 @@ def brahmastra_add_note(
     title: str, content: str, note_id: str = "", publish: bool = False
 ) -> str:
     """
-    Add or update a note. Marks it pending so the next pipeline run extracts triples from it.
+    REMEMBER something durable — a root cause, a decision and its reasoning,
+    a constraint found the hard way.
+
+    Write plain entity-rich sentences ("The file llm.py raises
+    LLMQuotaExhausted", not "it throws when the quota runs out"); that is what
+    extracts into a useful graph. Record the WHY above all: what changed is
+    usually recoverable from the code later, and why it changed is not.
+
+    The note is searchable when this returns — extraction runs here rather than
+    waiting for a pipeline. That matters more than it sounds: while storing took
+    a call PLUS a separate pipeline run, the second step was routinely skipped
+    and the note sat `pending`, which means invisible to every search and to
+    every other session.
 
     publish=True also gives the note a page in the workspace's Notion database,
     created on the next write-back. Use it for prose a human will want to
@@ -186,8 +264,24 @@ def brahmastra_add_note(
     nid = note_id or str(uuid.uuid4())[:8]
     db.upsert_note(nid, title, content, mark_pending=True,
                    publish=publish or None, source="mcp")
+
+    # Extract immediately, and treat failure as a delay rather than an error.
+    # A rate limit or a dead provider leaves the note `pending`, which is
+    # exactly the old behaviour: the next pipeline run picks it up. So this can
+    # only improve on what happened before, never lose the note.
+    extracted: dict[str, Any] = {"extraction": "pending"}
+    try:
+        from brahmastra.extraction import extract_note
+        result = extract_note(db.get_note(nid))
+        if result.get("error"):
+            extracted = {"extraction": "pending", "reason": str(result["error"])[:200]}
+        else:
+            extracted = {"extraction": "done", "triples": result.get("triples_added", 0)}
+    except Exception as e:                       # noqa: BLE001
+        extracted = {"extraction": "pending", "reason": f"{type(e).__name__}: {e}"[:200]}
+
     return json.dumps({"status": "added", "note_id": nid, "title": title,
-                       "publish": bool(publish)}, indent=2)
+                       "publish": bool(publish), **extracted}, indent=2)
 
 
 # ---------------------------------------------------------------------------

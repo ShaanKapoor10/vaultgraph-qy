@@ -476,6 +476,17 @@ def test_an_oversized_request_is_not_retried_and_does_not_stop_the_run():
 
     assert _is_too_large(Exception(msg))
     assert not _is_too_large(Exception("429 tokens per minute"))
+
+    # Groq words a 413 as "Request too large ... on tokens per minute (TPM):
+    # Limit 8000, Requested 9338" -- a RATE limit in an error that reads like a
+    # size limit. The numbers decide which it is, and treating every 413 as
+    # permanent abandons notes that a few seconds would have fixed.
+    over = ("413 - Request too large for model `x` on tokens per minute (TPM): "
+            "Limit 8000, Requested 9338, please reduce your message size")
+    under = ("413 - Request too large for model `x` on tokens per minute (TPM): "
+             "Limit 8000, Requested 6000, please reduce your message size")
+    assert _is_too_large(Exception(over)), "cannot fit in a whole minute: permanent"
+    assert not _is_too_large(Exception(under)), "fits once the minute rolls: retry it"
     assert not _is_quota_error(msg), "a 413 must not stop the whole run"
 
     calls = {"n": 0}

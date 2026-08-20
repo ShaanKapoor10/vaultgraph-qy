@@ -126,8 +126,19 @@ OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434")
 
 # A truncated reply is not partial JSON, it is unparseable, so the entire note
 # fails and loses every triple in it. Long design notes overran the old 2048
-# limit; current cloud models have 131k context, so headroom is cheap.
-EXTRACTION_MAX_TOKENS = int(os.environ.get("EXTRACTION_MAX_TOKENS", "8192"))
+# limit, which is why this was raised.
+#
+# It was then raised too far. max_tokens is RESERVED output, and providers
+# count the reservation against the per-minute token budget -- not the tokens
+# actually produced. At 8192 every request billed ~9.3k against an 8000 TPM
+# limit and returned 413 before the note was even considered, so extraction was
+# impossible on that tier no matter how short the note.
+#
+# 4096 keeps the headroom that mattered: the reply is a JSON array of triples,
+# and 20 triples runs to roughly 1.5k tokens, so this is still several times
+# what any note has needed. Context size is NOT the constraint -- these models
+# hold 131k -- the per-minute budget is.
+EXTRACTION_MAX_TOKENS = int(os.environ.get("EXTRACTION_MAX_TOKENS", "4096"))
 
 
 def _ollama_available() -> bool:
@@ -240,22 +251,49 @@ EXTRACT_MAX_BACKOFF = float(os.environ.get("EXTRACT_MAX_BACKOFF", "45"))
 
 def _too_large_hint(note_id: str = "") -> str:
     return (
-        "note is too large for one extraction request. Split it, or lower "
-        "EXTRACTION_MAX_TOKENS / raise the model's context." + (f" ({note_id})" if note_id else "")
+        "the extraction request exceeds the provider's per-minute token "
+        "allowance on its own, so it can never succeed as-is. The prompt "
+        "carries the ontology as well as the note, so a long note tips it "
+        "over: split the note, or raise the tier."
+        + (f" ({note_id})" if note_id else "")
     )
+
+
+_TPM_BUDGET = re.compile(r"limit\s+(\d+)\s*,\s*requested\s+(\d+)", re.IGNORECASE)
 
 
 def _is_too_large(error: Exception) -> bool:
     """
-    HTTP 413: the request exceeds what the model accepts.
+    HTTP 413: this ONE request does not fit, and waiting will not change that.
 
-    Settled, not transient -- waiting cannot make the request smaller. Kept
-    separate from _is_quota_error because the correct response differs: a spent
-    quota means every remaining note will fail and the run should stop, while
-    one oversized note says nothing about the next one.
+    Groq words it as "Request too large ... on tokens per minute (TPM): Limit
+    8000, Requested 9338" -- which is a rate limit in an error that reads like a
+    size limit. The numbers decide which it really is: when Requested exceeds
+    the whole per-minute allowance, no amount of waiting helps, because the
+    request could never fit inside one minute's budget. When it does not, the
+    minute simply needs to roll over and the request is worth retrying.
+
+    Treating every 413 as permanent, as this first did, would abandon notes
+    that a few seconds would have fixed. Treating every one as transient would
+    burn three attempts and the backoff on a request that can never succeed.
+
+    Kept separate from _is_quota_error because the correct response differs
+    again: a spent daily quota means every remaining note fails and the run
+    should stop, while one oversized note says nothing about the next.
     """
     text = str(error).lower()
-    return "413" in text and ("too large" in text or "request_too_large" in text)
+    if "413" not in text and "request_too_large" not in text:
+        return False
+    if "too large" not in text and "request_too_large" not in text:
+        return False
+    budget = _TPM_BUDGET.search(text)
+    if budget:
+        limit, requested = int(budget.group(1)), int(budget.group(2))
+        # Only permanent when the request alone overruns the entire allowance.
+        return requested > limit
+    # No numbers to reason with: assume permanent, since a 413 that is really
+    # transient will be retried by the next pipeline run anyway.
+    return True
 
 
 def _retry_delay(error: Exception, attempt: int) -> float:
