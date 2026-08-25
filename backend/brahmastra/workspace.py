@@ -22,6 +22,7 @@ contained.
 from __future__ import annotations
 
 import os
+from contextvars import ContextVar, Token
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -64,13 +65,53 @@ def validate_id(workspace_id: str) -> str:
     return wid
 
 
+# The workspace for the request currently being served.
+#
+# A ContextVar rather than a global, because a server handles requests
+# concurrently and a plain variable would let one request's workspace leak into
+# another's -- which in a system whose whole isolation story is "every row
+# carries a workspaceId" would mean serving one user's graph to another.
+# ContextVars are per-task, so each request sees only its own.
+#
+# This exists because the API was pinned to ONE workspace for the life of the
+# process: it read BRAHMASTRA_WORKSPACE and nothing else, so the store and MCP
+# layers supported many graphs while every HTTP caller could reach exactly one.
+# Setting it here rather than threading a parameter through every route keeps
+# the ~104 db.* call sites unchanged, which is the point of the facade.
+_request_workspace: ContextVar[str | None] = ContextVar(
+    "brahmastra_request_workspace", default=None
+)
+
+
+def set_request_workspace(workspace_id: str | None) -> Token:
+    """
+    Bind the workspace for this request. Returns a token for resetting it.
+
+    Always reset in a finally: a task that keeps the binding hands it to
+    whatever runs next on the same context.
+    """
+    return _request_workspace.set(workspace_id)
+
+
+def reset_request_workspace(token: Token) -> None:
+    _request_workspace.reset(token)
+
+
 def current_workspace() -> str:
     """
     The workspace to use when a caller does not name one.
 
-    Read at call time, not import time, so a request or test can set it and
-    have the next store resolution pick it up.
+    Order: the request's own workspace, then BRAHMASTRA_WORKSPACE, then
+    `default`. Read at call time, not import time, so a request or test can set
+    it and have the next store resolution pick it up.
     """
+    scoped = _request_workspace.get()
+    if scoped:
+        try:
+            return validate_id(scoped)
+        except InvalidWorkspaceId:
+            return DEFAULT_WORKSPACE
+
     wid = os.environ.get("BRAHMASTRA_WORKSPACE", "").strip().lower()
     if not wid:
         return DEFAULT_WORKSPACE

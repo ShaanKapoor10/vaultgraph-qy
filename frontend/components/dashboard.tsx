@@ -6,6 +6,7 @@ import { runPipeline } from "@/lib/pipeline"
 import { noteTitleMap } from "@/lib/viz"
 import { GraphView } from "@/components/graph-view"
 import { EntityDetail } from "@/components/entity-detail"
+import { WorkspaceSwitcher, type WorkspaceOption } from "@/components/workspace-switcher"
 import { CentralEntities } from "@/components/panels/central-entities"
 import { ConceptClusters } from "@/components/panels/concept-clusters"
 import { Contradictions } from "@/components/panels/contradictions"
@@ -35,9 +36,19 @@ interface Props {
   /** Precomputed PipelineResult from the Python backend. Used on first render;
    *  falls back to running the TS pipeline once the user adds notes locally. */
   initialResult?: PipelineResult | null
+  /** Which knowledge graph is on screen. Every backend call is scoped to it. */
+  workspace?: string
+  workspaces?: WorkspaceOption[]
 }
 
-export function Dashboard({ initialNotes, initialTriples, backendAvailable = false, initialResult = null }: Props) {
+export function Dashboard({
+  initialNotes,
+  initialTriples,
+  backendAvailable = false,
+  initialResult = null,
+  workspace = "default",
+  workspaces = [],
+}: Props) {
   const [notes, setNotes] = useState<Note[]>(initialNotes)
   const [triples, setTriples] = useState<RawTriple[]>(initialTriples)
   const [pipelineRunning, setPipelineRunning] = useState(false)
@@ -56,6 +67,9 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
 
   const select = (id: string) => setSelected(id)
 
+  // `default` is implicit, so no parameter for it.
+  const scope = workspace === "default" ? "" : `?workspace=${encodeURIComponent(workspace)}`
+
   const runPipelineNow = async () => {
     if (!backendAvailable) return
     setPipelineRunning(true)
@@ -64,7 +78,10 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
       // Kick off the run — the backend runs it in the background and returns
       // immediately, since a full run (Ollama extraction + embeddings + graph
       // build) can take minutes, longer than the dev proxy holds a request open.
-      const startRes = await fetch("/api/pipeline/run", { method: "POST" })
+      // Scoped like every other call. A rebuild is a WRITE, so running it
+      // against whichever graph the server defaults to would rebuild the wrong
+      // one while the screen showed this one.
+      const startRes = await fetch(`/api/pipeline/run${scope}`, { method: "POST" })
       const startRaw = await startRes.text()
       let startData: any = null
       try {
@@ -83,7 +100,7 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
       // Poll for completion.
       for (;;) {
         await new Promise((r) => setTimeout(r, 2000))
-        const res = await fetch("/api/pipeline/status")
+        const res = await fetch(`/api/pipeline/status${scope}`)
         if (!res.ok) continue
         const status = await res.json()
 
@@ -151,6 +168,10 @@ export function Dashboard({ initialNotes, initialTriples, backendAvailable = fal
               <p className="text-[11px] text-muted-foreground">Concept Graph Engine</p>
             </div>
           </div>
+
+          {/* Beside the title, not buried in a menu: which graph you are
+              looking at changes the meaning of everything else on screen. */}
+          <WorkspaceSwitcher workspaces={workspaces} current={workspace} />
 
           <div className="ml-auto flex items-center gap-2">
             <div className="hidden items-center gap-1.5 font-mono text-[11px] text-muted-foreground md:flex">

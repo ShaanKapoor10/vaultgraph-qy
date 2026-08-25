@@ -32,6 +32,11 @@ export const RELATION_LABEL: Record<RelationType, string> = {
   has_status: "has status",
   scheduled_for: "scheduled for",
   located_in: "located in",
+  // Added when the ontology grew to 18 relations and this map stayed at 16.
+  // A missing label is not cosmetic: these are the relations that carry
+  // employment and membership, so those edges rendered unlabelled.
+  employed_by: "employed by",
+  member_of: "member of",
   blocks: "blocks",
   related_to: "related to",
 }

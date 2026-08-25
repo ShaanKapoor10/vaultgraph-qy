@@ -21,6 +21,7 @@ from typing import Any
 
 from fastapi import FastAPI, Response, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from brahmastra.auth import auth_status, require_api_key
 from brahmastra.db import init_db
@@ -73,6 +74,62 @@ app.add_middleware(
 # CORS headers — otherwise a browser reports an opaque network error instead of
 # the 401 that would tell you what is wrong.
 app.middleware("http")(require_api_key)
+
+# Header wins over query string: a header is the request's own metadata, while
+# a query parameter can be pasted into a link and shared, and a shared link
+# quietly writing into someone else's graph is the failure worth avoiding.
+# Both are supported because the dashboard's proxy forwards the query string
+# untouched, so `?workspace=` works with no plumbing on that side.
+WORKSPACE_HEADER = "X-Brahmastra-Workspace"
+
+
+@app.middleware("http")
+async def bind_workspace(request, call_next):
+    """
+    Resolve the workspace for THIS request, not for the process.
+
+    The API previously read BRAHMASTRA_WORKSPACE once and served that one
+    workspace for its whole life. The store and MCP layers had supported many
+    graphs for a long time; every HTTP caller could still reach exactly one, so
+    the dashboard had no way to show a second and no reason to offer a picker.
+
+    Bound as a ContextVar rather than a parameter threaded through every route,
+    so the ~104 db.* call sites keep working unchanged — that indirection is
+    what the facade is for. Reset in a finally, because a task that keeps the
+    binding hands it to whatever runs next on the same context, and in a system
+    whose isolation is "every row carries a workspaceId" that would mean serving
+    one graph in place of another.
+    """
+    from brahmastra.workspace import (
+        InvalidWorkspaceId,
+        reset_request_workspace,
+        set_request_workspace,
+        validate_id,
+    )
+
+    requested = (
+        request.headers.get(WORKSPACE_HEADER)
+        or request.query_params.get("workspace")
+        or ""
+    ).strip()
+
+    if requested:
+        try:
+            requested = validate_id(requested)
+        except InvalidWorkspaceId as e:
+            # Refuse rather than fall back to `default`. Silently serving a
+            # different graph than the one asked for is how a caller ends up
+            # writing into the wrong one and never learning it happened.
+            return JSONResponse(
+                {"detail": f"invalid workspace: {e}"},
+                status_code=status.HTTP_400_BAD_REQUEST,
+            )
+
+    token = set_request_workspace(requested or None)
+    try:
+        return await call_next(request)
+    finally:
+        reset_request_workspace(token)
 
 # Remote MCP. The same tools a local stdio server exposes, over HTTP, mounted
 # inside this app on purpose: it inherits the auth middleware above, so there

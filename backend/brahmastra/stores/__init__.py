@@ -30,8 +30,16 @@ from brahmastra.env import load_env
 
 load_env()
 
-_store: GraphStore | None = None
-_store_backend: tuple[str, str] | None = None
+# Keyed by (backend, workspace). It used to hold exactly ONE store, which was
+# right while a process served a single workspace for its whole life. Once the
+# API resolves a workspace per REQUEST, a single slot thrashes: alternating
+# workspaces would discard and rebuild the store every call, and on a networked
+# backend that means opening a fresh Postgres or Neo4j connection per request.
+_stores: dict[tuple[str, str], GraphStore] = {}
+
+# How many to keep. Small on purpose -- each entry may hold a live connection,
+# and a caller sweeping many workspaces should not accumulate one per id.
+_STORE_CACHE_MAX = 8
 
 
 def backend_name() -> str:
@@ -132,7 +140,6 @@ def get_store(workspace: str | None = None) -> GraphStore:
     The cache is keyed on backend AND workspace, so changing either mid-process
     (which tests do) rebuilds rather than silently returning the previous one.
     """
-    global _store, _store_backend
     from brahmastra.workspace import current_workspace
 
     name = backend_name()
@@ -143,18 +150,37 @@ def get_store(workspace: str | None = None) -> GraphStore:
         return _build(name, target)
 
     key = (name, target)
-    if _store is not None and _store_backend == key:
-        return _store
+    cached = _stores.get(key)
+    if cached is not None:
+        return cached
 
     store = _build(name, target)
-    _store, _store_backend = store, key
+    # Evict oldest-first rather than clearing: a request pattern that alternates
+    # between two workspaces must keep hitting the cache, which is the whole
+    # reason this is a dict and not a single slot.
+    while len(_stores) >= _STORE_CACHE_MAX:
+        evicted = next(iter(_stores))
+        closing = _stores.pop(evicted)
+        closer = getattr(closing, "close", None)
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass          # a store that will not close must not fail a request
+    _stores[key] = store
     return store
 
 
 def reset_store() -> None:
-    """Drop the cached store. For tests that switch backend or DB path."""
-    global _store, _store_backend
-    _store = _store_backend = None
+    """Drop every cached store. For tests that switch backend or DB path."""
+    for store in list(_stores.values()):
+        closer = getattr(store, "close", None)
+        if closer is not None:
+            try:
+                closer()
+            except Exception:
+                pass
+    _stores.clear()
 
 
 __all__ = ["GraphStore", "SQLiteStore", "backend_name", "get_store", "reset_store"]

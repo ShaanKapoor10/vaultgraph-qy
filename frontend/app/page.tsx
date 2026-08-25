@@ -3,6 +3,7 @@ import { SAMPLE_NOTES, SAMPLE_TRIPLES } from "@/lib/sample-notes"
 import type { Note, RawTriple, PipelineResult } from "@/lib/types"
 import { adaptBackendGraph } from "@/lib/backend-adapter"
 import { backendFetch } from "@/lib/backend"
+import type { WorkspaceOption } from "@/components/workspace-switcher"
 import type { BackendGraphResponse } from "@/lib/backend-adapter"
 
 /**
@@ -10,18 +11,23 @@ import type { BackendGraphResponse } from "@/lib/backend-adapter"
  * Falls back to the seeded sample data if the backend is unavailable
  * (e.g. running without `vercel dev`, or first launch before any pipeline run).
  */
-async function loadFromBackend(): Promise<{
+async function loadFromBackend(workspace: string): Promise<{
   notes: Note[]
   triples: RawTriple[]
   result: PipelineResult | null
 } | null> {
+  // Every request names the workspace it wants. The API resolves it per
+  // request, so leaving it off silently returns whichever graph the server
+  // process defaults to -- which is how the dashboard could only ever show one.
+  const scope = workspace === "default" ? "" : `?workspace=${encodeURIComponent(workspace)}`
+
   try {
     // backendFetch attaches BRAHMASTRA_API_KEY; this runs on the server, so
     // the key never reaches the browser.
     const [notesRes, triplesRes, graphRes] = await Promise.all([
-      backendFetch("/notes", { cache: "no-store" }),
-      backendFetch("/graph/triples", { cache: "no-store" }),
-      backendFetch("/graph", { cache: "no-store" }),
+      backendFetch(`/notes${scope}`, { cache: "no-store" }),
+      backendFetch(`/graph/triples${scope}`, { cache: "no-store" }),
+      backendFetch(`/graph${scope}`, { cache: "no-store" }),
     ])
     if (!notesRes.ok || !triplesRes.ok || !graphRes.ok) return null
 
@@ -83,8 +89,32 @@ async function loadFromBackend(): Promise<{
   }
 }
 
-export default async function Page() {
-  const backend = await loadFromBackend()
+/** Workspaces the backend knows about. Empty when it is unreachable. */
+async function loadWorkspaces(): Promise<WorkspaceOption[]> {
+  try {
+    const res = await backendFetch("/workspaces", { cache: "no-store" })
+    if (!res.ok) return []
+    const body: { workspaces?: WorkspaceOption[] } = await res.json()
+    return body.workspaces ?? []
+  } catch {
+    return []
+  }
+}
+
+export default async function Page({
+  searchParams,
+}: {
+  searchParams: Promise<{ workspace?: string }>
+}) {
+  // The workspace lives in the URL so a selection is shareable and survives a
+  // reload, and so the server component below actually re-renders with the
+  // other graph rather than filtering one it already fetched.
+  const workspace = (await searchParams).workspace?.trim() || "default"
+
+  const [backend, workspaces] = await Promise.all([
+    loadFromBackend(workspace),
+    loadWorkspaces(),
+  ])
   const notes = backend?.notes ?? SAMPLE_NOTES
   const triples = backend?.triples ?? SAMPLE_TRIPLES
   const initialResult = backend?.result ?? null
@@ -95,6 +125,8 @@ export default async function Page() {
       initialTriples={triples}
       backendAvailable={backend !== null}
       initialResult={initialResult}
+      workspace={workspace}
+      workspaces={workspaces.length > 0 ? workspaces : [{ id: workspace }]}
     />
   )
 }
