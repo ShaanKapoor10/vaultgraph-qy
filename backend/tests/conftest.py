@@ -103,6 +103,28 @@ def _refuse_real_infrastructure(request, _isolate_storage_choice):
 
 
 @pytest.fixture(autouse=True, scope="session")
+def _isolate_runtime_state(tmp_path_factory):
+    """
+    Keep runtime state out of backend/data.
+
+    A fifth thing the suite could reach. The keepalive records when each engine
+    was last touched, and `run_pipeline` records one too — so every test that
+    runs the pipeline dropped a `.graph-touch-<hash>` file into the developer's
+    real data directory, one per temp store. Harmless in itself, and exactly
+    the shape of the four leaks that were not: test state landing somewhere
+    real because nothing said where else to put it.
+    """
+    state = tmp_path_factory.mktemp("runtime-state")
+    previous = os.environ.get("BRAHMASTRA_DATA_DIR")
+    os.environ["BRAHMASTRA_DATA_DIR"] = str(state)
+    yield state
+    if previous is None:
+        os.environ.pop("BRAHMASTRA_DATA_DIR", None)
+    else:
+        os.environ["BRAHMASTRA_DATA_DIR"] = previous
+
+
+@pytest.fixture(autouse=True, scope="session")
 def _isolate_checkpoint_queue(tmp_path_factory):
     """Redirect the capture queue away from backend/data/checkpoints."""
     queue = tmp_path_factory.mktemp("checkpoints")

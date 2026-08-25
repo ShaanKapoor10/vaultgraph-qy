@@ -214,6 +214,69 @@ there is no such constraint — turn it on.
 
 ---
 
+## Keeping Aura from suspending itself
+
+Neo4j Aura Free suspends an instance after roughly **three days without a
+query**. A suspended instance does not merely refuse connections — its
+**hostname stops resolving**, so the failure arrives as a DNS error that reads
+like a typo in `NEO4J_URI` rather than an instance that needs resuming. That
+misreading costs more time than the outage.
+
+Nothing else in the stack prevents this, and the reason is worth knowing:
+
+> The scheduler's idle tick calls `db.get_notes(status="pending")`, which is a
+> **SOURCE** read. Under the deployed arrangement that is answered **entirely by
+> Postgres**. The scheduler can tick every fifteen minutes for a week and never
+> send Neo4j a single query.
+
+So the keepalive reaches past the facade to the graph half deliberately —
+`CompositeStore.graph_store` — and everything it does is a **derived** read.
+
+```bash
+docker compose up -d keepalive        # always-on, no profile, no opt-in
+```
+
+Unlike the scheduler it needs no opt-in, because it has no outward-facing side
+effect at all: it reads counts, writes nothing, touches no Notion page and
+spends no LLM tokens. Outside Docker:
+
+```bash
+python -m brahmastra.keepalive              # touch it if it has gone idle
+python -m brahmastra.keepalive --status     # when was it last touched
+python -m brahmastra.keepalive --force      # touch it regardless
+python -m brahmastra.keepalive --loop       # stay running and keep touching
+```
+
+| variable | default | meaning |
+|---|---|---|
+| `GRAPH_KEEPALIVE` | `1` | set `0` to switch it off |
+| `GRAPH_KEEPALIVE_HOURS` | `12` | touch after this much idleness |
+| `BRAHMASTRA_DATA_DIR` | `backend/data` | where the touch stamp is written |
+
+**Twelve hours, not seventy-one.** Five further attempts of margin, so the
+instance survives a failed keepalive, a restarted scheduler and a machine that
+is off overnight — without becoming a process that queries a remote database
+every few minutes for no reason.
+
+**Real work counts.** `run_pipeline` records a contact, so a pipeline run five
+minutes ago means the keepalive skips rather than querying again. The stamp is
+per engine (keyed on `describe()`), so two graphs cannot vouch for each other,
+and `BRAHMASTRA_DATA_DIR` puts it on the shared volume so containers agree
+instead of each keeping its own answer.
+
+On Windows without Docker, a scheduled task is enough — it is a single
+short-lived command, not a daemon:
+
+```powershell
+schtasks /create /tn "Brahmastra graph keepalive" /sc hourly /mo 6 `
+  /tr "'C:\Users\shaan\Desktop\ai\vaultgraph-qy\backend\.venv\Scripts\pythonw.exe' -m brahmastra.keepalive"
+```
+
+`pythonw.exe`, not `python.exe`: the console subsystem binary pops a window
+every time the task fires.
+
+---
+
 ## Using MCP against a deployed instance
 
 Two ways, and the first needs no new infrastructure at all.

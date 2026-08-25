@@ -54,6 +54,11 @@ services:
       # layer instead is discarded on the next deploy, silently.
       BRAHMASTRA_DB: /data/concept_graph.db
       BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
+      # Where the keepalive records that the engine was last touched.
+      # On the shared volume so a pipeline run here and the keepalive
+      # container agree, instead of each keeping its own answer and
+      # querying a remote instance the other touched minutes ago.
+      BRAHMASTRA_DATA_DIR: /data
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
 
       # ---- the system of record -------------------------------------------
@@ -77,6 +82,10 @@ services:
       NEO4J_URI: ${NEO4J_URI:-neo4j://neo4j:7687}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-brahmastra}
+      # Empty means "infer from the host", which is the behaviour every
+      # service already had. Forwarded so that an explicit override in
+      # .env reaches the container instead of being silently dropped.
+      NEO4J_ENCRYPTED: ${NEO4J_ENCRYPTED:-}
 
       # ---- language model ------------------------------------------------
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
@@ -152,11 +161,23 @@ services:
     image: brahmastra-backend
     restart: unless-stopped
     command: ["python", "-m", "brahmastra.live_sync"]
+    # The image's HEALTHCHECK curls /health/ready, which is right for the one
+    # service that serves HTTP and wrong for every other use of the same image.
+    # This container never opens a port, so it reported "unhealthy" for hours
+    # while working perfectly -- and `depends_on: service_healthy` would have
+    # waited on it forever.
+    healthcheck:
+      disable: true
     environment:
       POLL_INTERVAL: ${POLL_INTERVAL:-900}
       GRAPH_BACKEND: ${GRAPH_BACKEND:-neo4j}
       BRAHMASTRA_DB: /data/concept_graph.db
       BRAHMASTRA_CHECKPOINT_DIR: /data/checkpoints
+      # Where the keepalive records that the engine was last touched.
+      # On the shared volume so a pipeline run here and the keepalive
+      # container agree, instead of each keeping its own answer and
+      # querying a remote instance the other touched minutes ago.
+      BRAHMASTRA_DATA_DIR: /data
       BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
       NOTE_BACKEND: ${NOTE_BACKEND:-postgres}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
@@ -171,6 +192,10 @@ services:
       NEO4J_URI: ${NEO4J_URI:-neo4j://neo4j:7687}
       NEO4J_USER: ${NEO4J_USER:-neo4j}
       NEO4J_PASSWORD: ${NEO4J_PASSWORD:-brahmastra}
+      # Empty means "infer from the host", which is the behaviour every
+      # service already had. Forwarded so that an explicit override in
+      # .env reaches the container instead of being silently dropped.
+      NEO4J_ENCRYPTED: ${NEO4J_ENCRYPTED:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       GROQ_MODEL: ${GROQ_MODEL:-}
@@ -187,6 +212,52 @@ services:
         condition: service_healthy
       neo4j:
         condition: service_healthy
+
+  # Stops a remote graph engine idling out of existence.
+  #
+  # Neo4j Aura Free suspends an instance after roughly three days without a
+  # query, and a suspended instance stops RESOLVING -- so the failure arrives
+  # as a DNS error that reads like a typo in NEO4J_URI. Nothing else prevents
+  # it: the scheduler's idle check is a note read, answered entirely by
+  # Postgres, so that loop can tick for a week without sending Neo4j anything.
+  #
+  # Unlike the scheduler this has NO profile and no opt-in, because it has no
+  # outward-facing side effect at all -- it reads counts and writes nothing,
+  # touches no Notion page and spends no LLM tokens. There is nothing to weigh.
+  #
+  # NOTE_BACKEND is deliberately absent. With it set this would build a
+  # composite and need Postgres reachable at construction, which would make an
+  # unrelated outage the reason Aura went to sleep.
+  keepalive:
+    build:
+      context: ./backend
+    image: brahmastra-backend
+    restart: unless-stopped
+    command: ["python", "-m", "brahmastra.keepalive", "--loop"]
+    # Same reason as the scheduler: this serves no HTTP, so the image's
+    # /health/ready probe would mark a perfectly working container unhealthy.
+    healthcheck:
+      disable: true
+    environment:
+      GRAPH_BACKEND: ${GRAPH_BACKEND:-neo4j}
+      NEO4J_URI: ${NEO4J_URI:-neo4j://neo4j:7687}
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-brahmastra}
+      # Empty means "infer from the host", which is the behaviour every
+      # service already had. Forwarded so that an explicit override in
+      # .env reaches the container instead of being silently dropped.
+      NEO4J_ENCRYPTED: ${NEO4J_ENCRYPTED:-}
+      BRAHMASTRA_WORKSPACE: ${BRAHMASTRA_WORKSPACE:-default}
+      GRAPH_KEEPALIVE_HOURS: ${GRAPH_KEEPALIVE_HOURS:-12}
+      # The shared volume, so a pipeline run and this container agree on when
+      # the engine was last touched instead of each keeping its own answer.
+      BRAHMASTRA_DATA_DIR: /data
+      BRAHMASTRA_ALLOW_ANONYMOUS: "1"
+    volumes:
+      - brahmastra-data:/data
+    # No depends_on: the point is to be the thing that is still trying when
+    # something else is down, and a health gate on a local neo4j would block
+    # startup for a deployment whose NEO4J_URI names Aura instead.
 
   # The system of record (NOTE_BACKEND=postgres, the deployed default).
   #

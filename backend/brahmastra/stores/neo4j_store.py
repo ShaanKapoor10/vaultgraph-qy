@@ -254,6 +254,27 @@ class Neo4jStore(GraphStore):
             # A bare neo4j:// scheme (not neo4j+s://) because the +s schemes
             # lock TLS config and forbid supplying our own ssl_context.
             kwargs: dict[str, Any] = {"auth": (self._user, self._password)}
+            # Bounded waits, for the same reason PostgresStore sets
+            # connect_timeout: this store is REMOTE and can be legitimately
+            # absent. Aura Free suspends an idle instance and its hostname then
+            # stops resolving, so a call made while it is asleep is not a slow
+            # call, it is one that will never be answered -- and an MCP server
+            # or a request thread parked on it stays parked, which reads as the
+            # whole system hanging rather than one dependency being down.
+            #
+            # Deliberately generous rather than aggressive: Aura is genuinely
+            # slow on the first connection after a resume, and a timeout that
+            # fires during a normal wake-up would turn a working instance into
+            # an unreachable one.
+            kwargs["connection_timeout"] = float(
+                os.environ.get("NEO4J_CONNECT_TIMEOUT", "20")
+            )
+            kwargs["connection_acquisition_timeout"] = float(
+                os.environ.get("NEO4J_ACQUIRE_TIMEOUT", "45")
+            )
+            kwargs["max_transaction_retry_time"] = float(
+                os.environ.get("NEO4J_RETRY_TIME", "30")
+            )
             # Only supply an SSL context when TLS is actually in play. Passing
             # one to a plaintext server does not downgrade gracefully -- the
             # handshake fails and the driver reports it as a routing problem.

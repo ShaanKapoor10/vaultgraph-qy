@@ -54,6 +54,20 @@ def tick() -> dict:
         summary["notion"] = "not configured"
 
     pending = db.get_notes(status="pending")
+
+    # Keep the graph engine awake. This has to be here rather than left to the
+    # tick's normal work, because the check just above -- get_notes(pending) --
+    # is a SOURCE read: under NOTE_BACKEND=postgres it is answered entirely by
+    # Postgres. An idle loop could therefore tick every fifteen minutes for a
+    # week without sending Neo4j one query, and Aura Free suspends an instance
+    # after about three days of exactly that.
+    #
+    # Before the pipeline, so an idle tick still touches the engine; skipped
+    # cheaply when something already has, and it never raises.
+    from brahmastra.keepalive import touch_if_idle
+
+    summary["keepalive"] = touch_if_idle()
+
     if summary["synced"] > 0 or pending:
         pipe = run_pipeline(full=False)
         summary["extracted"] = pipe["stages"]["extract"].get("extracted", 0)
@@ -101,7 +115,13 @@ def watch(interval: int | None = None) -> None:
                 )
             else:
                 # heartbeat even when idle, so liveness is always visible
-                print(f"[{_stamp()}] tick #{n} OK in {dt:.0f}s | no changes (heartbeat)",
+                ka = s.get("keepalive") or {}
+                note = ""
+                if ka.get("pinged"):
+                    note = f" | keepalive touched the engine ({ka.get('latency_ms')}ms)"
+                elif ka.get("error"):
+                    note = f" | keepalive FAILED: {ka['error']}"
+                print(f"[{_stamp()}] tick #{n} OK in {dt:.0f}s | no changes (heartbeat){note}",
                       flush=True)
             if dt > interval:
                 print(f"[{_stamp()}] WARNING: tick #{n} took {dt:.0f}s, longer than the "

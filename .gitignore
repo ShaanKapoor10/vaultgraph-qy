@@ -53,6 +53,9 @@ dist/
 # .pipeline-<hash>.lock — the two patterns below never matched it, and one got
 # committed.
 .pipeline-*.lock
+# .graph-touch-<hash> — when the keepalive last reached that engine.
+# Local runtime state about a remote instance, not about the code.
+.graph-touch-*
 *.pipeline.lock
 .pipeline.lock
 

@@ -98,6 +98,24 @@ class CompositeStore(GraphStore):
             )
         self.workspace = nw or gw
 
+    # -- the halves, named -------------------------------------------------
+    #
+    # Public because one caller genuinely needs a specific half rather than the
+    # pair: a keepalive has to prove THE ENGINE is awake, and every routed
+    # method that looks like it would do that is answered by the note store
+    # instead. Named accessors make that reach explicit and survive a rename,
+    # where `store._graph` from another module would be neither.
+
+    @property
+    def graph_store(self) -> GraphStore:
+        """The half holding the derived graph."""
+        return self._graph
+
+    @property
+    def note_store(self) -> GraphStore:
+        """The half holding the system of record."""
+        return self._notes
+
     # -- routing -----------------------------------------------------------
 
     def _for(self, method: str) -> GraphStore:

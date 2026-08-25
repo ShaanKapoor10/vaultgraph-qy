@@ -103,6 +103,13 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         return _run_pipeline_locked(full, result)
     finally:
         _release_lock()
+        # A pipeline run reaches the graph engine by definition — it writes
+        # triples and saves the cache. Recording that here is what stops the
+        # keepalive querying a remote instance that real work touched five
+        # minutes ago. In the `finally`, because a run that died halfway still
+        # hit the engine on its way there, and `record_contact` never raises.
+        from brahmastra.keepalive import record_contact
+        record_contact()
 
 
 def _missing_notion_config(need_database: bool) -> list[str]:

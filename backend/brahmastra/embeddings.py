@@ -73,6 +73,30 @@ def get_model() -> Any | None:
         return None
     try:
         from sentence_transformers import SentenceTransformer
+
+        # Load from the cache WITHOUT asking the Hub whether it is current.
+        #
+        # The `except` below catches every way loading can fail, and a hang is
+        # not one of them. A cached model still triggers an HTTP check against
+        # huggingface.co, and on a stalled connection -- not a refused one --
+        # that check does not raise, it waits. Whatever called embed() waits
+        # with it: a request thread, or an MCP server, which then looks like
+        # the whole system has hung rather than one lookup being slow.
+        #
+        # The model is a fixed 384-dim MiniLM pinned by MODEL_NAME, and
+        # changing it means rebuilding every vector index by hand. So there is
+        # nothing an update check could usefully tell us, and skipping it costs
+        # nothing while removing a network call from the hot path entirely.
+        try:
+            _model = SentenceTransformer(
+                MODEL_NAME, cache_folder=str(cache_dir()), local_files_only=True
+            )
+            return _model
+        except TypeError:
+            pass          # older sentence-transformers without the argument
+        except Exception:
+            pass          # not cached yet — fall through and fetch it
+
         _model = SentenceTransformer(MODEL_NAME, cache_folder=str(cache_dir()))
         return _model
     except Exception:
