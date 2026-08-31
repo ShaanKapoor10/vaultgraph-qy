@@ -139,7 +139,17 @@ services:
       BRAHMASTRA_API_KEY: ${BRAHMASTRA_API_KEY:-}
     depends_on:
       backend:
-        condition: service_healthy
+        # service_STARTED, not service_healthy. The backend's health check is
+        # /health/ready, which reports 503 while the graph engine is down --
+        # correctly, since it cannot serve graph traffic. Gating the dashboard
+        # on that made a suspended Aura stop the frontend from starting at all,
+        # which is the same cascade as the backend crash loop one level up.
+        #
+        # The dashboard already degrades on its own: it renders seed data and
+        # shows a "seed data" badge when the backend does not answer. A
+        # degraded dashboard beats no dashboard, and with the notes in Postgres
+        # most of it works regardless.
+        condition: service_started
 
   # Runs the pipeline on a timer. Opt in:
   #   docker compose --profile scheduler up --build

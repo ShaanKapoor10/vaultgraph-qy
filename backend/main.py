@@ -32,6 +32,40 @@ def _mcp_http_enabled() -> bool:
     return os.environ.get("MCP_HTTP", "").strip().lower() in {"1", "true", "yes"}
 
 
+# Whether the schema was ever created. Not a cache of "is the store up" -- it
+# only records that this work still needs doing, so readiness can finish it.
+_schema_ready = False
+
+
+def _try_init_db() -> str | None:
+    """
+    Create the schema, and survive not being able to.
+
+    A store that is unreachable at boot must NOT take the process down with it.
+    That intent is already written into the health probes -- /health refuses to
+    touch the database precisely so a sleeping dependency cannot get the
+    container killed and restarted, which cannot fix a dependency -- and the
+    lifespan then contradicted it by calling init_db() unguarded.
+
+    That is not hypothetical. Aura Free suspended, its hostname stopped
+    resolving, init_schema raised ServiceUnavailable, and uvicorn reported
+    "Application startup failed. Exiting." The API was then down for a reason
+    that had nothing to do with the API, and it stayed down: a crash loop
+    cannot recover, whereas a live process becomes ready the moment the
+    dependency returns. Postgres still held every note the whole time.
+
+    Returns None on success, or the reason it could not, for readiness to
+    report. The error is not stored: the point is to try again.
+    """
+    global _schema_ready
+    try:
+        init_db()
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"[:300]
+    _schema_ready = True
+    return None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """
@@ -43,7 +77,7 @@ async def lifespan(app: FastAPI):
     which reads like an MCP bug rather than a wiring mistake. The session
     manager has to be entered here, by the app that actually owns the lifespan.
     """
-    init_db()
+    _try_init_db()
     if _mcp_http_enabled():
         from brahmastra.mcp_server import mcp as _mcp
 
@@ -210,6 +244,18 @@ async def ready(response: Response) -> dict[str, Any]:
             "by any other instance, and lexical-only (no hybrid search). Set "
             "NOTE_BACKEND=postgres for anything deployed."
         ]
+    # Finish what startup could not. The schema is created idempotently, so
+    # retrying here is what lets an instance that booted against a suspended
+    # engine become ready on its own the moment that engine returns -- without
+    # a restart, and without an operator noticing.
+    if not _schema_ready:
+        failure = _try_init_db()
+        if failure is not None:
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            detail.update(status="unavailable", error=failure,
+                          schema="not initialised")
+            return detail
+
     try:
         stats = db.get_db_stats()
         detail.update(
