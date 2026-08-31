@@ -97,6 +97,10 @@ CREATE TABLE IF NOT EXISTS meeting_artifacts (
     speakers      TEXT NOT NULL DEFAULT '[]',
     start_time    TEXT,
     end_time      TEXT,
+    -- How many times the document said this, and what replaced it if the
+    -- meeting revisited the question. See ingest/consolidate.py.
+    mentions      INTEGER NOT NULL DEFAULT 1,
+    superseded_by TEXT,
     created_at    TEXT NOT NULL,
     PRIMARY KEY (workspace_id, id)
 );
@@ -337,7 +341,8 @@ class IngestStore:
         rows = [
             (uuid.uuid4().hex[:12], self.workspace, transcript_id, a.chunk_index,
              a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
-             json.dumps(a.speakers), a.start_time, a.end_time, _now())
+             json.dumps(a.speakers), a.start_time, a.end_time,
+             getattr(a, "mentions", 1), getattr(a, "superseded_by", None), _now())
             for a in artifacts
         ]
         with self._cursor() as cur:
@@ -346,8 +351,8 @@ class IngestStore:
                 INSERT INTO meeting_artifacts
                     (id, workspace_id, transcript_id, chunk_index, kind, statement,
                      owner, due, rationale, quote, speakers, start_time, end_time,
-                     created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mentions, superseded_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """), rows)
         return len(rows)
 

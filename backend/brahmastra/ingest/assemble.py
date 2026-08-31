@@ -42,6 +42,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from brahmastra.ingest.comprehend import ChunkUnderstanding, comprehend_chunk
+from brahmastra.ingest.consolidate import consolidate
 from brahmastra.ingest.segment import Chunk, segment
 from brahmastra.ingest.store import IngestStore, get_ingest_store
 
@@ -147,6 +148,35 @@ def process_transcript(
     a note that fails, so the outcome is a `partial` run rather than a lost
     document.
     """
+    from brahmastra.workspace import reset_request_workspace, set_request_workspace
+
+    # Bind the workspace for the WHOLE operation, not just for the store.
+    #
+    # This produced a real leak: `workspace=` reached get_ingest_store, so
+    # transcripts and artifacts landed correctly, while db.upsert_note kept
+    # using the ambient workspace -- so a transcript processed into `office`
+    # wrote its NOTES into `default`. No error, no warning; exactly the shape
+    # of the leak this system has had before, where a store built without its
+    # workspace overwrote a note belonging to another graph.
+    #
+    # Binding here rather than asking callers to do it, because the callers who
+    # got it right (the route, the CLI) did so incidentally and a fourth caller
+    # would have had to know. A guarantee that depends on remembering is not one.
+    target = workspace or (store.workspace if store is not None else None)
+    token = set_request_workspace(target) if target else None
+    try:
+        return _process(transcript_id, store, target, on_progress)
+    finally:
+        if token is not None:
+            reset_request_workspace(token)
+
+
+def _process(
+    transcript_id: str,
+    store: IngestStore | None,
+    workspace: str | None,
+    on_progress: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
     store = store or get_ingest_store(workspace)
     started = datetime.now(timezone.utc).isoformat()
 
@@ -192,6 +222,8 @@ def process_transcript(
     # Idempotent, and cheap next to the LLM calls that follow.
     db.init_db()
 
+    pending_artifacts: list[Any] = []
+
     for chunk in chunks:
         store.save_chunk(
             transcript_id, chunk.index, chunk.text, chunk.speakers,
@@ -209,7 +241,12 @@ def process_transcript(
             continue
 
         report["comprehended"] += 1
-        report["artifacts"] += store.save_artifacts(transcript_id, understanding.artifacts)
+        # Accumulated, not saved yet. Consolidation needs the WHOLE document:
+        # chunks overlap, so a decision in an overlap region is comprehended
+        # twice, and saving per chunk would store it twice with no later
+        # opportunity to notice. Artifacts are derived data, so holding them
+        # until the end risks a re-run, never information.
+        pending_artifacts.extend(understanding.artifacts)
         # Surfaced, not swallowed: what was rejected is the evidence that the
         # grounding check is doing something, and the first place to look when
         # a transcript yields less than expected.
@@ -235,6 +272,21 @@ def process_transcript(
                                summary=understanding.summary, note_id=note_id)
         if on_progress:
             on_progress({"chunk": chunk.index, "of": len(chunks), "ok": True})
+
+    # Reduce, then store. Without this the overlap that protects meaning at the
+    # chunk boundary becomes duplication in the knowledge base -- three
+    # decisions reported where one was made, and the error grows with the
+    # document.
+    #
+    # Only the ARTIFACTS are consolidated. The per-chunk notes keep their
+    # overlap deliberately: two notes asserting the same fact is ordinary
+    # provenance in a knowledge graph, whereas three rows in a decisions table
+    # is a false claim about how many decisions were taken.
+    reduced = consolidate(pending_artifacts)
+    report["artifacts"] = store.save_artifacts(transcript_id, reduced["artifacts"])
+    report["merged"] = reduced["merged"]
+    report["superseded"] = reduced["superseded"]
+    report["revisions"] = reduced["notes"]
 
     failed = len(report["errors"])
     if failed == len(chunks):

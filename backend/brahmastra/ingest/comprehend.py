@@ -109,6 +109,12 @@ class Artifact:
     speakers: list[str] = field(default_factory=list)
     start_time: str | None = None
     end_time: str | None = None
+    # Filled by consolidate(): how many times the document said this, and what
+    # replaced it if the meeting revisited the question. Something said three
+    # times is more load-bearing than something said once, and a decision that
+    # was later reversed is worth keeping as history rather than deleting.
+    mentions: int = 1
+    superseded_by: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

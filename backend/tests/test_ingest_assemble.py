@@ -343,3 +343,57 @@ def test_a_rationale_does_not_start_mid_sentence_with_a_capital():
         Artifact("decision", "Move the release", owner="Sarah",
                  rationale="Reconciliation is a hard requirement.", quote="q")), chunk)
     assert "because reconciliation is a hard requirement" in body
+
+
+# ---------------------------------------------------------------------------
+# The leak this shipped with
+# ---------------------------------------------------------------------------
+
+def test_notes_land_in_the_same_workspace_as_the_transcript(monkeypatch, tmp_path,
+                                                            understood):
+    """
+    The `workspace=` argument reached the ingest store, so transcripts and
+    artifacts landed correctly -- while db.upsert_note kept using the AMBIENT
+    workspace, so a transcript processed into `office` wrote its notes into
+    `default`. Silently. The same shape as the leak that once overwrote a real
+    note belonging to another graph.
+    """
+    monkeypatch.setenv("BRAHMASTRA_DB", str(tmp_path / "leak.db"))
+    monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
+    monkeypatch.setenv("NOTE_BACKEND", "")
+    monkeypatch.delenv("BRAHMASTRA_WORKSPACE", raising=False)
+    from brahmastra.stores import reset_store
+    reset_store()
+    db.init_db()
+
+    office = IngestStore(workspace="office")
+    office.init_schema()
+    tid = office.create_transcript(Transcript("", "Office meeting", TRANSCRIPT))
+    assemble.process_transcript(tid, store=office, workspace="office")
+
+    from brahmastra.stores.sqlite_store import SQLiteStore
+    assert [n["title"] for n in SQLiteStore(workspace="office").get_notes()] != []
+    assert SQLiteStore(workspace="default").get_notes() == [], (
+        "an office transcript wrote its notes into the default workspace"
+    )
+    reset_store()
+
+
+def test_the_workspace_binding_is_restored_afterwards(monkeypatch, tmp_path, understood):
+    """A binding left set hands the wrong graph to whatever runs next."""
+    monkeypatch.setenv("BRAHMASTRA_DB", str(tmp_path / "restore.db"))
+    monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
+    monkeypatch.setenv("NOTE_BACKEND", "")
+    from brahmastra.stores import reset_store
+    from brahmastra.workspace import current_workspace
+    reset_store()
+    db.init_db()
+
+    before = current_workspace()
+    office = IngestStore(workspace="office")
+    office.init_schema()
+    tid = office.create_transcript(Transcript("", "Office meeting", TRANSCRIPT))
+    assemble.process_transcript(tid, store=office, workspace="office")
+
+    assert current_workspace() == before
+    reset_store()
