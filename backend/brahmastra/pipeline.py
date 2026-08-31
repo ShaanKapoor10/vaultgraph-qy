@@ -83,6 +83,101 @@ def _release_lock() -> None:
         pass
 
 
+# ---------------------------------------------------------------------------
+# What happened, durably
+# ---------------------------------------------------------------------------
+#
+# The API tracked its own runs in a module-level dict, which answered "did the
+# pipeline run?" only for runs THIS process started. A run kicked off by the
+# scheduler, the CLI or MCP was invisible -- /pipeline/status reported "idle"
+# while a run was genuinely in flight -- a restart erased it, and nothing
+# anywhere recorded that a run had ever finished. So the dashboard could show a
+# spinner and then nothing, leaving "I hope it ran" as the only conclusion
+# available.
+#
+# Recorded HERE instead, in the one function every caller goes through, and
+# written beside the lock so any process can read it.
+
+def _record_path() -> Path:
+    from brahmastra import db
+    digest = hashlib.sha1(db.describe().encode("utf-8")).hexdigest()[:12]
+    return data_dir() / f".pipeline-last-{digest}.json"
+
+
+def _write_record(result: dict[str, Any]) -> None:
+    """Save a finished run's verdict. Never raises -- reporting is not the work."""
+    import json
+    try:
+        stages = result.get("stages") or {}
+        graph = stages.get("graph") or {}
+        record = {
+            "started_at": result.get("started_at"),
+            "finished_at": result.get("finished_at"),
+            "mode": result.get("mode"),
+            "status": result.get("status"),
+            "failed_stages": result.get("failed_stages") or [],
+            # A summary, not the whole result: this is read on every poll, and
+            # the full object carries per-note error text that can be large.
+            "extracted": (stages.get("extract") or {}).get("extracted", 0),
+            "triples_added": (stages.get("extract") or {}).get("triples_added", 0),
+            "nodes": graph.get("nodes"),
+            "edges": graph.get("edges"),
+            "contradictions": graph.get("contradictions"),
+        }
+        path = _record_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def last_run() -> dict[str, Any] | None:
+    """The most recent finished run against THIS store, or None."""
+    import json
+    try:
+        return json.loads(_record_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def active_run() -> dict[str, Any] | None:
+    """
+    A run in progress against this store, started by ANY process.
+
+    Derived from the lock, which is the only thing every caller already takes.
+    Reports the lock's AGE rather than merely its existence, because a crashed
+    run leaves the file behind -- and a stale lock read as "still running" is
+    how a dashboard spins forever on a run that died fifteen minutes ago.
+    """
+    lock = _lock_path()
+    try:
+        age = time.time() - lock.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    return {
+        "running": age <= _LOCK_STALE_SECS,
+        "age_seconds": round(age, 1),
+        "stale": age > _LOCK_STALE_SECS,
+        "stale_after_seconds": _LOCK_STALE_SECS,
+    }
+
+
+def run_state() -> dict[str, Any]:
+    """
+    Everything a caller needs to answer "has the pipeline run?".
+
+    Deliberately cross-process and durable, so the dashboard shows a scheduler
+    run it did not start and still says what happened after a restart.
+    """
+    active = active_run()
+    return {
+        "running": bool(active and active["running"]),
+        "active": active,
+        "last": last_run(),
+        "target": db.describe(),
+    }
+
+
 def run_pipeline(full: bool = False) -> dict[str, Any]:
     """
     Run the full pipeline.
@@ -106,7 +201,11 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         return result
 
     try:
-        return _run_pipeline_locked(full, result)
+        outcome = _run_pipeline_locked(full, result)
+        # Recorded before the lock is released, so a poll can never see the
+        # lock gone AND no record of why -- which reads as "nothing ever ran".
+        _write_record(outcome)
+        return outcome
     finally:
         _release_lock()
         # A pipeline run reaches the graph engine by definition — it writes

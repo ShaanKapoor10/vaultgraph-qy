@@ -128,5 +128,35 @@ async def run_full_pipeline(
 
 @router.get("/status")
 async def pipeline_status() -> dict[str, Any]:
-    """Poll the state of the most recently started /pipeline/run."""
-    return _STATUS
+    """
+    Whether the pipeline is running, and how the last run went.
+
+    Answers for the STORE, not for this process. `_STATUS` below is a
+    module-level dict, so it only ever knew about runs this worker started: a
+    run kicked off by the scheduler, the CLI or MCP reported "idle" while it
+    was genuinely in flight, a restart erased it, and nothing recorded that a
+    run had ever finished. The dashboard could show a spinner and then nothing,
+    which left "I hope it ran" as the only available conclusion.
+
+    `running` and `last` come from the lock and the run record on the shared
+    data directory, so they are true regardless of who started the run or
+    whether this process was even alive at the time. The per-process fields are
+    still reported, because the button that started a run here wants its own
+    result and its `error` is not written anywhere else.
+    """
+    from brahmastra.pipeline import run_state
+
+    state = run_state()
+    body: dict[str, Any] = {
+        # What the frontend should trust.
+        "running": state["running"],
+        "active": state["active"],
+        "last": state["last"],
+        "target": state["target"],
+        # This worker's own most recent run, for the caller that started it.
+        "state": _STATUS.get("state", "idle"),
+    }
+    for key in ("started_at", "finished_at", "error", "result"):
+        if key in _STATUS:
+            body[key] = _STATUS[key]
+    return body

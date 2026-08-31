@@ -7,6 +7,7 @@ import { noteTitleMap } from "@/lib/viz"
 import { GraphView } from "@/components/graph-view"
 import { EntityDetail } from "@/components/entity-detail"
 import { WorkspaceSwitcher, type WorkspaceOption } from "@/components/workspace-switcher"
+import { PipelineIndicator } from "@/components/pipeline-indicator"
 import { CentralEntities } from "@/components/panels/central-entities"
 import { ConceptClusters } from "@/components/panels/concept-clusters"
 import { Contradictions } from "@/components/panels/contradictions"
@@ -126,12 +127,29 @@ export function Dashboard({
       setPipelineStatus("Pipeline running…")
 
       // Poll for completion.
+      //
+      // Driven by `running`, which the backend derives from the pipeline lock
+      // on disk rather than from its own memory. The old loop watched `state`,
+      // a per-process value: a backend restart mid-run reset it to "idle", the
+      // loop hit its "unknown state" branch and broke, and the message stayed
+      // on "Pipeline running…" forever with nothing left to update it. That is
+      // the spinner that never resolves.
+      const deadline = Date.now() + 20 * 60 * 1000
       for (;;) {
         await new Promise((r) => setTimeout(r, 2000))
-        const res = await fetch(`/api/pipeline/status${scope}`)
+
+        if (Date.now() > deadline) {
+          setPipelineStatus(
+            "Still running after 20 minutes — it is safe to leave. The indicator above tracks it."
+          )
+          break
+        }
+
+        const res = await fetch(`/api/pipeline/status${scope}`, { cache: "no-store" })
         if (!res.ok) continue
         const status = await res.json()
 
+        if (status.running) continue
         if (status.state === "running" || status.state === "started") continue
 
         if (status.state === "error") {
@@ -139,25 +157,31 @@ export function Dashboard({
           break
         }
         if (status.state === "skipped") {
-          setPipelineStatus(`Busy: ${status.result?.skipped ?? "another run in progress"}. Try again in a moment.`)
+          setPipelineStatus(
+            `Busy: ${status.result?.skipped ?? "another run in progress"}. Try again in a moment.`
+          )
           break
         }
-        if (status.state === "done") {
-          const data = status.result
-          const g = data?.stages?.graph ?? {}
-          const e = data?.stages?.extract ?? {}
-          const r = data?.stages?.resolve ?? {}
+
+        // Report from the durable record, so this says something true even
+        // when the run was finished by a process that is no longer around.
+        const last = status.last
+        if (last?.finished_at) {
+          const verdict =
+            last.status && last.status !== "ok"
+              ? ` (${last.status}: ${(last.failed_stages ?? []).join(", ") || "see logs"})`
+              : ""
           setPipelineStatus(
-            `Pipeline complete — extracted ${e.triples_added ?? 0} triples, ` +
-            `${r.clusters ?? 0} entity clusters, ` +
-            `${g.nodes ?? 0} nodes / ${g.edges ?? 0} edges, ` +
-            `${g.contradictions ?? 0} contradictions. Reloading…`
+            `Pipeline complete${verdict} — extracted ${last.extracted ?? 0} notes, ` +
+            `${last.triples_added ?? 0} triples, ${last.nodes ?? 0} nodes / ` +
+            `${last.edges ?? 0} edges, ${last.contradictions ?? 0} contradictions. Reloading…`
           )
           setLocalNotesAdded(false)
           setTimeout(() => window.location.reload(), 1200)
           break
         }
-        // Unknown/idle state — stop polling rather than looping forever.
+
+        setPipelineStatus("Run finished, but nothing was recorded — check the backend logs.")
         break
       }
     } catch (e) {
@@ -222,6 +246,11 @@ export function Dashboard({
               <span className={`h-1.5 w-1.5 rounded-full ${backendAvailable ? "bg-green-400" : "bg-muted-foreground"}`} />
               {backendAvailable ? "backend live" : "seed data"}
             </div>
+
+            {/* Always visible, and polling on its own: the pipeline is
+                started from four places and the dashboard could previously
+                only see its own runs. */}
+            {backendAvailable && <PipelineIndicator scope={scope} />}
 
             {backendAvailable && (
               <button
