@@ -26,6 +26,7 @@ from fastapi.responses import JSONResponse
 from brahmastra.auth import auth_status, require_api_key
 from brahmastra.db import init_db
 from brahmastra.routers import notes, pipeline, graph, ask, paths, workspaces, entities
+from brahmastra.ingest.routes import router as ingest_router
 
 
 def _mcp_http_enabled() -> bool:
@@ -188,6 +189,11 @@ app.include_router(ask.router)
 app.include_router(paths.router)
 app.include_router(workspaces.router)
 app.include_router(entities.router)
+# Transcript ingestion. Mounted here rather than served separately so it
+# inherits the auth middleware and the per-request workspace binding: a
+# second door into the same data with its own idea of who may open it is
+# how isolation gets lost.
+app.include_router(ingest_router)
 
 
 @app.get("/health")
