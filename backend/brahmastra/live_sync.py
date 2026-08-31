@@ -90,11 +90,28 @@ def tick() -> dict:
 
     if summary["synced"] > 0 or pending or retryable:
         pipe = run_pipeline(full=False)
-        summary["extracted"] = pipe["stages"]["extract"].get("extracted", 0)
-        summary["nodes"] = pipe["stages"]["graph"]["nodes"]
-        summary["contradictions"] = pipe["stages"]["graph"]["contradictions"]
-        summary["wrote_back"] = pipe["stages"].get("notion_writeback", {})
-        summary["did_work"] = True
+
+        # Read every stage defensively. run_pipeline DOCUMENTS returning
+        # {"skipped": ...} with an empty `stages` when another run holds the
+        # lock, and a stage that failed is a dict carrying `error` rather than
+        # the counts. Indexing straight into ["stages"]["extract"] therefore
+        # raised KeyError('extract') on a perfectly ordinary skipped run, and
+        # the watcher logged "ERROR in tick #1 after 0s: 'extract'" -- a bare
+        # key name, which says nothing about a lock and reads like the extract
+        # stage itself blew up.
+        stages = pipe.get("stages") or {}
+        graph = stages.get("graph") or {}
+
+        summary["skipped"] = pipe.get("skipped")
+        summary["status"] = pipe.get("status")
+        summary["failed_stages"] = pipe.get("failed_stages") or []
+        summary["extracted"] = (stages.get("extract") or {}).get("extracted", 0)
+        summary["nodes"] = graph.get("nodes")
+        summary["contradictions"] = graph.get("contradictions")
+        summary["wrote_back"] = stages.get("notion_writeback", {})
+        # A skipped run did nothing, and reporting it as work made the next
+        # heartbeat claim an extraction that never happened.
+        summary["did_work"] = pipe.get("skipped") is None
     else:
         summary["did_work"] = False
     return summary
@@ -126,13 +143,26 @@ def watch(interval: int | None = None) -> None:
             dt = time.monotonic() - t0
             if s["did_work"]:
                 wb = s.get("wrote_back", {})
+                # Say when a run finished `partial`. The verdict existed but
+                # never reached this log, so a scheduler quietly extracting
+                # nothing looked identical to one doing fine.
+                verdict = ""
+                if s.get("status") and s["status"] != "ok":
+                    verdict = f" status={s['status']} failed={s.get('failed_stages')}"
                 print(
                     f"[{_stamp()}] tick #{n} OK in {dt:.0f}s | synced={s['synced']} "
                     f"extracted={s.get('extracted')} nodes={s.get('nodes')} "
                     f"contradictions={s.get('contradictions')} "
-                    f"notion_pushed={wb.get('pushed') if isinstance(wb, dict) else wb}",
+                    f"notion_pushed={wb.get('pushed') if isinstance(wb, dict) else wb}"
+                    f"{verdict}",
                     flush=True,
                 )
+            elif s.get("skipped"):
+                # Not idleness. Saying "no changes" here would claim there was
+                # nothing to do while a backlog sat behind a held lock.
+                print(f"[{_stamp()}] tick #{n} in {dt:.0f}s | skipped: {s['skipped']} "
+                      f"(pending={s.get('pending')} retryable={s.get('retryable')})",
+                      flush=True)
             else:
                 # heartbeat even when idle, so liveness is always visible
                 ka = s.get("keepalive") or {}

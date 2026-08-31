@@ -93,3 +93,49 @@ def test_the_tick_reports_the_backlog_it_saw(ran):
     summary = live_sync.tick()
     assert summary["pending"] == 1
     assert summary["retryable"] == 1
+
+
+# ---------------------------------------------------------------------------
+# A tick must survive every shape run_pipeline can return
+# ---------------------------------------------------------------------------
+
+def test_a_skipped_run_does_not_crash_the_tick(monkeypatch):
+    """
+    run_pipeline DOCUMENTS returning {"skipped": ...} with an empty `stages`
+    when another run holds the lock. Indexing straight into
+    stages["extract"] raised KeyError('extract') on that perfectly ordinary
+    path, and the watcher logged "ERROR in tick #1 after 0s: 'extract'" -- a
+    bare key name that says nothing about a lock.
+    """
+    db.upsert_note("s1", "Waiting", "Sarah reports to Mei.", mark_pending=True)
+    monkeypatch.setattr(
+        "brahmastra.pipeline.run_pipeline",
+        lambda full=False: {"mode": "incremental", "stages": {},
+                            "skipped": "another pipeline run is already in progress"},
+    )
+    monkeypatch.setattr(live_sync, "touch_if_idle", lambda *a, **k: {"pinged": False},
+                        raising=False)
+
+    summary = live_sync.tick()
+    assert summary["skipped"] == "another pipeline run is already in progress"
+    assert summary["did_work"] is False, "a skipped run reported work it never did"
+
+
+def test_a_failed_graph_stage_does_not_crash_the_tick(monkeypatch):
+    """A stage that errored is a dict carrying `error`, not the counts."""
+    db.upsert_note("s2", "Waiting", "Mei works at Veraxion.", mark_pending=True)
+    monkeypatch.setattr(
+        "brahmastra.pipeline.run_pipeline",
+        lambda full=False: {
+            "stages": {"extract": {"extracted": 2}, "graph": {"error": "boom"}},
+            "status": "partial", "failed_stages": ["graph"],
+        },
+    )
+    monkeypatch.setattr(live_sync, "touch_if_idle", lambda *a, **k: {"pinged": False},
+                        raising=False)
+
+    summary = live_sync.tick()
+    assert summary["extracted"] == 2
+    assert summary["nodes"] is None
+    assert summary["status"] == "partial"
+    assert summary["failed_stages"] == ["graph"]
