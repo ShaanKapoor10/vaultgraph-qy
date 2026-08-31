@@ -58,6 +58,34 @@ export function Dashboard({
   // Track whether the user has added local notes (which invalidates the backend result)
   const [localNotesAdded, setLocalNotesAdded] = useState(false)
 
+  // Adopt the new workspace's data when the server sends it.
+  //
+  // This is why switching workspaces appeared to do nothing until the page was
+  // reloaded by hand. `useState(initialNotes)` uses its argument on the FIRST
+  // MOUNT only; navigating to ?workspace=office re-runs the server component
+  // and hands down the other graph's notes, but React keeps the same Dashboard
+  // instance and the state ignores every prop after the first. The URL changed,
+  // the picker changed, and the screen kept rendering the previous graph.
+  //
+  // Adjusting state during render rather than in an effect, which is the React
+  // pattern for this: it re-renders before anything is painted, so the wrong
+  // graph is never briefly on screen.
+  //
+  // Deliberately NOT a `key` on this component, which would be the blunter fix.
+  // A key discards ALL state, including which tab is open -- and the tab is a
+  // preference about how you are reading, not a fact about which graph you are
+  // reading. What must reset is listed here, and `selected` is on that list
+  // because an entity name from one graph means nothing in another.
+  const [renderedWorkspace, setRenderedWorkspace] = useState(workspace)
+  if (workspace !== renderedWorkspace) {
+    setRenderedWorkspace(workspace)
+    setNotes(initialNotes)
+    setTriples(initialTriples)
+    setSelected(null)
+    setLocalNotesAdded(false)
+    setPipelineStatus(null)
+  }
+
   // Use the precomputed backend result unless the user has added notes locally.
   const result = useMemo(() => {
     if (initialResult && !localNotesAdded) return initialResult

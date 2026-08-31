@@ -51,10 +51,15 @@ export function WorkspaceSwitcher({
           startTransition(() => {
             // `default` is the implicit workspace, so leave it out of the URL
             // rather than carrying a parameter that changes nothing.
+            //
+            // No router.refresh() here. It refreshes the route currently on
+            // screen, and queued in the same transition as the push it ran
+            // against the workspace being LEFT -- refetching the old graph
+            // while the new one was already being requested. The page reads
+            // searchParams, so it renders dynamically and the push refetches
+            // it on its own; the client router does not reuse a cached payload
+            // for a dynamic segment.
             router.push(next === "default" ? "/" : `/?workspace=${encodeURIComponent(next)}`)
-            // The data comes from a server component; without this the router
-            // may serve a cached render and the graph would not change.
-            router.refresh()
           })
         }}
         className="rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground
