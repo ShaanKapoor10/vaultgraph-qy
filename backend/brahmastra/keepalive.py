@@ -36,29 +36,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from brahmastra.env import load_env
+from brahmastra.env import data_dir, load_env
 
 load_env()
 
 from brahmastra.stores.base import GraphStore
-
-# Beside the pipeline lock, for the same reason: it is per-store state that
-# belongs to this checkout rather than to the graph it describes.
-_DEFAULT_STATE_DIR = Path(__file__).resolve().parent.parent / "data"
-
-
-def _state_dir() -> Path:
-    """
-    Where the touch stamps live, resolved at call time.
-
-    Overridable because the stamp is only useful when everything touching the
-    same engine can see it. In a container the package lives on the image and
-    the shared volume is mounted elsewhere, so a stamp written beside the code
-    is invisible to the next process and every one of them pings independently
-    -- correct, but several times more remote queries than the design intends.
-    """
-    override = os.environ.get("BRAHMASTRA_DATA_DIR", "").strip()
-    return Path(override) if override else _DEFAULT_STATE_DIR
 
 # Aura Free's limit is about 72 hours. Twelve leaves five further attempts of
 # margin, so the instance survives a keepalive that fails, a scheduler that is
@@ -100,7 +82,7 @@ def _digest(store: GraphStore) -> str:
 
 def _state_path(store: GraphStore) -> Path:
     """One stamp per engine, so two graphs cannot vouch for each other."""
-    return _state_dir() / f".graph-touch-{_digest(store)}"
+    return data_dir() / f".graph-touch-{_digest(store)}"
 
 
 def _resolve(store: GraphStore | None) -> GraphStore:

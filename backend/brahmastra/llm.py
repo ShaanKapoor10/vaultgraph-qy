@@ -38,8 +38,22 @@ load_env()
 
 
 def _env(name: str, default: str) -> str:
-    """Read env at call time, not import time, so tests can monkeypatch."""
-    return os.environ.get(name, default)
+    """
+    Read env at call time, not import time, so tests can monkeypatch.
+
+    An EMPTY value counts as unset. os.environ.get(name, default) returns the
+    default only when the variable is ABSENT, and docker compose writes
+    `GROQ_MODEL: ${GROQ_MODEL:-}` -- present, empty -- so that an operator can
+    override it. The container therefore asked Groq for a model named "" and
+    got `404 The model `` does not exist`, which reads like a retired model
+    rather than an unset one and sent the search to entirely the wrong place.
+
+    Same shape as the dotenv trap in env.py: present-but-empty is not absent,
+    and every place that treats the two alike is a defect waiting for a
+    deployment to expose it.
+    """
+    value = os.environ.get(name, "")
+    return value.strip() or default
 
 
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b-instruct")

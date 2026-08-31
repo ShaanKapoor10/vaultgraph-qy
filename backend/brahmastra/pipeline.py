@@ -26,14 +26,20 @@ from brahmastra import db
 # Notion pull for "NOTION_TOKEN not set" and then — after the extract stage
 # imported llm and pulled .env in — happily push pages in the write-back stage
 # of the SAME run. Observed exactly that: sync skipped, writeback pushed 3.
-from brahmastra.env import load_env
+from brahmastra.env import data_dir, load_env
 
 load_env()
 
 # Cross-process lock so the backend "run pipeline" button and the live_sync
 # watcher can't run the pipeline simultaneously (concurrent SQLite writers
 # otherwise cause "database is locked" 500s).
-_LOCK_DIR = Path(__file__).resolve().parent.parent / "data"
+#
+# It lives under env.data_dir(), NOT beside the package. The package directory
+# is root-owned inside the container while the process runs unprivileged, so
+# the old location was unwritable there -- and since the lock is taken before
+# any work, that made every containerised run fail instantly with
+# "[Errno 13] Permission denied: '/app/data'". The dashboard's run button and
+# the scheduler were both dead on arrival while looking perfectly healthy.
 _LOCK_STALE_SECS = 900  # steal a lock older than 15 min (crashed run)
 
 
@@ -49,7 +55,7 @@ def _lock_path() -> Path:
     """
     from brahmastra import db
     digest = hashlib.sha1(db.describe().encode("utf-8")).hexdigest()[:12]
-    return _LOCK_DIR / f".pipeline-{digest}.lock"
+    return data_dir() / f".pipeline-{digest}.lock"
 
 
 def _acquire_lock() -> bool:

@@ -32,6 +32,31 @@ ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 DISABLE_VAR = "BRAHMASTRA_NO_DOTENV"
 
 
+# Runtime state that belongs to this deployment rather than to the code: the
+# pipeline lock and the keepalive's touch stamp.
+#
+# Overridable, and in a container it MUST be overridden. The package lives on
+# the image under /app, which is owned by root while the process runs as an
+# unprivileged user, so the default is not merely a poor choice there -- it is
+# unwritable. That is not theoretical: every pipeline run inside Docker failed
+# with "[Errno 13] Permission denied: '/app/data'" before the lock looked here,
+# which broke the dashboard's run button and the scheduler at once while
+# everything else about both looked healthy.
+#
+# One function for both callers on purpose. They have to agree: the lock and
+# the stamp describe the same run, and a container that wrote one to the volume
+# and the other to the image would be half-configured in a way nobody notices.
+_DEFAULT_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+DATA_DIR_VAR = "BRAHMASTRA_DATA_DIR"
+
+
+def data_dir() -> Path:
+    """Where runtime state is written. Read per call, never cached."""
+    override = os.environ.get(DATA_DIR_VAR, "").strip()
+    return Path(override) if override else _DEFAULT_DATA_DIR
+
+
 def dotenv_disabled() -> bool:
     """Whether loading is switched off. Read per call, never cached."""
     return os.environ.get(DISABLE_VAR, "").strip().lower() in {"1", "true", "yes", "on"}

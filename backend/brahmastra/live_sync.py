@@ -55,6 +55,26 @@ def tick() -> dict:
 
     pending = db.get_notes(status="pending")
 
+    # Errored notes are work too, and forgetting that stranded them forever.
+    #
+    # run_extraction already retries status='error' on every run, precisely so
+    # a transient provider outage does not park a note permanently. But this
+    # tick decided whether to CALL it by counting only 'pending', so the
+    # recovery was unreachable from the one process that runs unattended: 53
+    # notes failed extraction with no LLM key configured, flipped to 'error',
+    # and every subsequent tick reported "no changes (heartbeat)" while there
+    # was a backlog it was built to clear.
+    #
+    # Mirrors EXTRACT_RETRY_ERRORS so the trigger and the stage cannot disagree
+    # about what counts as work.
+    retryable = (
+        db.get_notes(status="error")
+        if os.environ.get("EXTRACT_RETRY_ERRORS", "1") != "0"
+        else []
+    )
+    summary["pending"] = len(pending)
+    summary["retryable"] = len(retryable)
+
     # Keep the graph engine awake. This has to be here rather than left to the
     # tick's normal work, because the check just above -- get_notes(pending) --
     # is a SOURCE read: under NOTE_BACKEND=postgres it is answered entirely by
@@ -68,7 +88,7 @@ def tick() -> dict:
 
     summary["keepalive"] = touch_if_idle()
 
-    if summary["synced"] > 0 or pending:
+    if summary["synced"] > 0 or pending or retryable:
         pipe = run_pipeline(full=False)
         summary["extracted"] = pipe["stages"]["extract"].get("extracted", 0)
         summary["nodes"] = pipe["stages"]["graph"]["nodes"]
