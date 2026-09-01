@@ -31,6 +31,10 @@ type Status = {
   running?: boolean
   active?: { age_seconds?: number; stale?: boolean } | null
   last?: RunRecord | null
+  /** Triples changed since the last graph build, so the graph is behind. */
+  stale?: boolean
+  behind?: { built_from_triples?: number; triples_now?: number } | null
+  dirty_since?: { at?: string; reason?: string } | null
 }
 
 /** "4m ago" — relative, because the absolute time answers a question nobody asked. */
@@ -106,6 +110,30 @@ export function PipelineIndicator({
            title="No pipeline run has been recorded against this workspace yet">
         <CircleDashed className="h-3 w-3" />
         never run
+      </div>
+    )
+  }
+
+  // Behind the notes, though the last run itself was fine. Extraction is
+  // reachable without a full run -- the MCP add_note extracts inline -- so
+  // triples land while resolve, build-graph and the cache do not. Reporting
+  // only "ran 4h ago · ok" here was actively misleading: /ask and /graph were
+  // answering from a graph that predated the note just stored, confidently,
+  // and this chip said everything was fine.
+  if (status.stale) {
+    return (
+      <div
+        className={`${base} border-amber-500/40 bg-amber-500/10 text-amber-400`}
+        title={
+          `The graph is behind the notes: it was built from ` +
+          `${status.behind?.built_from_triples ?? "fewer"} triples and there are now ` +
+          `${status.behind?.triples_now ?? "more"}. Extraction can happen without a full ` +
+          `run -- storing a note through MCP extracts inline -- so resolve, build-graph ` +
+          `and the cache are out of date. Run the pipeline to rebuild.`
+        }
+      >
+        <TriangleAlert className="h-3 w-3" />
+        graph behind notes
       </div>
     )
   }

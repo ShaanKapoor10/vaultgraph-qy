@@ -104,6 +104,114 @@ def _record_path() -> Path:
     return data_dir() / f".pipeline-last-{digest}.json"
 
 
+# ---------------------------------------------------------------------------
+# Whether the DERIVED data is behind the notes
+# ---------------------------------------------------------------------------
+#
+# "When did the pipeline last run" and "is the graph current" are different
+# questions, and only the first one had an answer. Extraction is reachable
+# without run_pipeline -- brahmastra_add_note extracts inline, POST
+# /pipeline/extract calls run_extraction directly, and a script can call
+# extract_note itself -- so triples land while resolve, build-graph and the
+# cache do not. The status then reports a clean run from yesterday and looks
+# healthy, while the graph is missing everything stored since.
+#
+# That is the shape of a wrong answer rather than a slow one: /ask and /graph
+# read the cache, so they answer confidently from a graph that predates the
+# note you just stored, and nothing anywhere says so.
+#
+# A stamp beside the lock and the record, so any process sees it and it
+# survives a restart -- the same pattern as the keepalive's touch file.
+
+def _dirty_path() -> Path:
+    from brahmastra import db
+    digest = hashlib.sha1(db.describe().encode("utf-8")).hexdigest()[:12]
+    return data_dir() / f".pipeline-dirty-{digest}.json"
+
+
+def mark_dirty(reason: str = "") -> None:
+    """
+    Record that triples changed outside a completed rebuild.
+
+    Called from `extract_note`, which is the single chokepoint every path to
+    new triples goes through. Never raises: failing to note staleness must not
+    fail the extraction that caused it.
+    """
+    import json
+    try:
+        path = _dirty_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "at": datetime.now(timezone.utc).isoformat(),
+            "epoch": time.time(),
+            "reason": reason,
+        }), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def dirty_since() -> dict[str, Any] | None:
+    """What is known about derived data being behind, or None if it is current."""
+    import json
+    try:
+        return json.loads(_dirty_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def graph_is_behind() -> dict[str, Any] | None:
+    """
+    Ask the STORE whether the cached graph still reflects the triples.
+
+    Preferred over the file stamp, and the reason is the deployment rather than
+    elegance. `data_dir()` is a different place for a host process than for a
+    container -- the MCP server writes backend/data, the containers share
+    /data -- so a stamp written by an MCP `add_note` is invisible to the
+    dashboard that needs to report it, and a stamp written by a containerised
+    run is invisible to the CLI. The cache lives in the store, which both
+    halves genuinely share, so a count recorded there is seen by everyone.
+
+    Returns None when the graph is current, when nothing has been built yet, or
+    when the cache predates this check and cannot answer -- callers fall back
+    to the stamp. Reports rather than raises: a status endpoint must not fail
+    because the store is briefly unreachable.
+    """
+    try:
+        cached = db.get_cached_graph()
+        if not cached:
+            return None
+        built_from = (cached.get("stats") or {}).get("triples_total")
+        if built_from is None:
+            return None                       # cache written before this existed
+        now = db.get_db_stats().get("triples_total")
+        if now is None or now == built_from:
+            return None
+        return {
+            "built_from_triples": built_from,
+            "triples_now": now,
+            "built_at": cached.get("built_at"),
+        }
+    except Exception:                                  # noqa: BLE001
+        return None
+
+
+def clear_dirty(before: float) -> None:
+    """
+    Mark the graph current again, for work that happened before `before`.
+
+    The timestamp matters. A note stored WHILE a run is in progress is
+    genuinely not in the graph that run produced, so clearing unconditionally
+    at the end would erase a true staleness signal and leave the note
+    invisible until something else happened to trigger a rebuild.
+    """
+    try:
+        stamp = dirty_since()
+        if stamp is None or float(stamp.get("epoch") or 0) <= before:
+            _dirty_path().unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _write_record(result: dict[str, Any]) -> None:
     """Save a finished run's verdict. Never raises -- reporting is not the work."""
     import json
@@ -170,10 +278,24 @@ def run_state() -> dict[str, Any]:
     run it did not start and still says what happened after a restart.
     """
     active = active_run()
+    # The store first, because it is the half that host and container share.
+    # The stamp is the fallback: it still catches a store that has never been
+    # built, and a cache written before the count was recorded.
+    behind = graph_is_behind()
+    dirty = dirty_since()
     return {
         "running": bool(active and active["running"]),
         "active": active,
         "last": last_run(),
+        # Two different questions. `last` says when a run finished; `stale`
+        # says whether the graph reflects the notes as they are NOW. A store
+        # can have a clean run from yesterday AND a stale graph, which is
+        # exactly what happens when notes arrive through the MCP tool, and
+        # reporting only the first is how /ask ends up answering confidently
+        # from a graph that predates the note you just stored.
+        "stale": behind is not None or dirty is not None,
+        "behind": behind,
+        "dirty_since": dirty,
         "target": db.describe(),
     }
 
@@ -200,11 +322,21 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         result["finished_at"] = datetime.now(timezone.utc).isoformat()
         return result
 
+    # Taken before any stage runs, so work that arrives DURING the run stays
+    # marked stale -- it is genuinely not in the graph this run is building.
+    began = time.time()
+
     try:
         outcome = _run_pipeline_locked(full, result)
         # Recorded before the lock is released, so a poll can never see the
         # lock gone AND no record of why -- which reads as "nothing ever ran".
         _write_record(outcome)
+        # Only a run that actually rebuilt the graph makes it current again.
+        # Clearing on any completion would report a graph as fresh when the
+        # stage that builds it had failed, which is worse than reporting
+        # nothing: the caller stops looking.
+        if "graph" not in (outcome.get("failed_stages") or []):
+            clear_dirty(began)
         return outcome
     finally:
         _release_lock()

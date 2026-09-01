@@ -372,6 +372,13 @@ def run_build_graph() -> dict[str, Any]:
         "contradictions": contradictions,
         "predicted_links": predicted_links,
         "entity_clusters": er_summary,
+        # How many triples this graph was built FROM, so anyone can later ask
+        # whether it still reflects them. Recorded in the cache rather than
+        # beside it because the cache lives in the store, which host processes
+        # and containers share -- a file on disk does not: the MCP server
+        # writes to backend/data while the containers write to /data, so a
+        # marker there is invisible to exactly the half that needs it.
+        "triples_total": db.get_db_stats().get("triples_total"),
     }
 
     built_at = datetime.now(timezone.utc).isoformat()

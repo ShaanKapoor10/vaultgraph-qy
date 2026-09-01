@@ -622,6 +622,16 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
 
     if valid:
         db.insert_triples(valid)
+        # New triples mean resolve, build-graph and the cache are now behind.
+        # Marked HERE because this is the one place every path to new triples
+        # goes through -- the pipeline, POST /pipeline/extract, the MCP
+        # add_note that extracts inline, and any script calling extract_note.
+        # A run that goes on to rebuild the graph clears it again.
+        try:
+            from brahmastra.pipeline import mark_dirty
+            mark_dirty(f"extracted {note_id}")
+        except Exception:                              # noqa: BLE001
+            pass
 
     db.mark_note_done(note_id)
     return {
