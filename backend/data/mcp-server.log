@@ -1,0 +1,17 @@
+[09/01/26 13:52:35] INFO     Processing request of type           server.py:733
+                             CallToolRequest                                   
+[2;36m[09/01/26 14:08:10][0m[2;36m [0m[34mINFO    [0m Processing request of type           [2mserver.py[0m[2m:[0m[2m733[0m
+[2;36m                    [0m         ListToolsRequest                     [2m             [0m
+[09/01/26 14:36:47] INFO     No device provided, using cpu         model.py:190
+                    INFO     Loading SentenceTransformer model    model.py:1001
+                             from                                              
+                             sentence-transformers/all-MiniLM-L6-              
+                             v2.                                               
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 5695.25it/s]
+warmed: numpy, neo4j, embeddings
+[09/01/26 14:36:48] INFO     Processing request of type           server.py:733
+                             CallToolRequest                                   
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 44.15it/s]
+[09/01/26 14:37:05] INFO     Processing request of type           server.py:733
+                             CallToolRequest                                   
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 19.02it/s]

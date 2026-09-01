@@ -291,6 +291,19 @@ class Neo4jStore(GraphStore):
                 self._driver = GraphDatabase.driver(
                     self._uri,
                     notifications_disabled_classifications=["DEPRECATION"],
+                    # And every INFORMATION notice, which is pure volume. A
+                    # schema setup that finds nothing to drop reports each
+                    # no-op back as a multi-line GqlStatusObject, so one
+                    # init_db emitted 552 log lines and 44KB of stderr.
+                    #
+                    # That is not merely noisy, it DEADLOCKS the MCP server.
+                    # A stdio server is spawned with pipes, and a client that
+                    # does not drain stderr lets the OS buffer fill -- 4KB to
+                    # 64KB on Windows -- at which point the next write blocks
+                    # forever, mid-call, and the client waits for a response
+                    # that can never come. Two sessions lost 30 minutes each
+                    # to what looked like a hung query and was a full pipe.
+                    notifications_min_severity="WARNING",
                     **kwargs,
                 )
             except TypeError:

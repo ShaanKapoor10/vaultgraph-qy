@@ -143,6 +143,16 @@ def _merge(primary: Any, extra: Any) -> Any:
 # between a true record and a false one, since "we are migrating in Q3" and "we
 # are not migrating in Q3" are what the meeting was FOR.
 #
+# THE SECOND TIME THIS SHAPE OF BUG HAS BEEN PAID FOR HERE. Entity resolution
+# hit it first: "Brahmastra backend" and "Brahmastra frontend" embed at 0.94 and
+# were being merged into one entity, fixed by `_is_contrasting` in
+# entity_resolution.py, which refuses a merge when two names differ only by an
+# antonym token. Same failure, different layer -- that guard compares NAMES for
+# opposed words, this one compares STATEMENTS for opposed polarity, and a
+# system that stores what people decided needs both. Anywhere else embedding
+# similarity is used to decide that two things are THE SAME, assume it cannot
+# see the difference between a thing and its opposite, and check.
+#
 # Deliberately narrow. A cue that fires too eagerly costs a duplicate artifact;
 # one that misses costs a reversed decision, so the list covers explicit
 # negation and explicit shelving, and stops there. Bare "no" is left out on

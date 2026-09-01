@@ -16,6 +16,7 @@ Tools exposed:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import uuid
@@ -25,6 +26,16 @@ from typing import Any
 from brahmastra.env import load_env
 
 load_env()
+
+# Pin the noisiest loggers BEFORE anything can reconfigure them.
+#
+# Setting a level on the logger itself, rather than lowering the root, is the
+# point: torch and transformers arrive later in the import chain, one of them
+# calls logging.basicConfig, and the root logger comes back at INFO with a
+# RichHandler attached. Anything left at NOTSET inherits that and starts
+# talking. An explicit level here survives it.
+for _noisy in ("neo4j", "neo4j.notifications", "httpx", "httpcore", "urllib3"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 from mcp.server.fastmcp import FastMCP
 from brahmastra import db
@@ -419,5 +430,113 @@ def brahmastra_search_all_workspaces(query: str, limit: int = 10) -> str:
 # import skips __main__ and runs the whole module. That gap between "the code
 # has the tool" and "the server serves it" cost a long hunt.
 
+def _warm_native_imports() -> list[str]:
+    """
+    Import the C-extension packages HERE, on the main thread, before the event
+    loop exists.
+
+    THIS IS THE FIX FOR THE 30-MINUTE HANG, and it is not a warm-up
+    optimisation despite the name.
+
+    Every tool ends up in `db`, which imports the neo4j driver lazily, on first
+    use. Under stdio the first use is inside a tool call, and FastMCP runs a
+    sync tool on an anyio WORKER THREAD. So the very first tool call of a
+    session was importing `neo4j` -> `numpy` -> a native extension from a
+    non-main thread while the asyncio loop ran on the main one, and on Windows
+    that deadlocks in the loader. The thread never returns, the call never gets
+    a response, and the client waits until its own timeout -- 1800s, twice.
+
+    The evidence, from faulthandler on the hung process: the worker thread sat
+    in numpy/_core/multiarray.py at `create_module`, reached through
+    neo4j/_optional_deps.py, with no progress across repeated dumps.
+
+    It presents as anything but an import problem. `initialize` and
+    `tools/list` answer instantly because neither touches the store; only the
+    first tool call hangs; the same call run in-process takes ten seconds,
+    because there the import happens on the main thread. It looked like a
+    hung query, then like a full stderr pipe, and it was neither.
+
+    Importing on the main thread at startup means no tool call is ever the
+    first to touch these packages. Returns what it warmed, for the log.
+    """
+    warmed: list[str] = []
+    # numpy explicitly, because it is the extension the dump caught mid-load,
+    # and neo4j because that is the import chain which reaches it.
+    for module in ("numpy", "neo4j"):
+        try:
+            __import__(module)
+            warmed.append(module)
+        except Exception as exc:                       # noqa: BLE001
+            print(f"warm {module} failed: {exc}", file=sys.stderr)
+
+    # The embedding model too, and NOT optionally, though it costs ~11s against
+    # numpy's 0.5s and the temptation to make it a flag is obvious.
+    #
+    # Warming only numpy and neo4j was tried, on the reasoning that numpy is
+    # shared with the torch stack so one warm covers both. Measured: the tool
+    # call still hung, indefinitely. torch and sentence-transformers deadlock
+    # on their own account, so the cheap half of this fix is not a fix -- and a
+    # switch whose off position restores a 30-minute hang is a trap, not a
+    # tuning knob. The eleven seconds are paid once per server, at startup,
+    # where they are a slow start rather than a dead session.
+    try:
+        from brahmastra.embeddings import get_model
+        get_model()
+        warmed.append("embeddings")
+    except Exception as exc:                           # noqa: BLE001
+        print(f"warm embeddings failed: {exc}", file=sys.stderr)
+    return warmed
+
+
+def _detach_stderr() -> Path | None:
+    """
+    Send this process's stderr to a file instead of the client's pipe.
+
+    THIS IS THE FIX FOR A HANG, not a tidiness measure, and quieting the
+    loggers above is not a substitute for it.
+
+    A stdio MCP server is spawned by its client with pipes on all three
+    standard streams. stdout carries JSON-RPC and is disciplined. stderr is
+    where every library in the process writes whatever it likes -- and if the
+    client is not actively draining that pipe, the OS buffer fills (4KB to 64KB
+    on Windows) and the NEXT WRITE BLOCKS FOREVER. The server stops mid-call,
+    the client waits for a response that can never come, and the failure
+    presents as a hung query rather than as a full buffer.
+
+    It happened twice, both times on the first search of a session, because
+    that is when init_db and the embedding model load run: 552 log lines and
+    44KB of stderr from one call, against a buffer a fraction of that size.
+
+    Quieting a known-noisy logger fixes the instance. Only this fixes the
+    CLASS: the server can no longer be killed by any dependency deciding to
+    narrate itself, including ones added later by someone who has never read
+    this comment.
+
+    The output is kept rather than discarded -- a hang that leaves no trace is
+    barely better than a hang. BRAHMASTRA_MCP_STDERR=inherit restores the pipe
+    when you genuinely want the client to show you a traceback live.
+    """
+    if os.environ.get("BRAHMASTRA_MCP_STDERR", "").strip().lower() == "inherit":
+        return None
+
+    from brahmastra.env import data_dir
+
+    path = data_dir() / "mcp-server.log"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a", buffering=1, encoding="utf-8", errors="replace")
+        os.dup2(handle.fileno(), 2)      # the fd, so C-level writes follow too
+        sys.stderr = handle
+    except OSError:
+        # A server that cannot open its log is still a working server.
+        return None
+    return path
+
+
 if __name__ == "__main__":
+    _detach_stderr()
+    # Before mcp.run(), which starts the event loop. After it, every import is
+    # somebody's worker thread -- see _warm_native_imports.
+    print(f"warmed: {', '.join(_warm_native_imports()) or 'nothing'}",
+          file=sys.stderr)
     mcp.run(transport="stdio")
