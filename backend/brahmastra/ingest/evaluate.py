@@ -47,14 +47,39 @@ from brahmastra.env import load_env
 
 load_env()
 
-from brahmastra.ingest.comprehend import ARTIFACT_KINDS, comprehend_chunk
+from brahmastra.ingest.comprehend import (
+    ARTIFACT_KINDS,
+    comprehend_chunk,
+    comprehend_chunk_focused,
+)
 from brahmastra.ingest.consolidate import consolidate, similarity
 from brahmastra.ingest.segment import segment
 
-# A found artifact counts as the labelled one when it says the same thing.
-# Lower than the consolidation threshold on purpose: here the question is "did
-# it find this?", not "are these the same row?".
-MATCH_THRESHOLD = 0.62
+# A found artifact counts as the labelled one when it MEANS the same thing.
+#
+# Semantic, not lexical, and that is not a refinement -- lexical similarity
+# cannot do this job at all. Measured on real pairs from a live run:
+#
+#                                        lexical   cosine
+#   same risk, paraphrased                  0.42     0.78
+#   same question, paraphrased              0.68     0.89
+#   same decision, reworded                 0.80     0.80
+#   two DIFFERENT decisions                 0.39     0.03
+#   two DIFFERENT action items              0.40     0.38
+#
+# Lexical matches span 0.42-0.80 and non-matches span 0.39-0.40: the ranges
+# OVERLAP, so no threshold separates them and the scorer was reporting the same
+# finding as both a miss and a fabrication. Cosine leaves a clean gap between
+# 0.38 and 0.78.
+#
+# The model is all-MiniLM-L6-v2, already a dependency, local, and free of any
+# quota -- so the measurement never competes with the thing being measured.
+MATCH_THRESHOLD = 0.60
+
+# Used only when embeddings are unavailable. Deliberately high, because on this
+# evidence lexical matching is unreliable and should fail towards "not a match"
+# rather than quietly inflating recall.
+LEXICAL_FALLBACK_THRESHOLD = 0.75
 
 # Where labelled cases live. A case is a transcript plus what a human says is
 # in it -- see `cases/` for the format and the seeded example.
@@ -84,6 +109,32 @@ class Score:
         return 2 * p * r / (p + r) if (p + r) else 0.0
 
 
+def _matcher(statements: list[str]) -> tuple[Callable[[str, str], float], float]:
+    """
+    Return a similarity function and the threshold that goes with it.
+
+    Embeds everything in ONE batch and caches, so scoring is a handful of
+    vector dot products rather than a model call per comparison.
+    """
+    try:
+        from brahmastra.embeddings import embed
+
+        vectors = embed(statements)
+        if vectors:
+            table = dict(zip(statements, vectors))
+
+            def cosine(a: str, b: str) -> float:
+                va, vb = table.get(a), table.get(b)
+                if va is None or vb is None:
+                    return similarity(a, b)
+                return sum(x * y for x, y in zip(va, vb))   # already L2-normalised
+
+            return cosine, MATCH_THRESHOLD
+    except Exception:
+        pass
+    return similarity, LEXICAL_FALLBACK_THRESHOLD
+
+
 def score_against(expected: list[dict[str, Any]],
                   produced: list[Any]) -> dict[str, Score]:
     """
@@ -91,6 +142,11 @@ def score_against(expected: list[dict[str, Any]],
 
     Greedy one-to-one matching: an expected artifact can be claimed once, so
     producing the same finding five times cannot inflate recall.
+
+    Matched on MEANING. Lexical similarity was measurably unable to do this --
+    see MATCH_THRESHOLD -- and reported the same paraphrased risk as both a
+    miss and a fabrication, which would have made every comparison between two
+    architectures meaningless.
     """
     scores = {kind: Score(kind) for kind in ARTIFACT_KINDS}
 
@@ -99,16 +155,20 @@ def score_against(expected: list[dict[str, Any]],
     for artifact in produced:
         scores.setdefault(artifact.kind, Score(artifact.kind)).found += 1
 
+    compare, threshold = _matcher(
+        [e["statement"] for e in expected] + [a.statement for a in produced]
+    )
+
     unclaimed = list(expected)
     for artifact in produced:
         best, best_score = None, 0.0
         for candidate in unclaimed:
             if candidate["kind"] != artifact.kind:
                 continue
-            value = similarity(candidate["statement"], artifact.statement)
+            value = compare(candidate["statement"], artifact.statement)
             if value > best_score:
                 best, best_score = candidate, value
-        if best is not None and best_score >= MATCH_THRESHOLD:
+        if best is not None and best_score >= threshold:
             unclaimed.remove(best)
             scores[artifact.kind].matched += 1
         else:
@@ -200,6 +260,10 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--cases", default=None, help="directory of labelled cases")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
+    parser.add_argument("--variant", choices=("single", "focused"), default="single",
+                        help="single pass, or two specialised passes")
+    parser.add_argument("--compare", action="store_true",
+                        help="run both variants and print them side by side")
     args = parser.parse_args(argv)
 
     directory = Path(args.cases) if args.cases else CASES_DIR
@@ -210,7 +274,19 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
         return 1
 
-    results = [run_case(case) for case in cases]
+    variants = {"single": comprehend_chunk, "focused": comprehend_chunk_focused}
+
+    if args.compare:
+        rule = "=" * 62
+        for name, fn in variants.items():
+            print(f"\n{rule}\n{name.upper()} PASS\n{rule}")
+            for case in cases:
+                _report(run_case(case, comprehend=fn))
+        print("\nTwice the calls has to be paid for in recall. If it is not, "
+              "the single pass wins on cost alone.")
+        return 0
+
+    results = [run_case(case, comprehend=variants[args.variant]) for case in cases]
 
     if args.json:
         print(json.dumps([{

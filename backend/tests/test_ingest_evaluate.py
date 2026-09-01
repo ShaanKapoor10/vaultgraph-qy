@@ -107,3 +107,58 @@ def test_a_failing_chunk_is_reported_not_swallowed():
     result = run_case(case, comprehend=broken)
     assert result["errors"]
     assert result["after_consolidation"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The matcher itself, which every comparison depends on
+# ---------------------------------------------------------------------------
+
+def test_a_paraphrase_lexical_similarity_cannot_see_is_still_matched():
+    """
+    Measured on a live run: this pair scores 0.42 lexically and 0.78 by cosine,
+    while two genuinely DIFFERENT decisions score 0.39 lexically. The lexical
+    ranges overlap, so no threshold separates them -- and the scorer reported
+    this real finding as both a miss AND a fabrication.
+    """
+    scores = score_against(
+        [{"kind": "risk",
+          "statement": "The Acme contract assumes a March delivery, so slipping may be a breach"}],
+        [art("risk", "Potential contract breach with Acme due to delayed delivery.")],
+    )
+    assert scores["risk"].matched == 1
+    assert scores["risk"].recall == 1.0
+    assert not scores["risk"].spurious
+
+
+def test_two_genuinely_different_findings_are_not_matched():
+    """The loosening must not make everything match everything."""
+    scores = score_against(
+        [{"kind": "decision", "statement": "Move the release date to April 15th"}],
+        [art("decision", "Raj owns the reconciliation job")],
+    )
+    assert scores["decision"].matched == 0
+    assert scores["decision"].spurious
+
+
+def test_different_action_items_are_kept_apart():
+    scores = score_against(
+        [{"kind": "action_item", "statement": "Mei updates the roadmap by Friday"}],
+        [art("action_item", "Sarah communicates the release date to the team")],
+    )
+    assert scores["action_item"].matched == 0
+
+
+def test_scoring_still_works_without_embeddings(monkeypatch):
+    """
+    The harness must not become unrunnable because a model file is missing.
+    It falls back to lexical with a deliberately high threshold, so it fails
+    towards "not a match" rather than quietly inflating recall.
+    """
+    import brahmastra.embeddings as emb
+    monkeypatch.setattr(emb, "embed", lambda texts: None)
+
+    scores = score_against(
+        [{"kind": "decision", "statement": "Move the release date to April 15th"}],
+        [art("decision", "Move the release date to April 15th")],
+    )
+    assert scores["decision"].matched == 1

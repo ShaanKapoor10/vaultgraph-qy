@@ -63,6 +63,34 @@ def _isolate_storage_choice(monkeypatch):
     monkeypatch.setenv("POSTGRES_DSN", "")
     monkeypatch.setenv("DATABASE_URL", "")
 
+    # A LOCAL model is reachable without any credential, so clearing API keys
+    # is not enough to keep the suite off an LLM. The moment `ollama serve` is
+    # running -- which it now is, as the quota-free provider -- resolve_provider
+    # picks it up and any test that forgets to stub comprehension quietly makes
+    # real inference calls. Observed: a run went from 70 seconds to 201 because
+    # four tests were talking to a 7B model nobody meant to invoke.
+    #
+    # Pointed at a port nothing listens on rather than deleted, for the same
+    # reason as everything above: absent is what dotenv fills in.
+    monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
+    monkeypatch.setenv("LLM_PROVIDER", "")
+
+    # And the cloud keys, EXPLICITLY -- BRAHMASTRA_NO_DOTENV is not enough here.
+    #
+    # This file's own docstring said the suite "clears the Notion and LLM
+    # credentials", and for the LLM half that was simply not true: nothing set
+    # these. Disabling dotenv does not undo it either, because llm.py calls
+    # load_env() AT IMPORT, which happens during collection -- before any
+    # fixture runs -- so the real key is already in os.environ by then. The
+    # same import-order trap that env.py exists to document.
+    #
+    # Meaning the suite has been running with a live, usable Groq key: any test
+    # that forgot to stub an LLM call would have made a real one and spent real
+    # quota, silently.
+    for credential in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "GROQ_MODEL",
+                       "ANTHROPIC_MODEL"):
+        monkeypatch.setenv(credential, "")
+
 
 @pytest.fixture(autouse=True)
 def _refuse_real_infrastructure(request, _isolate_storage_choice):

@@ -62,7 +62,7 @@ def understood(monkeypatch):
             rejected=["decision: quote not found in the passage — 'invented'"],
         )
 
-    monkeypatch.setattr(assemble, "comprehend_chunk", fake)
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: fake)
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +194,7 @@ def test_a_failing_chunk_leaves_the_rest_intact(store, monkeypatch):
             participants=["Sarah"],
         )
 
-    monkeypatch.setattr(assemble, "comprehend_chunk", flaky)
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: flaky)
     tid = store.create_transcript(Transcript("", "Long meeting", long_transcript))
     report = assemble.process_transcript(tid, store=store)
 
@@ -206,9 +206,9 @@ def test_a_failing_chunk_leaves_the_rest_intact(store, monkeypatch):
 
 def test_a_wholly_failed_transcript_says_so(store, monkeypatch):
     monkeypatch.setattr(
-        assemble, "comprehend_chunk",
-        lambda chunk, max_tokens=None: ChunkUnderstanding(
-            chunk_index=chunk.index, error="no LLM provider available"),
+        assemble, "comprehension_strategy",
+        lambda: (lambda chunk, max_tokens=None: ChunkUnderstanding(
+            chunk_index=chunk.index, error="no LLM provider available")),
     )
     tid = store.create_transcript(Transcript("", "Release planning", TRANSCRIPT))
     report = assemble.process_transcript(tid, store=store)
@@ -397,3 +397,30 @@ def test_the_workspace_binding_is_restored_afterwards(monkeypatch, tmp_path, und
 
     assert current_workspace() == before
     reset_store()
+
+
+# ---------------------------------------------------------------------------
+# Which comprehension runs
+# ---------------------------------------------------------------------------
+
+def test_the_strategy_defaults_to_the_focused_passes(monkeypatch):
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_the_single_pass_can_be_selected(monkeypatch):
+    """
+    Configurable because the evaluation says the right answer DEPENDS ON THE
+    MODEL: splitting the work doubled recall on gpt-oss-120b and made
+    qwen2.5:7b worse. That is not something to hardcode.
+    """
+    from brahmastra.ingest.comprehend import comprehend_chunk
+    monkeypatch.setenv("INGEST_COMPREHEND_PASSES", "single")
+    assert assemble.comprehension_strategy() is comprehend_chunk
+
+
+def test_an_unrecognised_strategy_falls_back_rather_than_crashing(monkeypatch):
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.setenv("INGEST_COMPREHEND_PASSES", "swarm")
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused

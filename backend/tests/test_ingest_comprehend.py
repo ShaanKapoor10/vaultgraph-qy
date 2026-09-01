@@ -228,3 +228,154 @@ def test_grounding_helper_is_directly_usable():
     assert not quote_is_grounded("We approved a forty percent budget rise", TRANSCRIPT)
     assert not quote_is_grounded(None, TRANSCRIPT)
     assert not quote_is_grounded("", TRANSCRIPT)
+
+
+# ---------------------------------------------------------------------------
+# The anchor bug: rejecting real quotes rather than catching invented ones
+# ---------------------------------------------------------------------------
+
+def test_a_quote_with_a_word_prepended_is_still_grounded(chunk):
+    """
+    Found against a live 7B model. The source says "One thing that worries me.
+    The Acme contract assumes a March delivery" and the model quoted "That's
+    one thing that worries me. The Acme contract assumes a March delivery" --
+    verbatim apart from a two-word lead-in. Prefix anchoring failed it, so a
+    real finding was thrown away as a fabrication.
+    """
+    source = ("Sarah: One thing that worries me. The Acme contract assumes a "
+              "March delivery and we may be in breach.")
+    assert quote_is_grounded(
+        "That's one thing that worries me. The Acme contract assumes a March delivery",
+        source,
+    )
+
+
+def test_a_quote_with_a_trailing_addition_is_still_grounded():
+    source = "Mei: I'll update the roadmap by Friday so nobody works off the March date."
+    assert quote_is_grounded(
+        "I'll update the roadmap by Friday so nobody works off the March date, she said",
+        source,
+    )
+
+
+def test_a_fabrication_containing_one_real_phrase_is_still_refused():
+    """
+    The reason the shared run must cover a FRACTION of the quote and not merely
+    clear a character count. Sharing a phrase with the passage is not the same
+    as having been drawn from it, and without the coverage rule this is exactly
+    how an invented decision would smuggle itself in.
+    """
+    source = ("Sarah: One thing that worries me. The Acme contract assumes a "
+              "March delivery and we may be in breach.")
+    assert not quote_is_grounded(
+        "The Acme contract assumes a March delivery, so the board approved a "
+        "forty percent budget increase and authorised immediate hiring across "
+        "every team for the remainder of the financial year",
+        source,
+    )
+
+
+def test_a_wholly_invented_quote_is_still_refused(chunk):
+    """The defence the loosening must not weaken."""
+    assert not quote_is_grounded(
+        "We are approving the budget increase of forty percent", chunk.text
+    )
+    assert not quote_is_grounded(
+        "Everyone agreed that the new vendor should be onboarded next quarter",
+        chunk.text,
+    )
+
+
+def test_the_short_quote_rule_still_holds():
+    source = "Sarah: How bad is that? Mei: I genuinely don't know."
+    assert not quote_is_grounded("How bad is that?", source)
+
+
+# ---------------------------------------------------------------------------
+# The focused variant
+# ---------------------------------------------------------------------------
+
+def test_the_focused_variant_merges_both_passes(chunk, monkeypatch):
+    import json as _json
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+
+    def fake(system, user, **kw):
+        if "open_questions" not in system:
+            return _json.dumps({
+                "summary": "The team moved the release.",
+                "participants": ["Sarah", "Mei"],
+                "decisions": [{"statement": "Move the release to April 15th",
+                               "quote": "Then we're moving the release to April 15th"}],
+                "action_items": [],
+            })
+        return _json.dumps({
+            "risks": [{"description": "Acme assumes a March delivery",
+                       "quote": "One risk is that the Acme contract assumes a March delivery"}],
+            "open_questions": [],
+        })
+
+    monkeypatch.setattr("brahmastra.llm.chat", fake)
+    result = comprehend_chunk_focused(chunk)
+
+    kinds = sorted(a.kind for a in result.artifacts)
+    assert kinds == ["decision", "risk"]
+    assert result.summary == "The team moved the release."
+
+
+def test_one_failed_pass_still_returns_what_the_other_found(chunk, monkeypatch):
+    """
+    Half a record is worth more than none, and the transcript can be re-run.
+    Twice the calls means twice the chances to hit a rate limit, so this path
+    is ordinary rather than exceptional.
+    """
+    import json as _json
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+
+    def flaky(system, user, **kw):
+        if "open_questions" not in system:
+            return _json.dumps({
+                "summary": "ok", "participants": ["Sarah"],
+                "decisions": [{"statement": "Move the release to April 15th",
+                               "quote": "Then we're moving the release to April 15th"}],
+                "action_items": [],
+            })
+        raise RuntimeError("429 rate limit")
+
+    monkeypatch.setattr("brahmastra.llm.chat", flaky)
+    result = comprehend_chunk_focused(chunk)
+
+    assert result.error is None
+    assert len(result.artifacts) == 1
+    assert any("pass failed" in r for r in result.rejected)
+
+
+def test_both_passes_failing_is_an_error(chunk, monkeypatch):
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+
+    def dead(*a, **k):
+        raise RuntimeError("no provider")
+
+    monkeypatch.setattr("brahmastra.llm.chat", dead)
+    assert comprehend_chunk_focused(chunk).error is not None
+
+
+def test_the_focused_variant_grounds_quotes_like_the_single_pass(chunk, monkeypatch):
+    """The extra recall must not come at the cost of the fabrication defence."""
+    import json as _json
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+
+    def inventive(system, user, **kw):
+        if "open_questions" not in system:
+            return _json.dumps({
+                "summary": "s", "participants": [],
+                "decisions": [{"statement": "Approve a 40% budget increase",
+                               "quote": "We hereby approve the forty percent budget increase"}],
+                "action_items": [],
+            })
+        return _json.dumps({"risks": [], "open_questions": []})
+
+    monkeypatch.setattr("brahmastra.llm.chat", inventive)
+    result = comprehend_chunk_focused(chunk)
+
+    assert result.artifacts == []
+    assert any("quote not found" in r for r in result.rejected)

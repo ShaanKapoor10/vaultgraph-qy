@@ -37,6 +37,7 @@ import json
 import os
 import re
 from dataclasses import asdict, dataclass, field
+from difflib import SequenceMatcher
 from typing import Any
 
 from brahmastra.ingest.segment import Chunk
@@ -50,6 +51,11 @@ ARTIFACT_KINDS = ("decision", "action_item", "risk", "open_question")
 # obvious transcription noise, all of which are harmless. Long enough that a
 # fabricated quote cannot pass by accident.
 QUOTE_ANCHOR_CHARS = 24
+
+# And it must cover this much of the quote. Without it, a fabricated sentence
+# containing one real phrase would pass: sharing a phrase with the passage is
+# not the same as having been drawn from it.
+QUOTE_COVERAGE = 0.6
 
 
 SYSTEM_PROMPT = """\
@@ -150,8 +156,16 @@ def quote_is_grounded(quote: str | None, source: str) -> bool:
     in the source -- so an ungrounded quote is near-perfect evidence that the
     artifact around it was composed rather than observed.
 
-    Matched on a prefix rather than the whole string because models normalise
-    whitespace and trim filler; that is reformatting, not fabrication.
+    MATCHED ON THE LONGEST SHARED RUN, not on a prefix. Anchoring the first N
+    characters looked equivalent and was not: a model that prepends one word --
+    quoting "That's one thing that worries me" where the source says "One thing
+    that worries me" -- fails a quote that is otherwise verbatim. That is
+    reformatting, exactly what this check is meant to tolerate, and it was
+    silently costing real findings rather than catching invented ones.
+
+    The run must also be a decent FRACTION of the quote, so that a fabricated
+    sentence which happens to contain one real phrase is still refused. Sharing
+    a phrase is not the same as being drawn from the passage.
     """
     if not quote:
         return False
@@ -159,7 +173,18 @@ def quote_is_grounded(quote: str | None, source: str) -> bool:
     if len(needle) < QUOTE_ANCHOR_CHARS:
         # Too short to be evidence of anything. "Yes." occurs in every meeting.
         return False
-    return needle[:QUOTE_ANCHOR_CHARS] in _normalise(source)
+
+    haystack = _normalise(source)
+    if needle in haystack:
+        return True
+
+    # autojunk treats frequent characters as noise once a sequence passes 200
+    # elements, which is every realistic passage -- and it would quietly shrink
+    # the match it reports.
+    match = SequenceMatcher(None, needle, haystack, autojunk=False).find_longest_match(
+        0, len(needle), 0, len(haystack)
+    )
+    return match.size >= max(QUOTE_ANCHOR_CHARS, int(len(needle) * QUOTE_COVERAGE))
 
 
 def owner_is_named(owner: str | None, source: str, participants: list[str]) -> bool:
@@ -312,3 +337,133 @@ def comprehend_chunk(chunk: Chunk, max_tokens: int | None = None) -> ChunkUnders
         )
 
     return build_understanding(payload, chunk)
+
+
+# ---------------------------------------------------------------------------
+# The focused variant: two passes instead of one
+# ---------------------------------------------------------------------------
+#
+# The single pass asks for a summary plus four artifact kinds in one reply, and
+# the evaluation showed exactly what that costs: every decision found, and most
+# of the risks, commitments and open questions dropped. Divided attention,
+# concentrated in the kinds that are not decisions.
+#
+# So this splits the work by what the model is looking FOR, not by what it is
+# looking AT -- both passes read the same chunk. Two calls rather than four,
+# because the split that matters is commitments (settled, forward-looking) from
+# concerns (unsettled, raised), and a pass per kind would double the cost again
+# for a distinction the model does not seem to struggle with.
+#
+# Kept beside the single pass rather than replacing it, so `evaluate --variant`
+# can put the two side by side on the same transcript. An architecture adopted
+# without that comparison is a guess.
+
+COMMITMENTS_PROMPT = """\
+You record what a meeting SETTLED: decisions taken, and work people committed to.
+
+Return ONLY a JSON object:
+
+{
+  "summary": "2-4 sentences of what happened in this passage, in plain prose",
+  "topics": ["short topic labels"],
+  "participants": ["names of people who spoke or were referred to"],
+  "decisions": [
+    {"statement": "what was decided", "rationale": "why, if stated",
+     "owner": "person accountable, or null", "quote": "verbatim words"}
+  ],
+  "action_items": [
+    {"task": "what will be done", "owner": "who committed, or null",
+     "due": "date or timeframe as stated, or null", "quote": "verbatim words"}
+  ]
+}
+
+RULES:
+1. Every quote MUST be copied verbatim from the passage. Never compose one.
+2. A decision is a SETTLED choice. "We should maybe look at X" is not one;
+   "we're moving the date to April" is.
+3. An action item is someone committing to do something. A wish with no owner
+   and no commitment is not one. If a person says "I'll do X", that is one.
+4. A decision and the action that carries it out are DIFFERENT things. Record
+   both when both are present.
+5. Use only names that appear in the passage. Never introduce a person.
+6. Empty arrays are correct far more often than not, and always better than a
+   plausible invention.
+"""
+
+CONCERNS_PROMPT = """\
+You record what a meeting left UNSETTLED: risks raised, and questions unanswered.
+
+Return ONLY a JSON object:
+
+{
+  "risks": [
+    {"description": "the risk, blocker or exposure", "owner": "who raised it, or null",
+     "quote": "verbatim words"}
+  ],
+  "open_questions": [
+    {"question": "what was asked and not answered in this passage",
+     "owner": "who asked, or null", "quote": "verbatim words"}
+  ]
+}
+
+RULES:
+1. Every quote MUST be copied verbatim from the passage. Never compose one.
+2. A RISK is anything named as able to go wrong: a blocker, a dependency, an
+   exposure, something flaky, a contract that may be breached. Include it even
+   when nobody proposed a fix.
+3. An OPEN QUESTION is asked and left hanging in this passage. If someone
+   answers it here, it is not open. "Let's not answer that now" leaves it open.
+4. Something can be both a risk and the subject of an open question. Record it
+   in both lists when it genuinely is.
+5. Use only names that appear in the passage. Never introduce a person.
+6. Empty arrays are correct when the passage holds none.
+"""
+
+_COMMITMENT_KINDS = ("decision", "action_item")
+_CONCERN_KINDS = ("risk", "open_question")
+
+
+def _one_pass(chunk: Chunk, system: str, budget: int) -> tuple[dict[str, Any] | None, str | None]:
+    """One call. Returns (payload, error) -- never raises."""
+    from brahmastra.llm import chat
+
+    try:
+        raw = chat(system, f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
+                   json_mode=True, temperature=0.1, max_tokens=budget)
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"[:300]
+    try:
+        return _parse_reply(raw), None
+    except Exception as exc:
+        return None, f"unparseable reply: {exc}"[:300]
+
+
+def comprehend_chunk_focused(chunk: Chunk,
+                             max_tokens: int | None = None) -> ChunkUnderstanding:
+    """
+    Two specialised passes over the same chunk, merged.
+
+    Costs twice the calls, so it has to earn that on the evaluation rather than
+    on plausibility. Degrades rather than fails: if the concerns pass errors,
+    the commitments it already found are still returned, because half a record
+    is worth more than none and the transcript can always be re-run.
+    """
+    budget = max_tokens or int(os.environ.get("INGEST_COMPREHEND_TOKENS", "") or 1600)
+
+    commitments, err_a = _one_pass(chunk, COMMITMENTS_PROMPT, budget)
+    concerns, err_b = _one_pass(chunk, CONCERNS_PROMPT, budget)
+
+    if commitments is None and concerns is None:
+        return ChunkUnderstanding(chunk_index=chunk.index, error=err_a or err_b)
+
+    merged: dict[str, Any] = dict(commitments or {})
+    for key in ("risks", "open_questions"):
+        merged[key] = (concerns or {}).get(key, [])
+
+    result = build_understanding(merged, chunk)
+    # A pass that failed is reported without failing the chunk, so a partial
+    # result is visibly partial rather than quietly thin.
+    for err in (err_a, err_b):
+        if err:
+            result.rejected.append(f"pass failed: {err}")
+    return result

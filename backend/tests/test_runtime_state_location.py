@@ -15,6 +15,7 @@ heartbeats.
 """
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 from brahmastra import keepalive, pipeline
@@ -110,3 +111,32 @@ def test_an_empty_anthropic_model_also_falls_back(monkeypatch):
 
     monkeypatch.setenv("ANTHROPIC_MODEL", "")
     assert llm.anthropic_model() == llm.ANTHROPIC_DEFAULT_MODEL
+
+
+# ---------------------------------------------------------------------------
+# A local model needs no credential
+# ---------------------------------------------------------------------------
+
+def test_the_suite_cannot_reach_a_running_ollama():
+    """
+    Clearing API keys is not enough to keep the tests off an LLM. A local model
+    is reachable with no credential at all, so the moment `ollama serve` is
+    running -- which it now is, as the quota-free provider -- resolve_provider
+    picks it up and any test that forgets to stub comprehension makes real
+    inference calls. A run went from 70 seconds to 201 exactly that way.
+    """
+    from brahmastra.llm import ollama_available, provider_status
+
+    assert ollama_available() is False, (
+        "the suite can reach a local model; conftest must point OLLAMA_HOST "
+        "at a dead port"
+    )
+    assert provider_status() == {"groq": False, "anthropic": False, "ollama": False}
+
+
+def test_no_provider_resolves_under_test():
+    """So a forgotten stub fails loudly rather than quietly costing minutes."""
+    from brahmastra.llm import LLMUnavailable, resolve_provider
+
+    with pytest.raises(LLMUnavailable):
+        resolve_provider()

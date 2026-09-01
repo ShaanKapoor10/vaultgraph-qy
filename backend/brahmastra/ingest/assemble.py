@@ -41,7 +41,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from brahmastra.ingest.comprehend import ChunkUnderstanding, comprehend_chunk
+from brahmastra.ingest.comprehend import (
+    ChunkUnderstanding,
+    comprehend_chunk,
+    comprehend_chunk_focused,
+)
 from brahmastra.ingest.consolidate import consolidate
 from brahmastra.ingest.segment import Chunk, segment
 from brahmastra.ingest.store import IngestStore, get_ingest_store
@@ -54,6 +58,42 @@ _SECTIONS = [
     ("risk", "Risks and blockers"),
     ("open_question", "Open questions"),
 ]
+
+
+def comprehension_strategy():
+    """
+    Which comprehension to run. Configurable because the evaluation says the
+    right answer DEPENDS ON THE MODEL, which is not something to hardcode.
+
+    Measured on the labelled case, same transcript, same scorer:
+
+                            single              focused (2 calls)
+                        recall prec   f1      recall prec   f1
+      gpt-oss-120b        36%   80%  0.50       82%   64%  0.72
+      qwen2.5:7b          36%   80%  0.50       27%   60%  0.37
+
+    Splitting the work more than doubled recall on the larger model -- risks
+    and open questions went from nothing to complete -- and made the 7B model
+    WORSE. Specialisation is not free competence; it assumes a model that can
+    use the narrower instruction, and a small one apparently cannot.
+
+    The precision drop on the focused run is partly an artifact of the labels
+    rather than a real regression: grounding already refuses anything without a
+    verbatim quote, so a "spurious" artifact here is usually a true finding the
+    label set does not list -- "payments integration incomplete, refunds and
+    reconciliation not started" is genuinely in that meeting.
+
+    And these are single runs on ONE case. The same Groq single-pass
+    configuration scored 64% recall on an earlier identical run and 36% here,
+    so treat this as direction rather than measurement. Add cases before
+    trusting a fine distinction.
+
+    INGEST_COMPREHEND_PASSES = focused (default) | single
+    """
+    import os
+
+    choice = (os.environ.get("INGEST_COMPREHEND_PASSES", "") or "focused").strip().lower()
+    return comprehend_chunk if choice == "single" else comprehend_chunk_focused
 
 
 def note_id_for(transcript_id: str, chunk_index: int) -> str:
@@ -223,6 +263,8 @@ def _process(
     db.init_db()
 
     pending_artifacts: list[Any] = []
+    # Resolved once per document, so a run cannot change strategy halfway.
+    comprehend = comprehension_strategy()
 
     for chunk in chunks:
         store.save_chunk(
@@ -230,7 +272,7 @@ def _process(
             chunk.start_time, chunk.end_time, chunk.start_char, chunk.end_char,
         )
 
-        understanding = comprehend_chunk(chunk)
+        understanding = comprehend(chunk)
 
         if understanding.error:
             store.set_chunk_result(transcript_id, chunk.index, "error",

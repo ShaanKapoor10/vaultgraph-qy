@@ -47,7 +47,7 @@ def client(monkeypatch, tmp_path):
                 chunk_index=chunk.index, speakers=chunk.speakers)],
         )
 
-    monkeypatch.setattr(assemble, "comprehend_chunk", fake)
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: fake)
 
     import brahmastra.db as db_mod
     importlib.reload(db_mod)
