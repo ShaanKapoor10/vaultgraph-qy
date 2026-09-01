@@ -153,6 +153,15 @@ async def pipeline_status() -> dict[str, Any]:
         "active": state["active"],
         "last": state["last"],
         "target": state["target"],
+        # Whether the GRAPH is current, which is a different question from
+        # when a run last finished and the one a caller usually means. Listed
+        # explicitly like the rest, and that is the hazard of this shape: the
+        # projection is an allowlist, so a field added to run_state() is
+        # dropped here in silence. These three were, and the endpoint kept
+        # answering as though staleness had never been implemented.
+        "stale": state.get("stale", False),
+        "behind": state.get("behind"),
+        "dirty_since": state.get("dirty_since"),
         # This worker's own most recent run, for the caller that started it.
         "state": _STATUS.get("state", "idle"),
     }

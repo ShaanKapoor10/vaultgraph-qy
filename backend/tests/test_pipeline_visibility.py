@@ -314,3 +314,28 @@ def test_an_unreachable_store_does_not_fail_the_status(monkeypatch):
     monkeypatch.setattr(db, "get_cached_graph", boom)
     assert pipeline.graph_is_behind() is None
     assert pipeline.run_state()["stale"] is False
+
+
+def test_the_status_endpoint_reports_staleness(monkeypatch, tmp_path):
+    """
+    The route hand-picks keys out of run_state(), which makes it an allowlist:
+    a field added to run_state is dropped here in silence. Exactly that
+    happened -- `stale`, `behind` and `dirty_since` were implemented, tested
+    and live, and the endpoint kept answering as though they did not exist.
+    """
+    import importlib
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv("BRAHMASTRA_ALLOW_ANONYMOUS", "1")
+    monkeypatch.setenv("BRAHMASTRA_DB", str(tmp_path / "status.db"))
+
+    import main
+    importlib.reload(main)
+
+    pipeline.mark_dirty("extracted note-x")
+
+    with TestClient(main.app) as client:
+        body = client.get("/pipeline/status").json()
+
+    assert body["stale"] is True, "the endpoint dropped the staleness field"
+    assert body["dirty_since"]["reason"] == "extracted note-x"
