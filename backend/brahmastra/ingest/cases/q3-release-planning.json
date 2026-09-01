@@ -1,6 +1,6 @@
 {
   "name": "q3-release-planning",
-  "note": "Labelled by hand. The hard cases are deliberate: the Q4 reporting migration was explicitly NOT committed to ('I'm not committing to it'), and the staging escalation has no promised date -- both are traps for a model that treats every sentence as an artifact.",
+  "note": "Labelled by hand FROM THE TRANSCRIPT, never from model output -- labelling what a run happened to produce measures nothing but itself. The hard cases are deliberate: the Q4 reporting migration was explicitly NOT committed to ('I'm not committing to it'), and the staging escalation has no promised date -- both are traps for a model that treats every sentence as an artifact. Grown from 11 labels to 14 after the first scored runs showed three findings that are plainly in the meeting and were counted as fabrications purely because nobody had written them down: Sarah's offer to relay to Priya, the state of the payments work, and Priya's absence. The two Mei action items were also rephrased, because 'Mei updates the roadmap' and 'Mei raises staging' embed at 0.61 -- both dominated by the name -- so an artifact answering one could be credited to the other. Run `--audit` after editing this file.",
   "transcript": "[00:00:05] Sarah: Right, let's get started. Agenda is the Q3 release date, the payments integration, and the Acme renewal.\n[00:00:18] Mei: Before we start, is Priya joining? She owns payments.\n[00:00:24] Sarah: She's out until the 20th. I'll relay anything she needs to know.\n[00:00:33] Raj: Fine. So on the release date, I've been assuming March 30th. Is that still real?\n[00:00:44] Mei: I don't think March is real any more. The payments integration is maybe sixty percent done and Priya's out for two weeks.\n[00:01:02] Raj: Sixty percent of what, though? The card flow, or the whole thing including refunds?\n[00:01:12] Mei: Card flow is basically done. Refunds and the reconciliation job haven't been started.\n[00:01:25] Sarah: That changes things. Reconciliation was a hard requirement from finance, wasn't it?\n[00:01:34] Raj: It was. Deepa was clear that we can't go live without it because of the audit.\n[00:01:47] Sarah: Okay. Then we're moving the release to April 15th. I'll own communicating that to the wider team today.\n[00:02:01] Mei: Agreed. I'll update the roadmap by Friday so nobody's working off the March date.\n[00:02:14] Raj: I can take the reconciliation job. I'd want a week of runway after Priya's back, so realistically that's the 27th.\n[00:02:30] Sarah: That works with April 15th. Raj, you own reconciliation, target the 27th.\n[00:02:41] Raj: Understood.\n[00:02:48] Mei: One thing that worries me. The Acme contract assumes a March delivery. If we slip to April we may be in breach.\n[00:03:02] Sarah: How bad is that?\n[00:03:06] Mei: I genuinely don't know. It might be a penalty clause, it might be nothing. I haven't read the contract closely.\n[00:03:19] Raj: Should legal review the Acme contract before we tell them about the slip?\n[00:03:28] Sarah: Probably, yes. Let's not answer that in this meeting though, I want Deepa in the room for it.\n[00:03:40] Mei: Someone should also check whether the other two enterprise contracts have the same clause.\n[00:03:50] Sarah: Noted. That's a question for Deepa as well.\n[00:04:02] Raj: Separate topic. Are we still planning to move the reporting service off the old cluster this quarter?\n[00:04:14] Mei: I'd like to, but I don't think we have the people. I'm not committing to it.\n[00:04:24] Sarah: Let's leave it out of Q3 then. We can revisit in planning for Q4.\n[00:04:36] Raj: Fine by me.\n[00:04:41] Sarah: Last thing. The staging environment has been flaky for about a week. It's blocking QA more days than not.\n[00:04:55] Mei: That's infrastructure. I'll raise it with them, but I can't promise a fix date.\n[00:05:06] Sarah: That's fine, just get it on their list. Anything else? No? Good, thanks everyone.\n",
   "expected": [
     {
@@ -21,7 +21,7 @@
     },
     {
       "kind": "action_item",
-      "statement": "Mei updates the roadmap by Friday"
+      "statement": "Mei revises the roadmap by Friday so the March date is gone"
     },
     {
       "kind": "action_item",
@@ -29,7 +29,11 @@
     },
     {
       "kind": "action_item",
-      "statement": "Mei raises the flaky staging environment with infrastructure"
+      "statement": "Mei escalates the staging environment to the infrastructure team"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Sarah passes on to Priya anything she needs to know while away"
     },
     {
       "kind": "risk",
@@ -38,6 +42,14 @@
     {
       "kind": "risk",
       "statement": "The staging environment is flaky and blocking QA"
+    },
+    {
+      "kind": "risk",
+      "statement": "Payments is around sixty percent done: refunds and reconciliation remain unstarted"
+    },
+    {
+      "kind": "risk",
+      "statement": "Priya, who owns payments, is away until the 20th"
     },
     {
       "kind": "open_question",
@@ -49,8 +61,17 @@
     }
   ],
   "must_not_find": [
-    "Migrate the reporting service off the old cluster this quarter",
-    "Priya completes the payments integration",
-    "Deepa reviews the Acme contract by a set date"
+    {
+      "kind": "decision",
+      "statement": "Migrate the reporting service off the old cluster this quarter"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Priya completes the payments integration"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Deepa reviews the Acme contract by a set date"
+    }
   ]
 }

@@ -242,3 +242,78 @@ def test_conflict_detection_is_directly_usable():
                      art(statement="ship on April 15th"))
     assert not conflicts(art(statement="ship the release"),
                          art(statement="ship the release"))
+
+
+# ---------------------------------------------------------------------------
+# A decision and its reversal, which every similarity measure here is blind to
+# ---------------------------------------------------------------------------
+
+def test_a_decision_and_its_reversal_are_never_merged():
+    """
+    The worst version of the revision bug, and it survived the fix for it.
+
+    `conflicts` caught revisions by comparing DATES and NUMBERS, which works
+    when a decision MOVED something. A decision and its negation carry
+    identical dates and numbers, so there was nothing to compare: "Move the
+    release to April 15th" and "Do not move the release to April 15th" score
+    0.90 -- above the 0.82 merge threshold -- and merged into one artifact,
+    whichever chunk happened to arrive first deciding what the organisation
+    then believed.
+
+    Grounding cannot catch this. Both statements are perfectly quoted from the
+    transcript; the meaning is destroyed afterwards, in the reduce step.
+    """
+    result = consolidate([
+        art(statement="Move the release to April 15th", chunk_index=0),
+        art(statement="Do not move the release to April 15th", chunk_index=3),
+    ])
+    assert len(result["artifacts"]) == 2, (
+        "a decision was merged with its own reversal"
+    )
+
+
+def test_a_reversal_reads_as_a_change_of_mind():
+    """Which is what it is -- and 'we changed our minds' is worth keeping."""
+    result = consolidate([
+        art(statement="We will migrate the reporting service this quarter",
+            chunk_index=0),
+        art(statement="We are not migrating the reporting service this quarter",
+            chunk_index=5),
+    ])
+    assert result["superseded"] == 1
+    abandoned = next(a for a in result["artifacts"] if a.superseded_by)
+    assert "not" not in abandoned.statement, "the wrong one was marked abandoned"
+
+
+def test_a_negated_risk_still_merges_with_its_paraphrase():
+    """
+    The guard is scoped to decisions and commitments on purpose.
+
+    In a decision, "not" reverses what will happen. In a risk it is usually
+    descriptive: "refunds have not been started" and "refunds remain unstarted"
+    are ONE risk seen from two chunks, and splitting them would report the same
+    finding as both missed and invented -- exactly the failure the lexical
+    scorer used to produce, arriving from the other direction.
+    """
+    result = consolidate([
+        art(kind="risk", statement="Refunds have not been started yet",
+            chunk_index=0),
+        art(kind="risk", statement="Refunds have not been started",
+            chunk_index=1),
+    ])
+    assert len(result["artifacts"]) == 1
+
+
+def test_polarity_detection_is_directly_usable():
+    from brahmastra.ingest.consolidate import negated, polarity_differs
+
+    assert negated("We are not rewriting the consumer")
+    assert negated("Leave the reporting service migration out of Q3")
+    assert negated("We won't commit to it this quarter")
+    assert not negated("Move the release to April 15th")
+    # Bare "no" is deliberately not a cue: this is a positive assertion OF a
+    # risk, and treating it as negative would split it from its paraphrase.
+    assert not negated("There is no runbook for this service")
+
+    assert polarity_differs("We will migrate", "We will not migrate")
+    assert not polarity_differs("We will migrate", "We are migrating")

@@ -403,17 +403,99 @@ def test_the_workspace_binding_is_restored_afterwards(monkeypatch, tmp_path, und
 # Which comprehension runs
 # ---------------------------------------------------------------------------
 
+def _model(monkeypatch, name):
+    """Pin what a chat() would actually reach, without reaching it."""
+    import brahmastra.llm as llm
+    monkeypatch.setattr(llm, "active_model", lambda: name)
+
+
 def test_the_strategy_defaults_to_the_focused_passes(monkeypatch):
     from brahmastra.ingest.comprehend import comprehend_chunk_focused
     monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
     assert assemble.comprehension_strategy() is comprehend_chunk_focused
 
 
+def test_a_small_model_is_given_the_single_pass(monkeypatch):
+    """
+    Measured over two cases and three runs each: on qwen2.5:7b the two
+    variants score 19% [9-36] and 24% [14-36] recall -- indistinguishable,
+    and the sign flipped between two measurements -- while focused bills twice
+    the calls. On gpt-oss-120b focused wins outright, 69% [64-79] against
+    43% [14-64]. So a flat default is wrong whichever value it takes.
+
+    `focused` was the worse one to have defaulted to, because the small model
+    is what this repository falls back to when the Groq quota runs out: the
+    setting only matters on a bad day and had been tuned for a good one.
+    """
+    from brahmastra.ingest.comprehend import comprehend_chunk
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    _model(monkeypatch, "qwen2.5:7b-instruct")
+    assert assemble.comprehension_strategy() is comprehend_chunk
+
+
+def test_a_large_model_is_given_the_focused_passes(monkeypatch):
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    _model(monkeypatch, "openai/gpt-oss-120b")
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_a_large_LOCAL_model_is_not_treated_as_a_small_one(monkeypatch):
+    """
+    The choice keys on size, not on provider. "Local" is not the same claim as
+    "small", and a 70B on someone's own hardware has nothing in common with the
+    7B the measurement was taken on.
+    """
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    _model(monkeypatch, "llama3.3:70b")
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_an_unreadable_model_name_gets_the_better_measured_default(monkeypatch):
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    _model(monkeypatch, "claude-opus-5")
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_an_explicit_setting_beats_the_model(monkeypatch):
+    """The heuristic is a default, not a policy: two measured points do not
+    get to overrule someone who has measured a third."""
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    monkeypatch.setenv("INGEST_COMPREHEND_PASSES", "focused")
+    _model(monkeypatch, "qwen2.5:7b-instruct")
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_no_provider_at_all_does_not_break_the_choice(monkeypatch):
+    """A heuristic that cannot be evaluated must not fail the ingestion."""
+    from brahmastra.ingest.comprehend import comprehend_chunk_focused
+    from brahmastra.llm import LLMUnavailable
+    import brahmastra.llm as llm
+
+    def dead():
+        raise LLMUnavailable("nothing configured")
+
+    monkeypatch.delenv("INGEST_COMPREHEND_PASSES", raising=False)
+    monkeypatch.setattr(llm, "active_model", dead)
+    assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+def test_a_model_name_is_read_for_its_size_not_its_version():
+    """"qwen2.5" must not read as a 2.5-billion-parameter model."""
+    assert assemble.model_params_b("qwen2.5:7b-instruct") == 7.0
+    assert assemble.model_params_b("openai/gpt-oss-120b") == 120.0
+    assert assemble.model_params_b("llama-3.3-70b-versatile") == 70.0
+    assert assemble.model_params_b("qwen2.5") is None
+    assert assemble.model_params_b("") is None
+
+
 def test_the_single_pass_can_be_selected(monkeypatch):
     """
     Configurable because the evaluation says the right answer DEPENDS ON THE
-    MODEL: splitting the work doubled recall on gpt-oss-120b and made
-    qwen2.5:7b worse. That is not something to hardcode.
+    MODEL: splitting the work lifted recall from 43% to 69% on gpt-oss-120b
+    and bought nothing on qwen2.5:7b. That is not something to hardcode.
     """
     from brahmastra.ingest.comprehend import comprehend_chunk
     monkeypatch.setenv("INGEST_COMPREHEND_PASSES", "single")

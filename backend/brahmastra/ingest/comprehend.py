@@ -136,6 +136,13 @@ class ChunkUnderstanding:
     artifacts: list[Artifact] = field(default_factory=list)
     rejected: list[str] = field(default_factory=list)
     error: str | None = None
+    # LLM calls this chunk actually cost. Reported rather than inferred because
+    # the evaluation compares a one-call variant against a two-call one, and it
+    # counted chunks -- so `focused` and `single` both reported the same cost
+    # and the comparison was "is it better?" when the question it exists to
+    # answer is "is it better ENOUGH to be worth twice the calls?", which on a
+    # rate-limited tier is the whole decision.
+    calls: int = 1
 
 
 # ---------------------------------------------------------------------------
@@ -454,13 +461,15 @@ def comprehend_chunk_focused(chunk: Chunk,
     concerns, err_b = _one_pass(chunk, CONCERNS_PROMPT, budget)
 
     if commitments is None and concerns is None:
-        return ChunkUnderstanding(chunk_index=chunk.index, error=err_a or err_b)
+        return ChunkUnderstanding(chunk_index=chunk.index, error=err_a or err_b,
+                                  calls=2)
 
     merged: dict[str, Any] = dict(commitments or {})
     for key in ("risks", "open_questions"):
         merged[key] = (concerns or {}).get(key, [])
 
     result = build_understanding(merged, chunk)
+    result.calls = 2
     # A pass that failed is reported without failing the chunk, so a partial
     # result is visibly partial rather than quietly thin.
     for err in (err_a, err_b):

@@ -134,6 +134,60 @@ def _merge(primary: Any, extra: Any) -> Any:
     return primary
 
 
+# Whether a statement asserts something or its opposite.
+#
+# Every similarity measure in this module is blind to this, and so is the
+# cosine one in evaluate.py -- embeddings place a sentence and its negation
+# almost on top of each other, because they share every content word. That is a
+# well-known property and normally a small annoyance; here it is the difference
+# between a true record and a false one, since "we are migrating in Q3" and "we
+# are not migrating in Q3" are what the meeting was FOR.
+#
+# Deliberately narrow. A cue that fires too eagerly costs a duplicate artifact;
+# one that misses costs a reversed decision, so the list covers explicit
+# negation and explicit shelving, and stops there. Bare "no" is left out on
+# purpose: "there is no runbook" is a positive assertion OF a risk, and
+# treating it as negative would split every such risk from its own paraphrase.
+_NEGATION = re.compile(
+    r"\b(?:not|never|cannot|no longer|declin\w+|reject\w+|refus\w+|"
+    r"defer\w+|postpon\w+|dropp?\w*|exclud\w+|abandon\w+|"
+    r"(?:ca|wo|do|does|did|is|are|was|were|should|would|could|have|has|had)n[’']?t)\b"
+    r"|\bout of (?:scope|q[1-4]|the (?:quarter|release|plan))\b"
+    r"|\b(?:leav\w+|left|keep\w*|kept)\b[^.,;]{0,40}\bout\b",
+    re.IGNORECASE,
+)
+
+
+# Where negation flips a COMMITMENT, and is therefore load-bearing.
+#
+# Not applied to risks and open questions, and that boundary is the whole
+# subtlety. In a decision, "not" reverses what will happen: "we are migrating"
+# and "we are not migrating" are opposite records. In a risk it is usually
+# descriptive -- "refunds have not been started" and "refunds remain unstarted"
+# are ONE risk, and guarding those would split a finding from its own
+# paraphrase and report the model as having both missed and invented it. That
+# is exactly the failure the lexical scorer used to produce, so it is worth not
+# reintroducing from the other direction.
+POLARITY_SENSITIVE = ("decision", "action_item")
+
+
+def negated(text: str | None) -> bool:
+    """Does this statement assert that something is NOT happening?"""
+    return bool(_NEGATION.search(text or ""))
+
+
+def polarity_differs(a: str | None, b: str | None) -> bool:
+    """
+    True when one statement asserts what the other denies.
+
+    Used by `conflicts` to stop a reversal being merged into the thing it
+    reversed, and by the evaluation scorer, where a trap and the real decision
+    it inverts scored 0.72 by cosine -- so correctly recording "leave the
+    migration out of Q3" was counted as fabricating "migrate this quarter".
+    """
+    return negated(a) != negated(b)
+
+
 # Months and bare numbers -- the things a revision actually changes. A decision
 # revisited in a meeting almost always moves a date or a quantity.
 _MONTHS = (
@@ -160,8 +214,25 @@ def conflicts(a: Any, b: Any) -> bool:
     score above the merge threshold, so a merge-first implementation folded the
     revision into the superseded decision AND KEPT THE MARCH DATE -- leaving the
     knowledge base asserting a date the meeting had explicitly abandoned.
+
+    Polarity is checked for the same reason, and it closes a strictly worse
+    version of that hole. Dates and numbers only catch a revision that MOVED
+    something; a decision and its reversal carry identical dates and numbers,
+    so "Move the release to April 15th" and "Do NOT move the release to April
+    15th" scored 0.90 here -- above the merge threshold, with nothing to
+    separate them. They merged, and whichever chunk arrived first decided what
+    the organisation believed. That is the exact false-record failure the
+    grounding checks exist to prevent, arriving after grounding has passed:
+    both statements are perfectly quoted, and the meaning is destroyed in the
+    reduce step instead.
+
+    It falls out that a reversal now reads as SUPERSESSION rather than a merge,
+    which is what it is -- `_is_supersession` asks this same question.
     """
     if a.due and b.due and _normalise(a.due) != _normalise(b.due):
+        return True
+    if (a.kind in POLARITY_SENSITIVE
+            and polarity_differs(a.statement, b.statement)):
         return True
     left, right = _key_facts(a.statement), _key_facts(b.statement)
     return bool(left and right and left != right)

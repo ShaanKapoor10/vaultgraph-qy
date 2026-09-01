@@ -38,6 +38,8 @@ triples before re-inserting them.
 
 from __future__ import annotations
 
+import os
+import re
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -60,40 +62,94 @@ _SECTIONS = [
 ]
 
 
+# Below this many billion parameters, the focused split stopped paying for
+# itself: same recall as one pass, for twice the calls.
+#
+# Drawn between the two models actually measured -- 7B and 120B -- so it is a
+# line through two points and should move the moment a third is measured.
+# Defaulting an UNKNOWN model to `focused` therefore risks calls rather than
+# correctness, which is the right way round for a guess to be wrong.
+SMALL_MODEL_PARAMS_B = 30.0
+
+_MODEL_SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*b\b", re.IGNORECASE)
+
+
+def model_params_b(name: str) -> float | None:
+    """
+    Billions of parameters, read off the model name, or None if it says nothing.
+
+    Names are a convention rather than an interface -- "qwen2.5:7b-instruct",
+    "openai/gpt-oss-120b" -- so this is a hint and is treated as one. The
+    version number is skipped deliberately: "qwen2.5" must not read as 2.5B.
+    """
+    tail = name.rsplit("/", 1)[-1]
+    tail = tail.split(":", 1)[-1] if ":" in tail else tail
+    match = _MODEL_SIZE.search(tail)
+    return float(match.group(1)) if match else None
+
+
 def comprehension_strategy():
     """
-    Which comprehension to run. Configurable because the evaluation says the
-    right answer DEPENDS ON THE MODEL, which is not something to hardcode.
+    Which comprehension to run, decided from the model that will run it.
 
-    Measured on the labelled case, same transcript, same scorer:
+    Measured over two labelled cases, three runs each, RANGES not single runs
+    (`--compare --runs 3`), because the first version of this table was six
+    single runs and one of its claims did not survive being repeated:
 
-                            single              focused (2 calls)
-                        recall prec   f1      recall prec   f1
-      gpt-oss-120b        36%   80%  0.50       82%   64%  0.72
-      qwen2.5:7b          36%   80%  0.50       27%   60%  0.37
+                       single                    focused
+                   recall        calls      recall        calls
+      gpt-oss-120b  43% [14-64]    6        69% [64-79]    12
+      qwen2.5:7b    19% [ 9-36]    6        24% [14-36]    12
 
-    Splitting the work more than doubled recall on the larger model -- risks
-    and open questions went from nothing to complete -- and made the 7B model
-    WORSE. Specialisation is not free competence; it assumes a model that can
-    use the narrower instruction, and a small one apparently cannot.
+    On the large model the ranges barely touch, so the split is a real gain:
+    one pass asked to find four different things at once reliably drops risks
+    and open questions, and asking twice with a narrower brief recovers them.
+    It costs exactly double, which on a rate-limited tier is the trade.
 
-    The precision drop on the focused run is partly an artifact of the labels
-    rather than a real regression: grounding already refuses anything without a
-    verbatim quote, so a "spurious" artifact here is usually a true finding the
-    label set does not list -- "payments integration incomplete, refunds and
-    reconciliation not started" is genuinely in that meeting.
+    On the 7B the ranges sit on top of each other. Nothing here distinguishes
+    the two, so the single pass wins on cost alone -- half the calls for a
+    difference the measurement cannot see.
 
-    And these are single runs on ONE case. The same Groq single-pass
-    configuration scored 64% recall on an earlier identical run and 36% here,
-    so treat this as direction rather than measurement. Add cases before
-    trusting a fine distinction.
+    WHAT THE EARLIER TABLE GOT WRONG, since it is the reason this one reports
+    ranges: single runs had focused SCORING WORSE on the 7B, 36% down to 27%,
+    and that was written up as "specialisation is not free competence, and a
+    small model cannot use the narrower instruction". A tidy story, and false.
 
-    INGEST_COMPREHEND_PASSES = focused (default) | single
+    Repeating it reversed the sign twice. Two runs each put single ahead,
+    27 to 26; three runs each put focused ahead, 19 to 24. Every one of those
+    numbers is inside the band the configuration produces run to run, so the
+    ORDER of the two variants on this model is noise, and a single pair of runs
+    will keep producing whichever answer is asked for. That is the argument for
+    `--runs`: not that one run is imprecise, but that one run of each is enough
+    to found an architecture on, and reads exactly like evidence while doing it.
+
+    The choice keys on SIZE rather than on provider. "Local" is not the same
+    claim as "small", and a 70B on someone's own hardware would be sent down
+    the small-model path by a provider check for no reason. An unreadable model
+    name gets `focused`, the better-measured of the two.
+
+    Neither variant produced a single trap hit on either model across all of
+    those runs -- nothing matching a statement the cases declare is NOT in the
+    meeting -- which is the number that would have mattered most.
+
+    INGEST_COMPREHEND_PASSES = focused | single overrides all of it.
     """
-    import os
+    choice = (os.environ.get("INGEST_COMPREHEND_PASSES", "") or "").strip().lower()
+    if choice == "single":
+        return comprehend_chunk
+    if choice == "focused":
+        return comprehend_chunk_focused
 
-    choice = (os.environ.get("INGEST_COMPREHEND_PASSES", "") or "focused").strip().lower()
-    return comprehend_chunk if choice == "single" else comprehend_chunk_focused
+    try:
+        from brahmastra.llm import active_model
+
+        size = model_params_b(active_model())
+    except Exception:
+        size = None
+
+    if size is not None and size < SMALL_MODEL_PARAMS_B:
+        return comprehend_chunk
+    return comprehend_chunk_focused
 
 
 def note_id_for(transcript_id: str, chunk_index: int) -> str:

@@ -208,6 +208,32 @@ def llm_available() -> bool:
     return any(provider_status().values())
 
 
+def active_model() -> str:
+    """
+    The model name that a `chat()` right now would actually reach.
+
+    Provider selection and model selection are two different questions and only
+    the first one had an answer. Callers that need to adapt to how capable the
+    live model is -- see `ingest.assemble.comprehension_strategy` -- were
+    otherwise left inferring it from the provider, which says "cloud or local"
+    rather than "large or small" and is wrong for anyone running a 70B on their
+    own hardware.
+
+    Returns "" rather than raising when nothing is available, because every
+    caller of this is making a heuristic choice and none of them should fail
+    because a heuristic could not be evaluated.
+    """
+    try:
+        provider = resolve_provider()
+    except LLMUnavailable:
+        return ""
+    if provider == "groq":
+        return groq_model()
+    if provider == "anthropic":
+        return anthropic_model()
+    return OLLAMA_MODEL
+
+
 # ---------------------------------------------------------------------------
 # Unified chat
 # ---------------------------------------------------------------------------
