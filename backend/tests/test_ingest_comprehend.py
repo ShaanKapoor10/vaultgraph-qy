@@ -379,3 +379,77 @@ def test_the_focused_variant_grounds_quotes_like_the_single_pass(chunk, monkeypa
 
     assert result.artifacts == []
     assert any("quote not found" in r for r in result.rejected)
+
+
+# ---------------------------------------------------------------------------
+# A real quote attached to the wrong claim
+# ---------------------------------------------------------------------------
+
+def test_a_quote_that_contradicts_the_statements_dates_is_refused():
+    """
+    Observed live, from a 7B: an action item reading "Move the Q3 release date
+    to April 15th" carrying the quote "I'll update the roadmap by Friday so
+    nobody's working off the March date." Verbatim, present in the passage, and
+    about something else -- so it passed grounding and landed in the knowledge
+    base looking sourced.
+    """
+    from brahmastra.ingest.comprehend import quote_supports_statement
+
+    assert not quote_supports_statement(
+        "Move the Q3 release date to April 15th.",
+        "I'll update the roadmap by Friday so nobody's working off the March date.",
+    )
+
+
+def test_the_correct_pairing_cosine_could_not_tell_apart_is_kept():
+    """
+    Both pairs scored 0.40 by cosine on the same run, so no embedding threshold
+    separates them -- keep one and you keep the other. Dates do separate them.
+    """
+    from brahmastra.ingest.comprehend import quote_supports_statement
+
+    assert quote_supports_statement(
+        "The Q3 release date was moved from March 30th to April 15th.",
+        "Okay. Then we're moving the release to April 15th.",
+    )
+
+
+def test_a_statement_with_no_dates_is_not_judged_this_way():
+    """Abstains rather than guessing: most true artifacts mention no number at
+    all, and dropping them would cost far more than the pairing it catches."""
+    from brahmastra.ingest.comprehend import quote_supports_statement
+
+    assert quote_supports_statement(
+        "Legal should review the Acme contract",
+        "Should legal review the Acme contract before we tell them about the slip?",
+    )
+
+
+def test_a_quote_with_no_dates_is_not_evidence_against_a_statement():
+    from brahmastra.ingest.comprehend import quote_supports_statement
+
+    assert quote_supports_statement(
+        "Raj completes the reconciliation job by the 27th",
+        "I can take the reconciliation job.",
+    )
+
+
+def test_a_mismatched_quote_is_dropped_and_reported():
+    from brahmastra.ingest.comprehend import build_understanding
+    from brahmastra.ingest.segment import segment
+
+    source = ("Sarah: Then we're moving the release to April 15th.\n"
+              "Mei: I'll update the roadmap by Friday so nobody's working off "
+              "the March date.\n")
+    chunk = segment(source)[0]
+    payload = {
+        "action_items": [{
+            "task": "Move the Q3 release date to April 15th",
+            "quote": ("I'll update the roadmap by Friday so nobody's working "
+                      "off the March date"),
+        }],
+    }
+
+    result = build_understanding(payload, chunk)
+    assert result.artifacts == []
+    assert any("contradicts" in r for r in result.rejected)

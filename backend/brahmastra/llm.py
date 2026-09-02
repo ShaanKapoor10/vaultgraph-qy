@@ -25,6 +25,7 @@ deploys unchanged; set LLM_PROVIDER=ollama locally to stay off the network.
 from __future__ import annotations
 
 import json as _json
+import sys
 import os
 import time
 import urllib.request
@@ -259,6 +260,60 @@ def chat(
     """
     name = provider or resolve_provider()
 
+    # A spent daily quota is not "no LLM available" while another provider is
+    # sitting there working.
+    #
+    # LLMQuotaExhausted raises immediately and correctly -- retrying a spent
+    # cap is as pointless as retrying a retired model. But the caller above it
+    # then failed, and on this system that failure has a shape: comprehension
+    # makes two calls per chunk, the cap landed between them, and a meeting was
+    # stored with four decisions, four action items and ZERO risks. Half a
+    # record, from a machine with a perfectly good local model running.
+    #
+    # Only on quota, and only to a provider that is actually usable. Not on a
+    # transient 429, which the retry loop already handles, and not on a bad
+    # request, which would fail identically everywhere. `provider=` pins a
+    # choice explicitly, so an explicit pin is never second-guessed.
+    if provider is None:
+        try:
+            return _dispatch(name, system, user, json_mode=json_mode,
+                             temperature=temperature, max_tokens=max_tokens,
+                             num_ctx=num_ctx, timeout=timeout, retries=retries)
+        except LLMQuotaExhausted:
+            fallback = _next_usable_provider(name)
+            if fallback is None:
+                raise
+            # Said out loud. A silent downgrade to a smaller model is the kind
+            # of change that shows up later as "the extraction got worse" with
+            # nothing to explain it.
+            print(f"{name} quota exhausted; falling back to {fallback}",
+                  file=sys.stderr)
+            name = fallback
+
+    return _dispatch(name, system, user, json_mode=json_mode,
+                     temperature=temperature, max_tokens=max_tokens,
+                     num_ctx=num_ctx, timeout=timeout, retries=retries)
+
+
+def _next_usable_provider(exclude: str) -> str | None:
+    """The next provider that can actually serve a request, or None."""
+    status = provider_status()
+    return next((n for n in PROVIDERS if n != exclude and status.get(n)), None)
+
+
+def _dispatch(
+    name: str,
+    system: str,
+    user: str,
+    *,
+    json_mode: bool,
+    temperature: float,
+    max_tokens: int,
+    num_ctx: int,
+    timeout: int,
+    retries: int,
+) -> str:
+    """Send to one named provider. No fallback, no selection."""
     if name == "ollama":
         return ollama_chat(
             system, user, json_mode=json_mode, temperature=temperature,

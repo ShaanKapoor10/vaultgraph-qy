@@ -274,6 +274,15 @@ def build_understanding(payload: dict[str, Any], chunk: Chunk) -> ChunkUnderstan
                     f"{kind}: quote not found in the passage — {statement[:60]!r}"
                 )
                 continue
+            if not quote_supports_statement(statement, quote):
+                # Real quote, wrong claim. Dropped rather than kept with a
+                # caveat, because an artifact whose own evidence contradicts it
+                # is worse than a missing one: it reads as sourced, and the
+                # transcript is still on disk to re-run.
+                result.rejected.append(
+                    f"{kind}: quote contradicts the dates in — {statement[:60]!r}"
+                )
+                continue
             if not owner_is_named(owner, source, result.participants):
                 result.rejected.append(
                     f"{kind}: owner {owner!r} is not named in the passage"
@@ -309,6 +318,48 @@ def _parse_reply(raw: str) -> dict[str, Any]:
     if start == -1 or end == -1:
         raise ValueError(f"no JSON object in reply: {raw[:200]!r}")
     return json.loads(text[start:end + 1])
+
+
+def quote_supports_statement(statement: str, quote: str | None) -> bool:
+    """
+    Does this quote actually back up what the artifact claims?
+
+    `quote_is_grounded` proves the quote is REAL. It cannot prove the quote is
+    the right one, and a model under pressure will attach a genuine sentence to
+    a claim it does not support. Observed live, from a 7B: an action item
+    reading "Move the Q3 release date to April 15th" carrying the quote "I'll
+    update the roadmap by Friday so nobody's working off the March date."
+    Verbatim, in the passage, and about something else -- so it passed every
+    check and landed in the knowledge base as sourced.
+
+    COSINE CANNOT DO THIS, measured on that exact run:
+
+        0.40  "Move the Q3 release date to April 15th"     <- roadmap/Friday quote  (WRONG)
+        0.40  "The release date was moved ... to April 15th" <- "moving the release to April 15th"  (RIGHT)
+
+    The same number for the fabricated pairing and the correct one, so any
+    threshold either keeps the bad artifact or discards a good decision. This
+    is the second time an embedding has been unable to make a distinction this
+    module depends on -- see MATCH_THRESHOLD in evaluate.py.
+
+    Dates and numbers can. A statement that commits to "April 15th" while its
+    evidence says "March" and "Friday" is not supported by that evidence, and
+    those are exactly the tokens a meeting record turns on. Reusing
+    `_key_facts` from consolidate.py, which already extracts them to detect a
+    revision.
+
+    Judged only when BOTH sides carry facts. A statement with no date and no
+    number cannot be checked this way, and a quote with none is not evidence
+    against anything -- in both cases this abstains rather than guessing, which
+    keeps it from dropping the many true artifacts that never mention a number.
+    """
+    from brahmastra.ingest.consolidate import _key_facts
+
+    claimed = _key_facts(statement)
+    evidenced = _key_facts(quote)
+    if not claimed or not evidenced:
+        return True
+    return bool(claimed & evidenced)
 
 
 def comprehend_chunk(chunk: Chunk, max_tokens: int | None = None) -> ChunkUnderstanding:
