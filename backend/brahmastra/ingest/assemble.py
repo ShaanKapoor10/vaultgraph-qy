@@ -290,6 +290,7 @@ def _process(
         "artifacts": 0,
         "notes": 0,
         "rejected": [],
+        "degraded": [],
         "errors": [],
     }
 
@@ -366,8 +367,41 @@ def _process(
             )
             report["notes"] += 1
 
-        store.set_chunk_result(transcript_id, chunk.index, "done",
-                               summary=understanding.summary, note_id=note_id)
+        # A chunk where one comprehension pass failed is NOT "done", and
+        # calling it that is how a half-record passes for a whole one.
+        #
+        # `comprehend_chunk_focused` degrades on purpose: if the concerns pass
+        # fails it still returns the commitments, because half a record beats
+        # none. That is right, and it was invisible. A real ingestion here hit
+        # the Groq daily cap on the second call and stored four decisions and
+        # four action items with ZERO risks and ZERO open questions, reporting
+        # `status: done, error: null` -- indistinguishable from a meeting that
+        # genuinely raised no concerns. The only evidence lived in the report
+        # returned by this function, which the HTTP path throws away because
+        # processing runs as a background task.
+        #
+        # Only pass failures count. The rest of `rejected` is the grounding
+        # check refusing ungrounded quotes, which is the system working.
+        failures = [r for r in understanding.rejected if r.startswith("pass failed")]
+        # Kept in the existing status vocabulary -- the table has a CHECK
+        # constraint and the deployed Postgres already carries it, so widening
+        # it is a migration on live data for a reporting field. The `error`
+        # column carries the truth instead, and the route derives `complete`
+        # from it so a caller does not have to know that.
+        store.set_chunk_result(
+            transcript_id, chunk.index, "done",
+            summary=understanding.summary, note_id=note_id,
+            error="; ".join(failures)[:300] if failures else None,
+        )
+        if failures:
+            # DEGRADED, not failed, and the distinction is load-bearing: this
+            # chunk produced artifacts, it is only missing the kinds the failed
+            # pass was looking for. Counting it as a failure made a one-chunk
+            # transcript report `status: error` while holding three decisions
+            # and four action items -- understating the record as badly as the
+            # silent `done` overstated it.
+            report["degraded"].append({"chunk": chunk.index,
+                                       "error": "; ".join(failures)[:300]})
         if on_progress:
             on_progress({"chunk": chunk.index, "of": len(chunks), "ok": True})
 
@@ -387,16 +421,27 @@ def _process(
     report["revisions"] = reduced["notes"]
 
     failed = len(report["errors"])
+    degraded = len(report["degraded"])
     if failed == len(chunks):
         report["status"] = "error"
         store.set_transcript_status(
             transcript_id, "error",
             error=f"every chunk failed; first: {report['errors'][0]['error']}"[:400],
         )
-    elif failed:
+    elif failed or degraded:
         report["status"] = "partial"
-        store.set_transcript_status(transcript_id, "done",
-                                    error=f"{failed} of {len(chunks)} chunks failed")
+        # `done` with an error set, which the route reports as complete=false.
+        # The report said partial and the stored row said done, so the only
+        # caller that learned the truth was the one holding the return value --
+        # and the HTTP path does not hold it, because processing runs in a
+        # background task. Anyone polling saw a clean `done` over a record
+        # missing half its findings.
+        note = []
+        if failed:
+            note.append(f"{failed} of {len(chunks)} chunks failed")
+        if degraded:
+            note.append(f"{degraded} comprehended only in part")
+        store.set_transcript_status(transcript_id, "done", error="; ".join(note))
     else:
         report["status"] = "ok"
         store.set_transcript_status(transcript_id, "done")

@@ -15,3 +15,28 @@ warmed: numpy, neo4j, embeddings
 [09/01/26 14:37:05] INFO     Processing request of type           server.py:733
                              CallToolRequest                                   
 Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00, 19.02it/s]
+[09/01/26 15:18:34] INFO     Processing request of type           server.py:733
+                             CallToolRequest                                   
+Batches:   0%|          | 0/1 [00:00<?, ?it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  1.68it/s]Batches: 100%|██████████| 1/1 [00:00<00:00,  1.67it/s]
+[2;36m[09/02/26 00:23:05][0m[2;36m [0m[34mINFO    [0m No device provided, using cpu         [2mmodel.py[0m[2m:[0m[2m190[0m
+[2;36m                   [0m[2;36m [0m[34mINFO    [0m Loading SentenceTransformer model    [2mmodel.py[0m[2m:[0m[2m1001[0m
+[2;36m                    [0m         from                                 [2m             [0m
+[2;36m                    [0m         sentence-transformers/all-MiniLM-L6- [2m             [0m
+[2;36m                    [0m         v2.                                  [2m             [0m
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 3445.30it/s]
+warmed: numpy, neo4j, embeddings
+[2;36m                   [0m[2;36m [0m[34mINFO    [0m Processing request of type           [2mserver.py[0m[2m:[0m[2m733[0m
+[2;36m                    [0m         ListToolsRequest                     [2m             [0m
+[09/02/26 12:10:04] INFO     No device provided, using cpu         model.py:190
+[09/02/26 12:10:05] INFO     Loading SentenceTransformer model    model.py:1001
+                             from                                              
+                             sentence-transformers/all-MiniLM-L6-              
+                             v2.                                               
+Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 5563.96it/s]
+warmed: numpy, neo4j, embeddings
+                    INFO     Processing request of type           server.py:733
+                             ListToolsRequest                                  
+                    INFO     Processing request of type           server.py:733
+                             ListPromptsRequest                                
+                    INFO     Processing request of type           server.py:733
+                             ListResourcesRequest                              

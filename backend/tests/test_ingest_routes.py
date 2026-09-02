@@ -195,3 +195,104 @@ def test_artifacts_are_scoped_to_their_workspace(client):
 
     assert client.get("/ingest/artifacts", params={"workspace": "office"}).json()
     assert client.get("/ingest/artifacts").json() == []
+
+
+# ---------------------------------------------------------------------------
+# A half-record must not pass for a whole one
+# ---------------------------------------------------------------------------
+
+def test_a_partly_comprehended_transcript_is_not_reported_as_complete(
+        client, monkeypatch):
+    """
+    Comprehension degrades on purpose: when the focused variant's concerns pass
+    fails, the commitments it already found are still stored, because half a
+    record beats none.
+
+    That was invisible. A real ingestion hit the Groq daily cap on the second
+    call and stored four decisions and four action items with ZERO risks and
+    ZERO open questions, reporting `status: done, error: null` -- which is
+    indistinguishable from a meeting that genuinely raised no concerns. The
+    evidence existed, in `rejected`, and lived only in the report returned by
+    process_transcript, which the HTTP path discards because it runs the work
+    in a background task.
+    """
+    from brahmastra.ingest import assemble
+    from brahmastra.ingest.comprehend import Artifact, ChunkUnderstanding
+
+    def half(chunk, max_tokens=None):
+        return ChunkUnderstanding(
+            chunk_index=chunk.index,
+            summary="Commitments only.",
+            artifacts=[Artifact("decision", "The release moves to April 15th",
+                                chunk_index=chunk.index)],
+            rejected=["pass failed: LLMQuotaExhausted: daily cap"],
+        )
+
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: half)
+
+    tid = _submit(client, title="Half a meeting").json()["transcript_id"]
+    body = client.get(f"/ingest/transcripts/{tid}").json()
+
+    assert body["complete"] is False, "a half-comprehended record looked whole"
+    assert body["incomplete_chunks"] == [0]
+    assert "quota" in body["chunks"][0]["error"].lower()
+
+
+def test_a_fully_comprehended_transcript_is_reported_as_complete(client):
+    tid = _submit(client).json()["transcript_id"]
+    body = client.get(f"/ingest/transcripts/{tid}").json()
+
+    assert body["complete"] is True
+    assert "incomplete_chunks" not in body
+
+
+def test_a_refused_quote_does_not_make_a_transcript_incomplete(client, monkeypatch):
+    """
+    Only PASS failures count. The rest of `rejected` is the grounding check
+    turning away ungrounded quotes, which is the system working as designed --
+    flagging that as an incomplete record would cry wolf on every transcript.
+    """
+    from brahmastra.ingest import assemble
+    from brahmastra.ingest.comprehend import Artifact, ChunkUnderstanding
+
+    def grounded_only(chunk, max_tokens=None):
+        return ChunkUnderstanding(
+            chunk_index=chunk.index,
+            artifacts=[Artifact("decision", "The release moves to April 15th",
+                                chunk_index=chunk.index)],
+            rejected=["decision: quote not in passage"],
+        )
+
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: grounded_only)
+
+    tid = _submit(client, title="Grounding did its job").json()["transcript_id"]
+    assert client.get(f"/ingest/transcripts/{tid}").json()["complete"] is True
+
+
+def test_a_degraded_chunk_does_not_report_the_whole_transcript_as_failed(
+        client, monkeypatch):
+    """
+    A chunk that lost one comprehension pass still produced artifacts, so the
+    transcript is partial, not failed. Counting it as a failure made a
+    single-chunk transcript report `status: error` while holding three
+    decisions and four action items -- understating the record as badly as the
+    silent `done` overstated it.
+    """
+    from brahmastra.ingest import assemble
+    from brahmastra.ingest.comprehend import Artifact, ChunkUnderstanding
+
+    def half(chunk, max_tokens=None):
+        return ChunkUnderstanding(
+            chunk_index=chunk.index,
+            artifacts=[Artifact("decision", "The release moves to April 15th",
+                                chunk_index=chunk.index)],
+            rejected=["pass failed: LLMQuotaExhausted: daily cap"],
+        )
+
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: half)
+    tid = _submit(client, title="Degraded, not dead").json()["transcript_id"]
+    body = client.get(f"/ingest/transcripts/{tid}").json()
+
+    assert body["status"] == "done", "a degraded chunk was reported as a failure"
+    assert body["complete"] is False, "but the record is not whole"
+    assert body["artifact_counts"]["decision"] == 1, "and its artifacts were kept"

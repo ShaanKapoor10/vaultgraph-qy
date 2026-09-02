@@ -149,6 +149,23 @@ async def get_transcript(transcript_id: str, include_text: bool = False) -> dict
         kind: len(store.get_artifacts(kind=kind, transcript_id=transcript_id))
         for kind in ("decision", "action_item", "risk", "open_question")
     }
+    # Whether this record is WHOLE, which `status` alone cannot say.
+    #
+    # Comprehension degrades on purpose: when the focused variant's concerns
+    # pass fails, the commitments it already found are still stored, because
+    # half a record beats none. A real ingestion hit the Groq daily cap on that
+    # second call and stored four decisions and four action items with zero
+    # risks and zero open questions -- reporting `status: done, error: null`,
+    # which is indistinguishable from a meeting that raised no concerns.
+    #
+    # `status` cannot carry this: the table has a CHECK constraint on it and
+    # the deployed Postgres already holds that constraint, so widening the
+    # vocabulary is a migration on live data. Derived here instead, from the
+    # error the chunks now record.
+    incomplete = [c["idx"] for c in chunks if c.get("error")]
+    record["complete"] = not incomplete and not record.get("error")
+    if incomplete:
+        record["incomplete_chunks"] = incomplete
     return record
 
 
