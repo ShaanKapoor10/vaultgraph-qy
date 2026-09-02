@@ -506,3 +506,40 @@ def test_an_unrecognised_strategy_falls_back_rather_than_crashing(monkeypatch):
     from brahmastra.ingest.comprehend import comprehend_chunk_focused
     monkeypatch.setenv("INGEST_COMPREHEND_PASSES", "swarm")
     assert assemble.comprehension_strategy() is comprehend_chunk_focused
+
+
+# ---------------------------------------------------------------------------
+# Which database the transcripts land in
+# ---------------------------------------------------------------------------
+
+@pytest.mark.config_only
+def test_passing_a_workspace_does_not_change_which_backend_is_used(monkeypatch):
+    """
+    Same code, same environment, different store, decided by whether an
+    argument was passed. Observed in one process against the live deployment:
+
+        get_ingest_store("transcripts-demo") -> backend=sqlite
+        get_ingest_store(None)               -> backend=postgres
+
+    `_backend()` reads NOTE_BACKEND, which comes from backend/.env, and nothing
+    on this path loaded that file: it was loaded as a SIDE EFFECT of
+    `current_workspace()`, which the constructor only calls when no workspace
+    was passed. An explicit workspace short-circuited the `or`, so .env was
+    never read and an empty NOTE_BACKEND silently selected SQLite.
+
+    Transcripts are SOURCE data. This is the failure CLAUDE.md already records
+    twice -- a backend switch that left 61 notes in one store and 54 in another.
+    The API never hit it because uvicorn loads .env at import; a fresh CLI
+    process with --workspace hit it every time.
+    """
+    from brahmastra.ingest.store import get_ingest_store
+
+    monkeypatch.setenv("NOTE_BACKEND", "postgres")
+
+    explicit = get_ingest_store("office")
+    ambient = get_ingest_store()
+
+    assert explicit.backend == ambient.backend, (
+        "the backend changed depending on whether a workspace was passed"
+    )
+    assert explicit.workspace == "office"

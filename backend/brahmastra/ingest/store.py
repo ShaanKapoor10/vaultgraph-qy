@@ -140,6 +140,26 @@ def _backend() -> str:
     falls back to SQLite here rather than refusing, which keeps single-store
     local development working exactly as it does everywhere else.
     """
+    # Load the config before reading it, which sounds obvious and was not
+    # happening. These variables came from backend/.env, and nothing on this
+    # path read that file: it was loaded as a SIDE EFFECT of
+    # `current_workspace()`, which `IngestStore.__init__` only calls when no
+    # workspace was passed. So `get_ingest_store("office")` short-circuited the
+    # `or`, never loaded .env, saw an empty NOTE_BACKEND and silently chose
+    # SQLITE -- in a deployment whose notes live in Postgres.
+    #
+    # Observed in one process, which is what makes it unarguable:
+    #     get_ingest_store("transcripts-demo") -> backend=sqlite
+    #     get_ingest_store(None)               -> backend=postgres
+    #
+    # Same code, same environment, different store, decided by whether an
+    # argument was passed. Transcripts are SOURCE data, so this is the failure
+    # CLAUDE.md records twice already -- a backend switch that left 61 notes in
+    # one store and 54 in another. The API never hit it because uvicorn loads
+    # .env at import; a fresh CLI process with --workspace hits it every time.
+    from brahmastra.env import load_env
+    load_env()
+
     name = (os.environ.get("NOTE_BACKEND") or "").strip().lower()
     if not name:
         name = (os.environ.get("GRAPH_BACKEND") or "sqlite").strip().lower()
