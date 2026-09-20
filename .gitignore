@@ -66,3 +66,16 @@ backend/data/checkpoints/
 # Runtime log from the MCP server (stderr is detached to it so a full pipe
 # cannot deadlock the server). Regenerated on every run; never a source file.
 backend/data/mcp-server.log
+
+# Per-store runtime state written beside the lock: the pipeline's last-run
+# record, the staleness stamp, and the keepalive's engine-touch stamp. All are
+# keyed by a hash of the store and regenerated on demand, so they are machine
+# state rather than source -- and one of them had been committed.
+backend/data/.pipeline-*.json
+backend/data/.pipeline-*.lock
+backend/data/.graph-touch-*
+
+# The rebuilt-originals left behind when the environment is recreated. Named
+# by hand, so they miss the .venv/ and node_modules/ rules above and turn up
+# as ~48,000 untracked files.
+*-dead/
