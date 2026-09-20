@@ -246,6 +246,23 @@ def speaker_of(quote: str, chunk: Any) -> str | None:
     return None
 
 
+def owner_from_speaker(quote: str | None, chunk: Any) -> str | None:
+    """
+    Who committed, when the quote says "I" and the model left the owner blank.
+
+    The same fact the check below polices, used forwards instead. If Mei says
+    "I'll update the roadmap", the owner IS Mei -- the transcript states it and
+    the segmenter already recorded it, so asking a model to infer it is work
+    nobody needs to do and a chance to get it wrong.
+
+    Only for first person. "Raj, you own reconciliation" names its owner in the
+    words and is not the speaker's commitment, so it is left to the model.
+    """
+    if not quote or not _FIRST_PERSON.search(quote):
+        return None
+    return speaker_of(quote, chunk)
+
+
 def attribution_is_consistent(owner: str | None, quote: str | None,
                               chunk: Any) -> bool:
     """

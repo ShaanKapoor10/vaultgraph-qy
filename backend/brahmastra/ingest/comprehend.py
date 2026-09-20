@@ -311,6 +311,12 @@ def build_understanding(payload: dict[str, Any], chunk: Chunk) -> ChunkUnderstan
                     f"{kind}: owner {owner!r} did not speak the cited quote"
                 )
                 owner = None
+            if not owner:
+                # Recovered rather than left blank. A first-person quote names
+                # its owner by who said it, so an artifact quoting "I'll update
+                # the roadmap" belongs to whoever spoke that line -- including
+                # the one whose wrong owner was just removed above.
+                owner = evidence.owner_from_speaker(quote, chunk)
 
             result.artifacts.append(Artifact(
                 kind=kind,

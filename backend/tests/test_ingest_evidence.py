@@ -162,21 +162,73 @@ def test_no_owner_means_nothing_to_check(chunk):
 # Wired into acceptance
 # ---------------------------------------------------------------------------
 
-def test_a_misattributed_owner_loses_the_owner_not_the_finding(monkeypatch, chunk):
+def test_an_unrecoverable_owner_is_dropped_and_the_finding_kept(monkeypatch, chunk):
     """
-    The statement is true of the meeting; only the attribution is wrong. So the
-    owner is dropped and the finding survives -- dropping the artifact would
-    lose a real commitment over a fixable field.
+    When the speaker cannot be identified there is nobody to correct the owner
+    TO, so the owner goes and the finding stays. Discarding the artifact would
+    lose a real commitment over one fixable field.
     """
     from brahmastra.ingest.comprehend import build_understanding
 
-    monkeypatch.setattr(evidence, "score_evidence", lambda *a, **k: None)
+    monkeypatch.setattr(evidence, "speaker_of", lambda quote, chunk: None)
+    monkeypatch.setattr(evidence, "owner_is_named_override", None, raising=False)
+
+    result = build_understanding({"action_items": [{
+        "task": "Communicate the new release date to the wider team",
+        "owner": "Jonathan",                      # never in the passage
+        "quote": "I'll own communicating that to the wider team today",
+    }]}, chunk)
+
+    assert len(result.artifacts) == 1
+    assert result.artifacts[0].owner is None
+    assert any("not named" in r for r in result.rejected)
+
+
+# ---------------------------------------------------------------------------
+# Using attribution forwards, not just as a veto
+# ---------------------------------------------------------------------------
+
+def test_a_first_person_quote_supplies_the_owner(chunk):
+    """
+    Shaan's question: if the speaker says "I am doing it", the speaker is doing
+    it. The transcript states that and the segmenter already recorded it, so
+    asking a model to infer the owner is work nobody needs to do and a chance
+    to get it wrong.
+    """
+    assert evidence.owner_from_speaker(
+        "I'll update the roadmap by Friday", chunk) == "Mei"
+    assert evidence.owner_from_speaker(
+        "I'll own communicating that to the wider team today", chunk) == "Sarah"
+
+
+def test_third_person_assignment_supplies_no_owner(chunk):
+    """"Raj, you own reconciliation" names its owner in the words, and the
+    speaker is Sarah -- taking the speaker here would be exactly wrong."""
+    assert evidence.owner_from_speaker("Raj, you own reconciliation", chunk) is None
+
+
+def test_a_missing_owner_is_recovered_from_the_speaker(chunk):
+    from brahmastra.ingest.comprehend import build_understanding
+
+    result = build_understanding({"action_items": [{
+        "task": "Update the roadmap to reflect the new release date",
+        "quote": "I'll update the roadmap by Friday",
+    }]}, chunk)
+    assert result.artifacts[0].owner == "Mei"
+
+
+def test_a_wrong_owner_is_replaced_not_merely_removed(chunk):
+    """
+    The stronger half of the same idea. Stripping "Mei" leaves the commitment
+    ownerless when the passage says plainly that Sarah made it.
+    """
+    from brahmastra.ingest.comprehend import build_understanding
+
     result = build_understanding({"action_items": [{
         "task": "Communicate the new release date to the wider team",
         "owner": "Mei",
         "quote": "I'll own communicating that to the wider team today",
     }]}, chunk)
 
-    assert len(result.artifacts) == 1
-    assert result.artifacts[0].owner is None
+    assert result.artifacts[0].owner == "Sarah"
     assert any("did not speak" in r for r in result.rejected)

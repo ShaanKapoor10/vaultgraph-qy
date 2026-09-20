@@ -129,8 +129,9 @@ def test_every_kind_is_grounded_not_just_decisions(chunk):
 def test_an_invented_owner_is_stripped_but_the_artifact_survives(chunk):
     """
     An action assigned to a person who was never there looks actionable and is
-    addressed to nobody. The commitment is real, though, so keep it unassigned
-    rather than discarding what was genuinely said.
+    addressed to nobody. The commitment is real, though, so keep it -- and when
+    the quote is first person, RECOVER the owner from whoever spoke it rather
+    than leaving it blank. The passage says plainly that Mei made this one.
     """
     result = build_understanding(_payload(action_items=[{
         "task": "Update the roadmap",
@@ -139,7 +140,7 @@ def test_an_invented_owner_is_stripped_but_the_artifact_survives(chunk):
     }]), chunk)
 
     assert len(result.artifacts) == 1
-    assert result.artifacts[0].owner is None
+    assert result.artifacts[0].owner == "Mei"      # recovered from the speaker
     assert any("not named" in r for r in result.rejected)
 
 
