@@ -510,13 +510,21 @@ _COMMITMENT_KINDS = ("decision", "action_item")
 _CONCERN_KINDS = ("risk", "open_question")
 
 
-def _one_pass(chunk: Chunk, system: str, budget: int) -> tuple[dict[str, Any] | None, str | None]:
-    """One call. Returns (payload, error) -- never raises."""
+def _one_pass(chunk: Chunk, system: str, budget: int,
+              json_schema: dict[str, Any] | None = None,
+              ) -> tuple[dict[str, Any] | None, str | None]:
+    """
+    One call. Returns (payload, error) -- never raises.
+
+    With a `json_schema` the provider ENFORCES the reply shape; without one it
+    is merely asked for valid JSON and told the shape in prose.
+    """
     from brahmastra.llm import chat
 
     try:
         raw = chat(system, f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
-                   json_mode=True, temperature=0.1, max_tokens=budget)
+                   json_mode=json_schema is None, json_schema=json_schema,
+                   temperature=0.1, max_tokens=budget)
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"[:300]
     try:
@@ -672,6 +680,175 @@ def comprehend_chunk_per_kind(chunk: Chunk,
     merged["participants"] = participants
     result = build_understanding(merged, chunk)
     result.calls = len(ARTIFACT_KINDS)
+    for err in errors:
+        result.rejected.append(f"pass failed: {err}")
+    return result
+
+
+# ---------------------------------------------------------------------------
+# The typed variant: let the provider ENFORCE the shape
+# ---------------------------------------------------------------------------
+#
+# Borrowed from cocoindex's meeting-notes example, which declares Pydantic
+# models and hands them to the model as a response schema rather than
+# describing the shape in prose. Their phrasing: "instructor uses these as the
+# response schema, so the model returns structured data that matches the Python
+# types instead of free-form text."
+#
+# We do not need instructor or LiteLLM for it -- Groq accepts a strict JSON
+# schema directly, verified against openai/gpt-oss-120b.
+#
+# Worth trying because the failure it removes is one we demonstrably have.
+# `_parse_reply` strips markdown fences and hunts for the outermost braces, and
+# there are three separate code paths reporting "unparseable reply". json_object
+# only promises VALID json; a schema promises the RIGHT json, so a reply can no
+# longer arrive well-formed and wrongly shaped. The secondary hope is quality:
+# a model not spending attention on remembering the format may have more left
+# for reading the meeting.
+
+def _artifact_schema(kinds: tuple[str, ...] = ARTIFACT_KINDS) -> dict[str, Any]:
+    """The reply shape, as a strict JSON schema rather than as prose."""
+    plural = {"decision": "decisions", "action_item": "action_items",
+              "risk": "risks", "open_question": "open_questions"}
+    properties: dict[str, Any] = {
+        "summary": {"type": "string"},
+        "participants": {"type": "array", "items": {"type": "string"}},
+    }
+    for kind in kinds:
+        item_props = {
+            _FIELD_BY_KIND[kind]: {"type": "string"},
+            "owner": {"type": ["string", "null"]},
+            "due": {"type": ["string", "null"]},
+            "quote": {"type": "string"},
+        }
+        properties[plural[kind]] = {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": item_props,
+                # Every field required, nullable where optional: strict schemas
+                # forbid a partial object, and a model that omits `owner`
+                # entirely is harder to handle than one that sends null.
+                "required": list(item_props),
+                "additionalProperties": False,
+            },
+        }
+    return {"type": "object", "properties": properties,
+            "required": list(properties), "additionalProperties": False}
+
+
+TYPED_PROMPT = """You extract a factual record from part of a meeting transcript.
+
+The reply shape is enforced for you, so spend no effort on formatting and all
+of it on reading the passage.
+
+RULES, IN ORDER OF IMPORTANCE:
+
+1. Every quote MUST be copied verbatim from the passage. Never paraphrase a
+   quote, never compose one, never quote text that is not in the passage.
+2. Record only what the passage actually contains. If nothing was decided,
+   return an empty decisions array. Empty arrays are the correct answer far
+   more often than not, and are always better than a plausible invention.
+3. A decision is a settled choice, not a suggestion. "We should maybe look at
+   X" is not a decision. "We're moving the date to April" is.
+4. An action item needs someone doing something. A wish with no owner and no
+   commitment is not an action item.
+5. A risk is anything named as able to go wrong: a blocker, a dependency, an
+   exposure, something flaky, a contract that may be breached.
+6. An open question is asked and left hanging here. If someone answers it in
+   this passage, it is not open.
+7. Use only names that appear in the passage. Never introduce a person.
+8. Use null for an owner or due date the passage does not give.
+"""
+
+
+def comprehend_chunk_typed(chunk: Chunk,
+                           max_tokens: int | None = None) -> ChunkUnderstanding:
+    """
+    One pass, with the reply shape enforced by the provider rather than asked
+    for in prose.
+
+    The rules are the same as the single pass; only the JSON example is gone,
+    because the schema now carries it. So the comparison is schema-enforcement
+    against prose-description, not two different briefs.
+    """
+    from brahmastra.llm import chat
+
+    # Far more headroom than the prose variants need, and not optional.
+    # gpt-oss-120b is a REASONING model: its reasoning tokens are spent from
+    # the same budget, and a budget exhausted before the content begins yields
+    # an EMPTY generation, which a strict schema then rejects with
+    # `json_validate_failed` and `failed_generation: ""`. At 1600 tokens every
+    # call failed that way and the variant scored 0%; at 4000 it works. Same
+    # trap CLAUDE.md records for qwen3.6-27b, arriving through the schema
+    # rather than through json_object.
+    budget = max_tokens or int(os.environ.get("INGEST_TYPED_TOKENS", "") or 4000)
+    try:
+        raw = chat(
+            TYPED_PROMPT,
+            f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
+            json_schema=_artifact_schema(),
+            temperature=0.1,
+            max_tokens=budget,
+        )
+    except Exception as exc:
+        return ChunkUnderstanding(
+            chunk_index=chunk.index, error=f"{type(exc).__name__}: {exc}"[:300])
+
+    try:
+        payload = _parse_reply(raw)
+    except Exception as exc:
+        return ChunkUnderstanding(
+            chunk_index=chunk.index, error=f"unparseable reply: {exc}"[:300])
+
+    return build_understanding(payload, chunk)
+
+
+def comprehend_chunk_typed_focused(chunk: Chunk,
+                                   max_tokens: int | None = None) -> ChunkUnderstanding:
+    """
+    The two winning ideas together: a schema-enforced reply, twice, split into
+    commitments and concerns.
+
+    Schema enforcement bought 15 points at one call (43% -> 58%) and the
+    two-way split bought 26 at two calls (43% -> 69%). They address different
+    things -- one removes the formatting burden, the other removes divided
+    attention -- so the question is whether the gains stack or overlap.
+    """
+    budget = max_tokens or int(os.environ.get("INGEST_TYPED_TOKENS", "") or 4000)
+    halves = ((_COMMITMENT_KINDS, "commitments: decisions taken and tasks people "
+               "committed to"),
+              (_CONCERN_KINDS, "concerns: risks raised and questions left open"))
+
+    merged: dict[str, Any] = {}
+    errors: list[str] = []
+    participants: list[str] = []
+    plural = {"decision": "decisions", "action_item": "action_items",
+              "risk": "risks", "open_question": "open_questions"}
+
+    for kinds, brief in halves:
+        prompt = (TYPED_PROMPT.replace(
+            "You extract a factual record from part of a meeting transcript.",
+            f"You read part of a meeting transcript and extract only {brief}. "
+            f"Ignore everything else, however interesting."))
+        payload, err = _one_pass(chunk, prompt, budget,
+                                 json_schema=_artifact_schema(kinds))
+        if err:
+            errors.append(err)
+            continue
+        for kind in kinds:
+            merged[plural[kind]] = (payload or {}).get(plural[kind], [])
+        for name in _clean_strings((payload or {}).get("participants")):
+            if name not in participants:
+                participants.append(name)
+
+    if not merged:
+        return ChunkUnderstanding(chunk_index=chunk.index,
+                                  error=errors[0] if errors else "no passes returned",
+                                  calls=2)
+    merged["participants"] = participants
+    result = build_understanding(merged, chunk)
+    result.calls = 2
     for err in errors:
         result.rejected.append(f"pass failed: {err}")
     return result

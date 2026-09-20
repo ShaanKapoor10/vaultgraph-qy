@@ -69,6 +69,8 @@ from brahmastra.ingest.comprehend import (
     comprehend_chunk,
     comprehend_chunk_focused,
     comprehend_chunk_per_kind,
+    comprehend_chunk_typed,
+    comprehend_chunk_typed_focused,
 )
 from brahmastra.ingest.consolidate import (
     POLARITY_SENSITIVE,
@@ -498,7 +500,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--cases", default=None, help="directory of labelled cases")
     parser.add_argument("--json", action="store_true", help="machine-readable output")
-    parser.add_argument("--variant", choices=("single", "focused", "per-kind"),
+    parser.add_argument("--variant", choices=("single", "focused", "per-kind", "typed",
+                                 "typed-focused"),
                         default="single",
                         help="single pass, or two specialised passes")
     parser.add_argument("--compare", action="store_true",
@@ -523,7 +526,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_audit(cases)
 
     variants = {"single": comprehend_chunk, "focused": comprehend_chunk_focused,
-                "per-kind": comprehend_chunk_per_kind}
+                "per-kind": comprehend_chunk_per_kind,
+                "typed": comprehend_chunk_typed,
+                "typed-focused": comprehend_chunk_typed_focused}
     chosen = variants if args.compare else {args.variant: variants[args.variant]}
 
     all_runs: dict[str, list[dict[str, Any]]] = {}

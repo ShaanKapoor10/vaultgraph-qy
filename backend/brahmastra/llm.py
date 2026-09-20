@@ -30,6 +30,7 @@ import os
 import time
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 # Load backend/.env so config is present no matter which entrypoint imports
 # us (server, CLI, MCP server, a fresh `python -c`).
@@ -244,6 +245,7 @@ def chat(
     user: str,
     *,
     json_mode: bool = False,
+    json_schema: dict[str, Any] | None = None,
     temperature: float = 0.2,
     max_tokens: int = 2048,
     num_ctx: int = 8192,
@@ -277,6 +279,7 @@ def chat(
     if provider is None:
         try:
             return _dispatch(name, system, user, json_mode=json_mode,
+                             json_schema=json_schema,
                              temperature=temperature, max_tokens=max_tokens,
                              num_ctx=num_ctx, timeout=timeout, retries=retries)
         except LLMQuotaExhausted:
@@ -291,6 +294,7 @@ def chat(
             name = fallback
 
     return _dispatch(name, system, user, json_mode=json_mode,
+                     json_schema=json_schema,
                      temperature=temperature, max_tokens=max_tokens,
                      num_ctx=num_ctx, timeout=timeout, retries=retries)
 
@@ -307,6 +311,7 @@ def _dispatch(
     user: str,
     *,
     json_mode: bool,
+    json_schema: dict[str, Any] | None = None,
     temperature: float,
     max_tokens: int,
     num_ctx: int,
@@ -321,8 +326,8 @@ def _dispatch(
         )
     if name == "groq":
         return _groq_chat(
-            system, user, json_mode=json_mode, temperature=temperature,
-            max_tokens=max_tokens, retries=retries,
+            system, user, json_mode=json_mode, json_schema=json_schema,
+            temperature=temperature, max_tokens=max_tokens, retries=retries,
         )
     if name == "anthropic":
         return _anthropic_chat(
@@ -339,6 +344,7 @@ def _groq_chat(
     temperature: float,
     max_tokens: int,
     retries: int,
+    json_schema: dict[str, Any] | None = None,
 ) -> str:
     try:
         from groq import Groq
@@ -358,7 +364,16 @@ def _groq_chat(
             {"role": "user", "content": user},
         ],
     }
-    if json_mode:
+    if json_schema is not None:
+        # The provider ENFORCES the shape rather than being asked for it in
+        # prose. json_object only promises valid JSON; a schema promises the
+        # right JSON, so a reply can no longer arrive well-formed and wrongly
+        # shaped -- which is the failure `_parse_reply` exists to survive.
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "record", "schema": json_schema, "strict": True},
+        }
+    elif json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
     # The free tier is rate limited (~12k TPM); back off rather than fail the
