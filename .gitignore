@@ -62,3 +62,7 @@ dist/
 # Queued session checkpoints — raw conversation transcripts awaiting
 # distillation. Runtime state, and the most sensitive thing on disk after .env.
 backend/data/checkpoints/
+
+# Runtime log from the MCP server (stderr is detached to it so a full pipe
+# cannot deadlock the server). Regenerated on every run; never a source file.
+backend/data/mcp-server.log
