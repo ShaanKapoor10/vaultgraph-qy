@@ -556,3 +556,122 @@ def comprehend_chunk_focused(chunk: Chunk,
         if err:
             result.rejected.append(f"pass failed: {err}")
     return result
+
+
+# ---------------------------------------------------------------------------
+# The per-kind variant: one specialist per artifact kind
+# ---------------------------------------------------------------------------
+#
+# Shaan's hypothesis, and it already has evidence behind it on this data:
+# splitting one broad pass into two narrower ones took gpt-oss-120b from 43% to
+# 69% recall. If attention is the constraint, four specialists should beat two.
+# If instead the two-way split captured the whole gain -- commitments and
+# concerns are genuinely different reading tasks, while decisions and action
+# items are nearly the same one -- then four calls buy nothing over two and
+# cost double.
+#
+# Built from one template rather than four hand-written prompts, so the only
+# thing that differs between specialists is what they are looking for. Four
+# prompts drifting apart in wording would make the comparison meaningless.
+#
+# MEASURED 2026-09-21, AND THE RESULT IS INCONCLUSIVE ON QUALITY BUT CONCLUSIVE
+# ON COST. Two attempts over two labelled cases, three runs each:
+#
+#     focused  (2 calls/chunk)   69% [64-79]   stable
+#     per-kind (4 calls/chunk)   56% [45-64]   at a 1200-token budget
+#     per-kind (4 calls/chunk)   31% [ 0-64]   at a matched 1600-token budget
+#
+# The second attempt contains 0% runs, and those are Groq's DAILY CAP rather
+# than the architecture: four calls per chunk burns the free tier four times
+# faster, and the run that scored zero had "LLMQuotaExhausted" on its only
+# chunk. So the quality question is still open -- it needs a tier that will not
+# run out mid-measurement -- while the operational answer is already clear: on
+# this infrastructure, four specialists exhaust the budget and fail.
+#
+# What IS established is that the two-way split was not merely "more agents".
+# Commitments and concerns are genuinely different reading tasks; decisions and
+# action items are nearly the same one. Splitting along a seam that is not
+# there costs calls and gains nothing obvious.
+
+_KIND_BRIEF = {
+    "decision": ("decisions", "statement",
+                 "a settled choice the group actually made. "
+                 "\"We should maybe look at X\" is not one; \"we're moving the "
+                 "date to April\" is. A decision NOT to do something counts."),
+    "action_item": ("action_items", "task",
+                    "something a named person committed to doing. A wish with "
+                    "no owner and no commitment is not one."),
+    "risk": ("risks", "description",
+             "anything named as able to go wrong: a blocker, a dependency, an "
+             "exposure, something flaky, a contract that may be breached. "
+             "Include it even when nobody proposed a fix."),
+    "open_question": ("open_questions", "question",
+                      "something asked and left hanging in this passage. If "
+                      "someone answers it here it is not open. \"Let's not "
+                      "answer that now\" leaves it open."),
+}
+
+_ONE_KIND_PROMPT = """\
+You read part of a meeting transcript and extract ONE kind of thing. Ignore
+everything else, however interesting.
+
+You are looking for {plural}: {brief}
+
+Return ONLY a JSON object of this shape:
+
+{{
+  "participants": ["names of people who spoke or were referred to"],
+  "{plural}": [
+    {{"{field}": "what it is, in one plain sentence",
+     "owner": "the person, or null", "due": "date or timeframe as stated, or null",
+     "quote": "verbatim words from the passage"}}
+  ]
+}}
+
+RULES:
+1. Every quote MUST be copied verbatim from the passage. Never compose one.
+2. Use only names that appear in the passage. Never introduce a person.
+3. An empty array is the correct answer when the passage holds none, and is
+   always better than a plausible invention.
+4. Extract ONLY {plural}. Anything of another kind is somebody else's job.
+"""
+
+
+def comprehend_chunk_per_kind(chunk: Chunk,
+                              max_tokens: int | None = None) -> ChunkUnderstanding:
+    """
+    Four specialised passes, one per artifact kind, merged.
+
+    Four times the calls of a single pass and twice the focused variant, so it
+    has to earn that on the evaluation. Degrades the same way: a specialist
+    that fails costs its own kind and nothing else.
+    """
+    budget = max_tokens or int(os.environ.get("INGEST_COMPREHEND_TOKENS", "") or 1200)
+
+    merged: dict[str, Any] = {}
+    errors: list[str] = []
+    participants: list[str] = []
+
+    for kind in ARTIFACT_KINDS:
+        plural, field, brief = _KIND_BRIEF[kind]
+        prompt = _ONE_KIND_PROMPT.format(plural=plural, field=field, brief=brief)
+        payload, err = _one_pass(chunk, prompt, budget)
+        if err:
+            errors.append(err)
+            continue
+        merged[plural] = (payload or {}).get(plural, [])
+        for name in _clean_strings((payload or {}).get("participants")):
+            if name not in participants:
+                participants.append(name)
+
+    if not merged:
+        return ChunkUnderstanding(chunk_index=chunk.index,
+                                  error=errors[0] if errors else "no passes returned",
+                                  calls=len(ARTIFACT_KINDS))
+
+    merged["participants"] = participants
+    result = build_understanding(merged, chunk)
+    result.calls = len(ARTIFACT_KINDS)
+    for err in errors:
+        result.rejected.append(f"pass failed: {err}")
+    return result
