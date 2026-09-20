@@ -404,9 +404,10 @@ def comprehend_chunk(chunk: Chunk, max_tokens: int | None = None) -> ChunkUnders
 
     budget = max_tokens or int(os.environ.get("INGEST_COMPREHEND_TOKENS", "") or 1600)
     try:
-        raw = chat(
+        raw = _cached_chat(
             SYSTEM_PROMPT,
             f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
+            chunk.text,
             json_mode=True,
             temperature=0.1,     # this is a record, not a composition
             max_tokens=budget,
@@ -510,6 +511,36 @@ _COMMITMENT_KINDS = ("decision", "action_item")
 _CONCERN_KINDS = ("risk", "open_question")
 
 
+
+def _cached_chat(system: str, user: str, chunk_text: str, **kwargs: Any) -> str:
+    """
+    The model's reply, from cache when this exact reading has been done before.
+
+    Keyed on the passage, the prompt and the model -- cocoindex's
+    `hash(input) + hash(code)`, where the prompt IS the code. Editing a prompt
+    therefore invalidates everything read under the old one, which is the whole
+    reason the prompt is in the key rather than a version number somebody has
+    to remember to bump.
+    """
+    from brahmastra.llm import active_model, chat
+    from brahmastra.ingest import memo
+
+    model = ""
+    try:
+        model = active_model()
+    except Exception:
+        pass
+
+    key = memo.key_for(chunk_text, "chat", model, system)
+    hit = memo.load(key)
+    if hit is not None:
+        return hit
+
+    reply = chat(system, user, **kwargs)
+    memo.save(key, reply)
+    return reply
+
+
 def _one_pass(chunk: Chunk, system: str, budget: int,
               json_schema: dict[str, Any] | None = None,
               ) -> tuple[dict[str, Any] | None, str | None]:
@@ -522,9 +553,10 @@ def _one_pass(chunk: Chunk, system: str, budget: int,
     from brahmastra.llm import chat
 
     try:
-        raw = chat(system, f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
-                   json_mode=json_schema is None, json_schema=json_schema,
-                   temperature=0.1, max_tokens=budget)
+        raw = _cached_chat(
+            system, f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
+            chunk.text, json_mode=json_schema is None, json_schema=json_schema,
+            temperature=0.1, max_tokens=budget)
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"[:300]
     try:
@@ -784,9 +816,10 @@ def comprehend_chunk_typed(chunk: Chunk,
     # rather than through json_object.
     budget = max_tokens or int(os.environ.get("INGEST_TYPED_TOKENS", "") or 4000)
     try:
-        raw = chat(
+        raw = _cached_chat(
             TYPED_PROMPT,
             f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
+            chunk.text,
             json_schema=_artifact_schema(),
             temperature=0.1,
             max_tokens=budget,

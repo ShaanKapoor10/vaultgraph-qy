@@ -84,6 +84,11 @@ def _isolate_storage_choice(monkeypatch):
     # silently change what the suite is testing.
     monkeypatch.setenv("INGEST_EVIDENCE", "0")
 
+    # And the comprehension cache, for the same class of reason: it reaches a
+    # STORE rather than a provider, so a test that stubs the LLM could still
+    # be served a reply cached by an earlier test and never notice.
+    monkeypatch.setenv("INGEST_MEMO", "0")
+
     # And the cloud keys, EXPLICITLY -- BRAHMASTRA_NO_DOTENV is not enough here.
     #
     # This file's own docstring said the suite "clears the Notion and LLM
