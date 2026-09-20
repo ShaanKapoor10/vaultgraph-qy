@@ -485,6 +485,18 @@ def _warm_native_imports() -> list[str]:
         warmed.append("embeddings")
     except Exception as exc:                           # noqa: BLE001
         print(f"warm embeddings failed: {exc}", file=sys.stderr)
+
+    # The evidence reranker, for the same reason as the rest: it is a
+    # transformers model loaded lazily inside ingestion, and ingestion can be
+    # reached from a tool call, which runs on a worker thread. Small (~80MB)
+    # and fast next to the embedding model, so the cost of warming it here is
+    # noise against the cost of not having.
+    try:
+        from brahmastra.ingest import evidence
+        if evidence.warm():
+            warmed.append("evidence-reranker")
+    except Exception as exc:                           # noqa: BLE001
+        print(f"warm evidence reranker failed: {exc}", file=sys.stderr)
     return warmed
 
 

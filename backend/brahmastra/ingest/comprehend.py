@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, field
 from difflib import SequenceMatcher
 from typing import Any
 
+from brahmastra.ingest import evidence
 from brahmastra.ingest.segment import Chunk
 
 # Kinds of thing worth pulling out of a meeting. Deliberately short: each one
@@ -283,9 +284,31 @@ def build_understanding(payload: dict[str, Any], chunk: Chunk) -> ChunkUnderstan
                     f"{kind}: quote contradicts the dates in — {statement[:60]!r}"
                 )
                 continue
-            if not owner_is_named(owner, source, result.participants):
+            if not evidence.evidence_supports(statement, quote, chunk):
+                # The quote is real and shares the statement's dates, and a
+                # DIFFERENT sentence in the same passage supports the claim
+                # far better -- which is what a misattached citation looks
+                # like. See ingest/evidence.py for why this is asked as a
+                # ranking rather than as a score against a threshold.
+                result.rejected.append(
+                    f"{kind}: better evidence exists in the passage — {statement[:60]!r}"
+                )
+                continue
+            # Existence before attribution. An owner who never appears in the
+            # passage is invented, and saying they "did not speak the quote"
+            # would be true but would name the symptom rather than the cause.
+            if owner and not owner_is_named(owner, source, result.participants):
                 result.rejected.append(
                     f"{kind}: owner {owner!r} is not named in the passage"
+                )
+                owner = None
+            if owner and not evidence.attribution_is_consistent(owner, quote, chunk):
+                # A real person, but not the one who made this commitment. A
+                # first-person quote belongs to whoever spoke it, so it cannot
+                # support an artifact owned by somebody else. The statement is
+                # usually true, so the OWNER goes and the finding stays.
+                result.rejected.append(
+                    f"{kind}: owner {owner!r} did not speak the cited quote"
                 )
                 owner = None
 

@@ -75,6 +75,15 @@ def _isolate_storage_choice(monkeypatch):
     monkeypatch.setenv("OLLAMA_HOST", "http://127.0.0.1:1")
     monkeypatch.setenv("LLM_PROVIDER", "")
 
+    # And the evidence reranker, which is a TRANSFORMERS model rather than a
+    # provider -- so none of the credential clearing above touches it. Wired
+    # into comprehension, it made the suite download ~80MB from the HF Hub on
+    # the first test that reached an artifact. Same lesson as the local model:
+    # a thing that needs no credential is not stopped by removing credentials.
+    # It defaults off now, but pinned here so enabling it in a shell can never
+    # silently change what the suite is testing.
+    monkeypatch.setenv("INGEST_EVIDENCE", "0")
+
     # And the cloud keys, EXPLICITLY -- BRAHMASTRA_NO_DOTENV is not enough here.
     #
     # This file's own docstring said the suite "clears the Notion and LLM
