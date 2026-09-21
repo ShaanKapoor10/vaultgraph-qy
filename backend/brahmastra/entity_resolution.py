@@ -119,6 +119,89 @@ def _negation_differs(ta: set[str], tb: set[str]) -> bool:
     return bool(ta & _NEGATORS) != bool(tb & _NEGATORS)
 
 
+# Two things whose names an embedding cannot tell apart, and a rule can.
+#
+# From the live graph, read-only over 907 mentions:
+#
+#     0.910   backend/brahmastra/ingest/memo.py == backend/brahmastra/memo.py
+#     0.914   function run_pipeline             == run_full_pipeline function
+#
+# Two different files fused into one node; two different functions fused into
+# another. Neither is a threshold problem -- "pipeline.py"/"file pipeline.py"
+# scores 0.888 and is RIGHT while the memo pair scores 0.910 and is wrong, so
+# no cut separates them. But both are decidable without a model, because a
+# path and an identifier are structured text rather than prose, and the
+# structure says which is which.
+#
+# These are deliberately narrow. They answer "are these provably two things?"
+# and never "are these the same thing?" -- everything they do not recognise
+# falls through to the similarity cascade exactly as before.
+
+_PATHISH = re.compile(r"[\w./-]+\.[A-Za-z]{1,5}$")
+_IDENTIFIER = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+
+
+def _path_of(name: str) -> str | None:
+    """The file path inside a mention, if the mention is about a file."""
+    for token in name.split():
+        token = token.strip("`'\"(),")
+        if _PATHISH.match(token):
+            return token.replace("\\", "/").lower()
+    return None
+
+
+def _different_files(a: str, b: str) -> bool:
+    """
+    True when both names denote files and they are provably NOT the same file.
+
+    Same basename, different directory. "app/page.tsx" and "page.tsx" are one
+    file written two ways, because one path ends with the other; "src/a/util.py"
+    and "src/b/util.py" are two files, because neither does.
+    """
+    pa, pb = _path_of(a), _path_of(b)
+    if not pa or not pb or pa == pb:
+        return False
+    if pa.split("/")[-1] != pb.split("/")[-1]:
+        return False          # different basenames: the cascade can judge it
+    long, short = (pa, pb) if len(pa) >= len(pb) else (pb, pa)
+    # One path being a tail of the other is the same file named more fully.
+    return not long.endswith("/" + short) and long != short
+
+
+def _different_identifiers(a: str, b: str) -> bool:
+    """
+    True when both names carry snake_case identifiers and none is shared.
+
+    "function run_pipeline" and "run_pipeline" share one, so they are the same
+    function described twice. "run_pipeline" and "run_full_pipeline" share
+    none, so they are two functions whose names merely resemble each other --
+    which is exactly the case Jaro-Winkler and cosine both get wrong.
+
+    A KNOWN OVERREACH, kept deliberately. "brahmastra_add_note" and "add_note"
+    are refused although they are plausibly one tool named short and long. The
+    obvious fix -- allow it when one identifier is a suffix of the other -- was
+    tried and rejected, because "mcp_server" is a suffix of "test_mcp_server"
+    and those are a module and its test, which are two files. No rule over
+    identifier text alone separates a namespacing prefix from a qualifying one.
+
+    So the trade is taken on purpose, in the direction this system argues for
+    everywhere else: a refusal costs a visible duplicate node a reader can
+    merge, a wrong merge costs an invisible fusion nobody can see. On the live
+    corpus the shape does not occur -- all ten refusals this rule produces
+    there are correct.
+    """
+    ia = set(_IDENTIFIER.findall(a.lower()))
+    ib = set(_IDENTIFIER.findall(b.lower()))
+    if not ia or not ib:
+        return False
+    return not (ia & ib)
+
+
+def is_distinct(a: str, b: str) -> bool:
+    """Provably two things. See _different_files and _different_identifiers."""
+    return _different_files(a, b) or _different_identifiers(a, b)
+
+
 def _is_contrasting(a: str, b: str) -> bool:
     """
     True if a and b look like opposites rather than variants of one name.
@@ -342,23 +425,45 @@ def run_resolution() -> dict[str, Any]:
 
     mentions = [m for m in raw_mentions if m]
     uf = _UnionFind(mentions)
+    # Reported, not merely applied. A guard whose effect is invisible is one
+    # nobody can audit, and this one is the difference between a graph that
+    # says two things and a graph that says one.
+    refused: set[tuple[str, str]] = set()
 
     # 2. Heuristic pairs
     heuristic_merged: list[tuple[str, str, float, str]] = []
     n = len(mentions)
     for i in range(n):
         for j in range(i + 1, n):
-            sim, method = _heuristic_sim(mentions[i], mentions[j])
-            if sim >= MERGE_THRESHOLD:
-                uf.union(mentions[i], mentions[j])
-                heuristic_merged.append((mentions[i], mentions[j], sim, method))
+            a, b = mentions[i], mentions[j]
+            sim, method = _heuristic_sim(a, b)
+            # SIMILARITY FIRST, then the guard -- so a refusal means "this
+            # would have merged and was stopped", not "these two were never
+            # going to merge anyway". The other order counted 16 refusals on a
+            # six-pair probe that only ever had 4 real merges to stop, which
+            # is precisely the kind of number that reads as work being done.
+            if sim < MERGE_THRESHOLD:
+                continue
+            # BOTH paths are guarded, not only the embedding one: four of the
+            # ten merges this refuses on the live corpus came from
+            # Jaro-Winkler, which scored "brahmastra_search_entities" against
+            # "brahmastra_search_notes" at 0.951. A string metric is if
+            # anything MORE confident about names differing by a few
+            # characters than an embedding is.
+            if _is_contrasting(a, b) or is_distinct(a, b):
+                refused.add((a, b))
+                continue
+            uf.union(a, b)
+            heuristic_merged.append((a, b, sim, method))
 
     # 3. Embedding pairs (skip antonym/contrast pairs that embed deceptively high)
     raw_embedding_pairs = _embedding_sim(mentions)
-    embedding_pairs = {
-        (a, b): sim for (a, b), sim in raw_embedding_pairs.items()
-        if not _is_contrasting(a, b)
-    }
+    embedding_pairs = {}
+    for (a, b), sim in raw_embedding_pairs.items():
+        if _is_contrasting(a, b) or is_distinct(a, b):
+            refused.add((a, b))
+            continue
+        embedding_pairs[(a, b)] = sim
     embedding_used = bool(embedding_pairs)
     for (a, b), sim in embedding_pairs.items():
         uf.union(a, b)
@@ -384,9 +489,11 @@ def run_resolution() -> dict[str, Any]:
         "clusters": len(clusters),
         "mentions": len(mentions),
         "merge_edges": len(merge_edges),
+        "refused_merges": len(refused),
         "embedding_used": embedding_used,
         "details": {
             "clusters": clusters,
             "merge_edges": merge_edges,
+            "refused_merges": [{"a": a, "b": b} for a, b in sorted(refused)],
         },
     }

@@ -157,3 +157,76 @@ def test_it_is_wider_here_than_in_consolidation_on_purpose():
     from brahmastra.entity_resolution import _is_contrasting
 
     assert _is_contrasting("no runbook for the service", "runbook for the service")
+
+
+# -- two things an embedding cannot tell apart, and a rule can --------------
+#
+# Every pair below came out of the LIVE graph, read-only: 925 mentions, 250
+# candidate merges before any guard. These are the ones the two new guards
+# take away, each checked by hand. The other 237 merges are untouched -- which
+# is the point. The resolver was not bad; it was wrong about a handful of
+# things in a way nobody could see.
+
+
+def test_it_refuses_exactly_what_it_should_on_the_real_corpus():
+    from brahmastra.entity_resolution import _is_contrasting, is_distinct
+
+    refused = [
+        # negation
+        ("Do not move the release to April 15th", "Move the release to April 15th"),
+        ("nodes and edges", "nodes without edges"),
+        # two different MCP tools, one of them merging at jaro 0.951
+        ("brahmastra_search_entities", "brahmastra_search_notes"),
+        ("brahmastra_create_workspace", "brahmastra_list_workspaces"),
+        # two different functions
+        ("comprehend_chunk", "comprehend_chunk_focused"),
+        ("function run_pipeline", "run_full_pipeline function"),
+        ("run_full_pipeline function", "run_pipeline"),
+        # two different files
+        ("backend/brahmastra/ingest/memo.py", "backend/brahmastra/memo.py"),
+        ("mcp_server.py", "tests/test_mcp_server.py"),
+        # a config variable and a tool
+        ("BRAHMASTRA_API_KEY", "brahmastra_ask"),
+        ("BRAHMASTRA_CACHE", "brahmastra_ask"),
+    ]
+    for a, b in refused:
+        assert _is_contrasting(a, b) or is_distinct(a, b), f"{a!r} == {b!r}"
+
+
+def test_it_leaves_the_merges_that_were_already_right():
+    """
+    The half that matters more. A guard that refused everything would score
+    perfectly on the test above and destroy the resolver.
+    """
+    from brahmastra.entity_resolution import _is_contrasting, is_distinct
+
+    kept = [
+        ("test_checkpoint.py", "tests/test_checkpoint.py"),
+        ("app/actions/extract.ts", "frontend/app/actions/extract.ts"),
+        ("backend-adapter.ts", "frontend/lib/backend-adapter.ts"),
+        ("app/page.tsx", "page.tsx"),
+        ("file pipeline.py", "pipeline.py"),
+        ("function run_pipeline", "run_pipeline"),
+        ("extract_note", "the extract_note function"),
+        ("llm_memo table", "llm_memo"),
+        ("_retry_delay", "retry_delay"),
+        ("SQLite", "SQLite database"),
+        ("sentence-transformers", "sentence-transformers model"),
+        ("brahmastra_add_note", "tool brahmastra_add_note"),
+    ]
+    for a, b in kept:
+        assert not _is_contrasting(a, b) and not is_distinct(a, b), f"{a!r} == {b!r}"
+
+
+def test_the_known_overreach_is_deliberate():
+    """
+    "brahmastra_add_note" and "add_note" are refused although they are
+    plausibly one tool named short and long. The obvious fix -- allow it when
+    one identifier is a suffix of the other -- was tried and rejected, because
+    "mcp_server" is a suffix of "test_mcp_server" and those are a module and
+    its test. Pinned so the next person finds the reasoning, not the symptom.
+    """
+    from brahmastra.entity_resolution import is_distinct
+
+    assert is_distinct("brahmastra_add_note", "add_note")
+    assert is_distinct("mcp_server.py", "tests/test_mcp_server.py")
