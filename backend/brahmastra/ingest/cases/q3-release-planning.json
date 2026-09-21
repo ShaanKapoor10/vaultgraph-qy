@@ -17,23 +17,28 @@
     },
     {
       "kind": "action_item",
-      "statement": "Sarah communicates the new release date to the wider team"
+      "statement": "Sarah communicates the new release date to the wider team",
+      "owner": "Sarah"
     },
     {
       "kind": "action_item",
-      "statement": "Mei revises the roadmap by Friday so the March date is gone"
+      "statement": "Mei revises the roadmap by Friday so the March date is gone",
+      "owner": "Mei"
     },
     {
       "kind": "action_item",
-      "statement": "Raj completes the reconciliation job by the 27th"
+      "statement": "Raj completes the reconciliation job by the 27th",
+      "owner": "Raj"
     },
     {
       "kind": "action_item",
-      "statement": "Mei escalates the staging environment to the infrastructure team"
+      "statement": "Mei escalates the staging environment to the infrastructure team",
+      "owner": "Mei"
     },
     {
       "kind": "action_item",
-      "statement": "Sarah passes on to Priya anything she needs to know while away"
+      "statement": "Sarah passes on to Priya anything she needs to know while away",
+      "owner": "Sarah"
     },
     {
       "kind": "risk",

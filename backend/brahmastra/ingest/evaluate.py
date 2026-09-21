@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import statistics
 import time
 import sys
@@ -121,6 +122,16 @@ class Score:
     missed: list[str] = field(default_factory=list)
     spurious: list[str] = field(default_factory=list)
     trapped: list[str] = field(default_factory=list)
+    # Attribution, counted only over artifacts that MATCHED a label carrying an
+    # owner. Anything else would confuse two different failures: a commitment
+    # the model never found has no owner to get wrong.
+    attributable: int = 0
+    attributed: int = 0
+    misattributed: list[str] = field(default_factory=list)
+
+    @property
+    def attribution(self) -> float:
+        return self.attributed / self.attributable if self.attributable else 1.0
 
     @property
     def recall(self) -> float:
@@ -134,6 +145,26 @@ class Score:
     def f1(self) -> float:
         p, r = self.precision, self.recall
         return 2 * p * r / (p + r) if (p + r) else 0.0
+
+
+def owner_matches(expected: str, produced: str | None) -> bool:
+    """
+    Did the model attribute this commitment to the right person?
+
+    Deliberately forgiving about FORM and strict about WHO. A label says "Mei";
+    a model may return "Mei", "Mei Wong" or "mei" and all three name the same
+    person, so one token set being a subset of the other counts. "Mei" versus
+    "Raj" does not, and neither does no owner at all -- an unattributed action
+    item is a commitment nobody is on the hook for, which is the failure this
+    number exists to count.
+    """
+    if not produced:
+        return False
+    want = {t for t in re.split(r"[^\w]+", expected.lower()) if t}
+    got = {t for t in re.split(r"[^\w]+", produced.lower()) if t}
+    if not want or not got:
+        return False
+    return want <= got or got <= want
 
 
 def _matcher(statements: list[str]) -> tuple[Callable[[str, str], float], float]:
@@ -266,6 +297,15 @@ def score_against(expected: list[dict[str, Any]],
         if best is not None and best_score >= threshold:
             unclaimed.remove(best)
             scores[artifact.kind].matched += 1
+            wanted = best.get("owner")
+            if wanted:
+                scores[artifact.kind].attributable += 1
+                if owner_matches(wanted, getattr(artifact, "owner", None)):
+                    scores[artifact.kind].attributed += 1
+                else:
+                    got = getattr(artifact, "owner", None) or "nobody"
+                    scores[artifact.kind].misattributed.append(
+                        f"{wanted} -> {got}: {artifact.statement[:60]}")
             continue
 
         worst_trap, trap_score = None, 0.0
@@ -296,6 +336,9 @@ def totals(scores: dict[str, Score]) -> Score:
         total.trapped.extend(s.trapped)
         total.spurious.extend(s.spurious)
         total.missed.extend(s.missed)
+        total.attributable += s.attributable
+        total.attributed += s.attributed
+        total.misattributed.extend(s.misattributed)
     return total
 
 
@@ -451,6 +494,16 @@ def _report(result: dict[str, Any]) -> None:
           f"{total.recall:>9.0%}{total.precision:>8.0%}"
           f"{len(total.spurious):>7}{len(total.trapped):>6}")
 
+    # Attribution is reported apart from recall on purpose. A commitment found
+    # and pinned on the wrong person is not a partial success -- it is a false
+    # record about a colleague, and averaging it into recall would hide it.
+    if total.attributable:
+        print(f"  attribution    {total.attributed}/{total.attributable} "
+              f"({total.attribution:.0%}) of matched commitments name the "
+              f"right person")
+        for wrong in total.misattributed[:3]:
+            print(f"  !! WRONG OWNER {wrong}")
+
     for kind in ARTIFACT_KINDS:
         s = result["scores"].get(kind)
         if s and s.missed:
@@ -475,6 +528,7 @@ def _aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
     """
     per_run = [totals(r["scores"]) for r in runs]
     recalls = [t.recall for t in per_run]
+    attributions = [t.attribution for t in per_run]
     precisions = [t.precision for t in per_run]
     traps = [len(t.trapped) for t in per_run]
     return {
@@ -486,6 +540,8 @@ def _aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
         # .get, because this is a REPORTING field and reporting is not the
         # work: a run assembled without a timing must still aggregate.
         "read_seconds": statistics.mean(r.get("read_seconds", 0.0) for r in runs),
+        "attribution": (statistics.mean(a for a in attributions),
+                        min(attributions), max(attributions)),
     }
 
 
@@ -499,6 +555,10 @@ def _report_spread(label: str, agg: dict[str, Any]) -> None:
           f"traps {t_mean:>4.1f} (worst {t_hi})  "
           f"{agg['calls']} calls  "
           f"{agg['read_seconds']:.1f}s/run")
+    if "attribution" in agg:
+        a_mean, a_lo, a_hi = agg["attribution"]
+        print(f"  {'':<9}{'':>3}          "
+              f"attribution {a_mean:>4.0%} [{a_lo:.0%}-{a_hi:.0%}]")
 
 
 def _run_audit(cases: list[dict[str, Any]]) -> int:

@@ -384,7 +384,9 @@ def test_repeated_runs_report_the_range_not_just_the_mean():
         return {"calls": 1, "scores": {"decision": type(
             "S", (), {"expected": 4, "found": 4, "matched": matched,
                       "recall": matched / 4, "precision": matched / 4,
-                      "trapped": [], "spurious": [], "missed": []})()}}
+                      "trapped": [], "spurious": [], "missed": [],
+                      "attributable": 0, "attributed": 0,
+                      "attribution": 1.0, "misattributed": []})()}}
 
     agg = _aggregate([scored(1), scored(3)])
     mean, low, high = agg["recall"]
@@ -434,3 +436,96 @@ def test_the_harness_does_not_charge_its_own_scorer_to_ingestion(monkeypatch):
 
     assert result["score_seconds"] >= 0.25
     assert result["read_seconds"] < 0.25
+
+
+# -- attribution ------------------------------------------------------------
+#
+# Nothing measured owners until now. Every attribution improvement in this
+# project -- owner_from_speaker, the speaker-aware prompts -- was therefore
+# unmeasured, which is how "I still feel it isn't accurate enough" stayed an
+# argument rather than a number.
+
+
+def test_a_first_name_matches_a_full_name():
+    """Forgiving about form: a label says "Mei", a model may say "Mei Wong"."""
+    from brahmastra.ingest.evaluate import owner_matches
+    assert owner_matches("Mei", "Mei Wong")
+    assert owner_matches("Mei Wong", "mei")
+
+
+def test_the_wrong_colleague_is_not_a_match():
+    from brahmastra.ingest.evaluate import owner_matches
+    assert not owner_matches("Mei", "Raj")
+
+
+def test_no_owner_at_all_is_a_miss_not_a_pass():
+    """
+    An unattributed action item is a commitment nobody is on the hook for.
+    Scoring it as "not applicable" would let a model score perfectly by never
+    attributing anything.
+    """
+    from brahmastra.ingest.evaluate import owner_matches
+    assert not owner_matches("Mei", None)
+    assert not owner_matches("Mei", "")
+
+
+def test_attribution_is_counted_only_over_commitments_that_were_found():
+    """
+    A commitment the model never found has no owner to get wrong. Counting it
+    as a misattribution would charge the same miss twice -- once to recall and
+    once to attribution -- and make the two numbers move together.
+    """
+    from brahmastra.ingest.evaluate import score_against, totals
+    from brahmastra.ingest.comprehend import Artifact
+
+    expected = [
+        {"kind": "action_item", "statement": "Mei revises the roadmap by Friday",
+         "owner": "Mei"},
+        {"kind": "action_item", "statement": "Raj completes reconciliation",
+         "owner": "Raj"},
+    ]
+    produced = [Artifact(kind="action_item",
+                         statement="Mei revises the roadmap by Friday",
+                         owner="Mei")]
+
+    total = totals(score_against(expected, produced))
+    assert total.attributable == 1        # not 2 -- Raj's was never found
+    assert total.attributed == 1
+    assert total.attribution == 1.0
+
+
+def test_a_commitment_pinned_on_the_wrong_person_is_reported_by_name():
+    """
+    Not a partial success. It is a false record about a colleague, so it is
+    counted apart from recall and printed with both names -- the one number
+    that could not carry it is an average.
+    """
+    from brahmastra.ingest.evaluate import score_against, totals
+    from brahmastra.ingest.comprehend import Artifact
+
+    expected = [{"kind": "action_item",
+                 "statement": "Mei revises the roadmap by Friday",
+                 "owner": "Mei"}]
+    produced = [Artifact(kind="action_item",
+                         statement="Mei revises the roadmap by Friday",
+                         owner="Raj")]
+
+    total = totals(score_against(expected, produced))
+    assert total.matched == 1             # the statement WAS found
+    assert total.attributable == 1 and total.attributed == 0
+    assert total.misattributed and "Mei -> Raj" in total.misattributed[0]
+
+
+def test_an_unlabelled_owner_is_not_scored():
+    """Decisions, risks and open questions have no owner to get right; only
+    labels that carry one are counted."""
+    from brahmastra.ingest.evaluate import score_against, totals
+    from brahmastra.ingest.comprehend import Artifact
+
+    expected = [{"kind": "decision", "statement": "Ship on April 15th"}]
+    produced = [Artifact(kind="decision", statement="Ship on April 15th",
+                         owner="Nobody In Particular")]
+
+    total = totals(score_against(expected, produced))
+    assert total.attributable == 0
+    assert total.attribution == 1.0
