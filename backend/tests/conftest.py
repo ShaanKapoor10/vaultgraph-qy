@@ -89,12 +89,18 @@ def _isolate_storage_choice(monkeypatch):
     # be served a reply cached by an earlier test and never notice.
     monkeypatch.setenv("INGEST_MEMO", "0")
 
-    # ...and drop whatever it is holding in memory. The env pin stops the cache
-    # being CONSULTED; it does nothing about the process-local layer in front
+    # And the same switch one level up, which is the one that matters now that
+    # note EXTRACTION is memoised too: a test that stubs the extractor could
+    # otherwise be handed a reply cached by an earlier test and never notice
+    # that its stub was never called.
+    monkeypatch.setenv("LLM_MEMO", "0")
+
+    # ...and drop whatever it is holding in memory. The env pins stop the cache
+    # being CONSULTED; they do nothing about the process-local layer in front
     # of it, which a test that deliberately re-enables the cache fills and the
     # next test would inherit. Module state outliving a monkeypatch is how a
     # stub becomes ineffective without anything failing.
-    from brahmastra.ingest import memo
+    from brahmastra import memo
     memo.reset()
 
     # And the cloud keys, EXPLICITLY -- BRAHMASTRA_NO_DOTENV is not enough here.

@@ -27,8 +27,6 @@ AUTHORITY
   SOURCE   transcripts        the text as submitted; cannot be recomputed
   DERIVED  transcript_chunks  a function of the transcript and the segmenter
   DERIVED  meeting_artifacts  a function of the chunks and a model
-  DERIVED  comprehension_cache a model's reply, keyed by passage + prompt +
-                               model; see ingest/memo.py
 
 Re-ingesting rebuilds both derived tables. The day a human can edit an action
 item, that edit becomes source data and needs its own table -- a rebuild would
@@ -107,14 +105,6 @@ CREATE TABLE IF NOT EXISTS meeting_artifacts (
     superseded_by TEXT,
     created_at    TEXT NOT NULL,
     PRIMARY KEY (workspace_id, id)
-);
-
-CREATE TABLE IF NOT EXISTS comprehension_cache (
-    cache_key     TEXT NOT NULL,
-    workspace_id  TEXT NOT NULL DEFAULT 'default',
-    payload       TEXT NOT NULL,
-    created_at    TEXT NOT NULL,
-    PRIMARY KEY (workspace_id, cache_key)
 );
 
 CREATE INDEX IF NOT EXISTS idx_artifacts_kind
@@ -397,52 +387,6 @@ class IngestStore:
                 (transcript_id, self.workspace, idx, text, json.dumps(speakers),
                  start_time, end_time, start_char, end_char),
             )
-
-    # -- comprehension cache (DERIVED) -------------------------------------
-    #
-    # Deliberately NOT cleared by clear_derived(): re-ingesting a transcript is
-    # exactly when the cache earns its keep, and its rows are keyed by content
-    # rather than by transcript, so nothing in them goes stale when a
-    # transcript is rebuilt. See ingest/memo.py.
-
-    def get_comprehension(self, cache_key: str) -> str | None:
-        self.init_schema()
-        with self._cursor() as cur:
-            cur.execute(self._ph(
-                "SELECT payload FROM comprehension_cache "
-                "WHERE workspace_id = ? AND cache_key = ?"),
-                (self.workspace, cache_key))
-            row = cur.fetchone()
-        if not row:
-            return None
-        return row["payload"] if isinstance(row, dict) else row[0]
-
-    def save_comprehension(self, cache_key: str, payload: str) -> None:
-        self.init_schema()
-        with self._cursor() as cur:
-            if self.backend == "postgres":
-                cur.execute(self._ph(
-                    "INSERT INTO comprehension_cache "
-                    "(cache_key, workspace_id, payload, created_at) "
-                    "VALUES (?, ?, ?, ?) "
-                    "ON CONFLICT (workspace_id, cache_key) DO UPDATE "
-                    "SET payload = EXCLUDED.payload"),
-                    (cache_key, self.workspace, payload, _now()))
-            else:
-                cur.execute(self._ph(
-                    "INSERT OR REPLACE INTO comprehension_cache "
-                    "(cache_key, workspace_id, payload, created_at) "
-                    "VALUES (?, ?, ?, ?)"),
-                    (cache_key, self.workspace, payload, _now()))
-
-    def count_comprehension_cache(self) -> int:
-        self.init_schema()
-        with self._cursor() as cur:
-            cur.execute(self._ph(
-                "SELECT count(*) AS n FROM comprehension_cache WHERE workspace_id = ?"),
-                (self.workspace,))
-            row = cur.fetchone()
-        return int(row["n"] if isinstance(row, dict) else row[0])
 
     def set_chunk_result(self, transcript_id: str, idx: int, status: str,
                          summary: str | None = None, note_id: str | None = None,

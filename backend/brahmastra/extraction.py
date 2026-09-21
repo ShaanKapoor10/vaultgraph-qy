@@ -147,6 +147,45 @@ def _ollama_available() -> bool:
         return False
 
 
+# -- memoising the reply ----------------------------------------------------
+#
+# Extraction is the most expensive repeated call in this system.
+# `run_pipeline(full=True)` re-extracts every note, and CLAUDE.md records what
+# that costs: "a full=True re-extraction of ~44 notes typically errors on a
+# third of them". Most of those notes had not changed since the last run.
+#
+# The key is the user message, the model and SYSTEM_PROMPT -- and SYSTEM_PROMPT
+# CARRIES THE ONTOLOGY, which is the property that makes this safe to turn on.
+# Adding a relation, an entity type or an alias rewrites the prompt, so every
+# note correctly re-extracts; editing an unrelated note does not, so nothing
+# else is paid for twice. That is cocoindex's hash(input) + hash(code) with the
+# ontology on the code side, where it belongs.
+#
+# The RAW REPLY is cached, never the parsed triples. `_parse_llm_response`
+# validates, coerces unmappable relations to related_to and records the
+# coercions; caching its OUTPUT would freeze all of that at the version that
+# happened to run first, so a fixed bug would stay fixed only for notes nobody
+# had extracted yet.
+
+
+def _memo_key(user_message: str, model: str) -> str:
+    from brahmastra import memo
+
+    return memo.key_for(user_message, "extract", model, SYSTEM_PROMPT)
+
+
+def _memo_load(user_message: str, model: str) -> str | None:
+    from brahmastra import memo
+
+    return memo.load(_memo_key(user_message, model))
+
+
+def _memo_save(user_message: str, model: str, reply: str) -> None:
+    from brahmastra import memo
+
+    memo.save(_memo_key(user_message, model), reply, "extract")
+
+
 def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
     """
     Dispatch to the configured/available LLM provider and return raw triple dicts.
@@ -174,6 +213,12 @@ def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:
     import json as _json
     import urllib.request
 
+    user_message = _build_user_message(title, content)
+
+    cached = _memo_load(user_message, OLLAMA_MODEL)
+    if cached is not None:
+        return _parse_llm_response(cached)
+
     payload = {
         "model": OLLAMA_MODEL,
         "format": "json",  # force valid JSON output — no markdown fences, no prose
@@ -181,7 +226,7 @@ def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:
         "options": {"temperature": 0.1, "num_ctx": 8192},
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_message(title, content)},
+            {"role": "user", "content": user_message},
         ],
     }
     # Retry to survive transient drops (Ollama can close a connection while
@@ -197,7 +242,9 @@ def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:
         try:
             with urllib.request.urlopen(req, timeout=240) as resp:
                 data = _json.loads(resp.read().decode("utf-8"))
-            return _parse_llm_response(data["message"]["content"])
+            reply = data["message"]["content"]
+            _memo_save(user_message, OLLAMA_MODEL, reply)
+            return _parse_llm_response(reply)
         except Exception as e:
             last_err = e
             import time
@@ -369,10 +416,16 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
 
     client = Groq(api_key=api_key)
     user_message = _build_user_message(title, content)
+    model = groq_model()
+
+    cached = _memo_load(user_message, model)
+    if cached is not None:
+        return _parse_llm_response(cached)
+
     kwargs: dict[str, Any] = dict(
         # NOT a literal: llm.py owns which model runs, or this call site drifts
         # and keeps hitting a retired one after llm.py has been fixed.
-        model=groq_model(),
+        model=model,
         # Sized to THIS note rather than fixed. A cut-off reply is not partial
         # JSON — it is unparseable, so the whole note fails; but the reservation
         # is billed against the per-minute allowance whether or not it is used,
@@ -402,7 +455,9 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
     for attempt in range(3):
         try:
             response = client.chat.completions.create(**kwargs)
-            return _parse_llm_response(response.choices[0].message.content)
+            reply = response.choices[0].message.content or ""
+            _memo_save(user_message, model, reply)
+            return _parse_llm_response(reply)
         except Exception as e:
             last = e
             # Both of these are settled facts, not congestion: backing off
@@ -444,13 +499,22 @@ def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict
     from brahmastra.llm import anthropic_model
 
     client = anthropic.Anthropic(api_key=api_key)
+    user_message = _build_user_message(title, content)
+    model = anthropic_model()  # see _extract_with_groq
+
+    cached = _memo_load(user_message, model)
+    if cached is not None:
+        return _parse_llm_response(cached)
+
     message = client.messages.create(
-        model=anthropic_model(),  # see _extract_with_groq
+        model=model,
         max_tokens=EXTRACTION_MAX_TOKENS,
         system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _build_user_message(title, content)}],
+        messages=[{"role": "user", "content": user_message}],
     )
-    return _parse_llm_response(message.content[0].text)
+    reply = message.content[0].text
+    _memo_save(user_message, model, reply)
+    return _parse_llm_response(reply)
 
 
 # ---------------------------------------------------------------------------
