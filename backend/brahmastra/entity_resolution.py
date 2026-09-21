@@ -84,9 +84,59 @@ _CONTRAST_GROUPS: list[set[str]] = [
 ]
 
 
+# A name that DENIES something is not a longer way of saying it.
+#
+# Found in the live graph, not imagined:
+#
+#     0.952   "Do not move the release to April 15th"
+#          == "Move the release to April 15th"
+#
+# Merged into one entity. The pair-difference rule below could not see it,
+# because it fires only when exactly one token differs on EACH side and here
+# one side simply has two extra words. So the two halves of a reversed
+# decision became the same node in a graph whose entire job is recording what
+# was decided.
+#
+# Same failure consolidate.py records for STATEMENTS -- "embeddings place a
+# sentence and its negation almost on top of each other, because they share
+# every content word". This is the third layer to pay for it. Anywhere
+# embedding similarity decides that two things are THE SAME, assume it cannot
+# tell a thing from its opposite, and check.
+# DELIBERATELY WIDER THAN consolidate.POLARITY_SENSITIVE, which leaves bare
+# "no" out because "there is no runbook" is a positive assertion OF a risk and
+# splitting it from its own paraphrase would cost recall. That reasoning is
+# about STATEMENTS being scored for overlap. These are entity NAMES, where the
+# costs run the other way: a spurious extra node is visible in the graph and
+# mergeable by hand, and a fused assertion-and-denial is not visible at all.
+_NEGATORS = frozenset({
+    "no", "not", "never", "cannot", "cant", "wont", "dont", "doesnt", "didnt",
+    "without", "excluding", "except", "instead", "rather",
+})
+
+
+def _negation_differs(ta: set[str], tb: set[str]) -> bool:
+    """True when one name negates and the other does not."""
+    return bool(ta & _NEGATORS) != bool(tb & _NEGATORS)
+
+
 def _is_contrasting(a: str, b: str) -> bool:
-    """True if a and b differ only by tokens that are known contrasts/antonyms."""
+    """
+    True if a and b look like opposites rather than variants of one name.
+
+    Two rules, and they catch different shapes. The pair rule handles names of
+    the same length differing by one known antonym ("backend" / "frontend").
+    The negation rule handles one name denying what the other asserts, which
+    the pair rule structurally cannot see.
+
+    Deliberately asymmetric in cost: a guard that fires too eagerly leaves two
+    nodes where one would do, which a reader can see and merge. A guard that
+    misses fuses an assertion with its denial into a single entity, which
+    nobody can see at all.
+    """
     ta, tb = _tokens(a), _tokens(b)
+    if _negation_differs(ta, tb):
+        return True
+
     only_a, only_b = ta - tb, tb - ta
     if len(only_a) == 1 and len(only_b) == 1:
         x, y = next(iter(only_a)), next(iter(only_b))
