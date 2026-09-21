@@ -554,3 +554,81 @@ def test_an_unrenderable_character_does_not_take_down_the_run():
         narrow.flush()
     finally:
         sys.stdout, sys.stderr = real_out, real_err
+
+
+# -- comparing on content words ---------------------------------------------
+#
+# The scorer counted "Should we move off this vendor entirely?" as a miss of
+# "Whether to move off the current webhook vendor" AND as a fabrication --
+# the same open question, charged twice. Measured over 7 confirmed-same pairs
+# and 55 pairs the scorer would actually compare:
+#
+#     cosine @ 0.60           4/7 true matches, 0 false
+#     content cosine @ 0.55   6/7 true matches, 0 false
+
+
+def test_framing_is_stripped_before_comparison():
+    from brahmastra.ingest.evaluate import content_words
+
+    assert content_words("Whether to move off the current webhook vendor") == \
+        "move off current webhook vendor"
+    assert content_words("Should we move off this vendor entirely?") == \
+        "move off vendor"
+
+
+def test_negation_is_never_stripped():
+    """
+    The one thing this list must not touch. "We are not migrating in Q3" and
+    "we are migrating in Q3" are the difference between a true record and a
+    false one, and stripping "not" would hand the polarity guard two identical
+    strings to compare.
+    """
+    from brahmastra.ingest.evaluate import content_words, _FRAMING
+
+    for word in ("not", "no", "never", "without", "cannot", "nothing"):
+        assert word not in _FRAMING
+    assert "not" in content_words("We are not migrating in Q3").split()
+
+
+def test_a_statement_of_pure_framing_does_not_compare_as_empty():
+    from brahmastra.ingest.evaluate import content_words
+
+    assert content_words("Should we?") == "should we"
+
+
+def test_the_same_question_asked_two_ways_now_matches():
+    """The pair that was counted as both a miss and a fabrication."""
+    from brahmastra.ingest.evaluate import _matcher
+
+    a = "Whether to move off the current webhook vendor"
+    b = "Should we move off this vendor entirely?"
+    compare, threshold = _matcher([a, b])
+    assert compare(a, b) >= threshold
+
+
+def test_a_trap_still_does_not_match_the_commitment_it_imitates():
+    """
+    The whole risk of loosening a threshold, pinned. "Ben rewrites the queue
+    consumer" is a decision the meeting explicitly did NOT take, and it shares
+    a name and a noun phrase with one it did.
+    """
+    from brahmastra.ingest.evaluate import _matcher
+
+    real = "Ben builds the dead letter queue by the end of next week"
+    trap = "Ben rewrites the queue consumer"
+    compare, threshold = _matcher([real, trap])
+    assert compare(real, trap) < threshold
+
+
+def test_the_polarity_guard_still_sees_whole_sentences():
+    """
+    content_words is for comparison only. The guard runs before it and must
+    keep receiving the statement as written, or it cannot spot the negation
+    that makes two near-identical decisions opposite.
+    """
+    from brahmastra.ingest.evaluate import _matcher, for_kind
+
+    a = "Migrate the reporting service this quarter"
+    b = "Do not migrate the reporting service this quarter"
+    compare, _ = _matcher([a, b])
+    assert for_kind(compare, "decision")(a, b) == 0.0

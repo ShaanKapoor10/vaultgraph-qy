@@ -101,7 +101,72 @@ from brahmastra.ingest.segment import segment
 #
 # The model is all-MiniLM-L6-v2, already a dependency, local, and free of any
 # quota -- so the measurement never competes with the thing being measured.
-MATCH_THRESHOLD = 0.60
+# COMPARED ON CONTENT WORDS, not on the sentence as written. A label and a
+# found artifact describe the same thing in different registers -- a label is
+# written as a record, a model writes back a sentence -- and the framing words
+# were dominating the vector:
+#
+#   "Whether to move off the current webhook vendor"
+#   "Should we move off this vendor entirely?"        cosine 0.523
+#
+# The same open question, scored below threshold, so the scorer counted it as
+# BOTH a miss and a fabrication -- the exact failure this module's own header
+# calls fatal to any comparison between two architectures. Strip "whether to",
+# "should we" and "this", and the pair is 0.580.
+#
+# MEASURED over 7 pairs a human confirmed are the same finding and 55 pairs the
+# scorer would actually compare (every label against every same-kind label and
+# every applicable trap, with the polarity guard applied as score_against
+# applies it):
+#
+#                              true matches    false matches
+#     cosine @ 0.60                 4/7              0
+#     content cosine @ 0.55         6/7              0
+#
+# Two findings recovered for nothing. 0.55 sits between the highest false pair
+# (0.505) and the lowest recovered true pair (0.580).
+#
+# HONEST ABOUT THE SAMPLE: the 55 negatives are exhaustive over the label and
+# trap sets; the 7 positives are hand-collected from observed runs, which is a
+# small and favourably-chosen sample. The negative side is what the threshold
+# is really pinned to.
+#
+# THIS MOVES EVERY RECALL NUMBER. Figures measured before it are not comparable
+# with figures measured after it.
+MATCH_THRESHOLD = 0.55
+
+# Words dropped before embedding. Function words only -- articles, auxiliaries,
+# pronouns, prepositions, interrogatives. NEGATION IS NOT IN HERE and must
+# never be: "we are not migrating in Q3" and "we are migrating in Q3" are the
+# difference between a true record and a false one, and this list exists to
+# remove framing, not meaning.
+_FRAMING = frozenset("""
+a an the this that these those
+is are was were be been being am
+to of in on at for with and or but if then than as by from
+it its their our your my we they he she him her his i you me us
+should would could will shall can may might must
+do does did done have has had
+whether so what how why when who whom which where
+entirely still also just about into out up down over under
+""".split())
+
+_WORD = re.compile(r"[a-z0-9]+")
+
+
+def content_words(text: str) -> str:
+    """
+    A statement with its framing removed, for comparison only.
+
+    Never for storage or display: this throws away grammar on purpose, and the
+    result is a bag of words that happens to embed well, not a sentence.
+    Falls back to the original words when a statement is ALL framing, so a
+    short question never compares as empty.
+    """
+    words = _WORD.findall(text.lower())
+    kept = [w for w in words if w not in _FRAMING]
+    return " ".join(kept or words)
+
 
 # Used only when embeddings are unavailable. Deliberately high, because on this
 # evidence lexical matching is unreliable and should fail towards "not a match"
@@ -188,9 +253,14 @@ def _matcher(statements: list[str]) -> tuple[Callable[[str, str], float], float]
         from brahmastra.embeddings import embed
 
         unique = list(dict.fromkeys(s for s in statements if s))
-        vectors = embed(unique) if unique else None
+        # Embed the content-word form, but key the table by the ORIGINAL
+        # statement, so callers keep passing sentences and the polarity guard
+        # keeps seeing them.
+        reduced = list(dict.fromkeys(content_words(s) for s in unique))
+        vectors = embed(reduced) if reduced else None
         if vectors:
-            table = dict(zip(unique, vectors))
+            by_content = dict(zip(reduced, vectors))
+            table = {s: by_content[content_words(s)] for s in unique}
 
             def cosine(a: str, b: str) -> float:
                 va, vb = table.get(a), table.get(b)
