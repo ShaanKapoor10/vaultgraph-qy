@@ -403,3 +403,34 @@ def test_the_cases_cover_more_than_one_transcript_and_format():
     cases = load_cases()
     assert len(cases) >= 2
     assert any(c["transcript"].lstrip().startswith("WEBVTT") for c in cases)
+
+
+def test_the_harness_does_not_charge_its_own_scorer_to_ingestion(monkeypatch):
+    """
+    The claim this prevents: "a fully cached re-read still costs 8.2s, which is
+    model loading and verification".
+
+    It was not. `_matcher` loads all-MiniLM-L6-v2 to score, ~10s on the first
+    call in a process, and ingestion embeds nothing at all -- so a wall clock
+    wrapped around `run_case` measured the harness and attributed it to the
+    thing under test. Two numbers now, and the slow one is named.
+    """
+    import time
+    import brahmastra.ingest.evaluate as ev
+
+    def instant(chunk):
+        return type("U", (), {"error": None, "artifacts": [], "calls": 1})()
+
+    real = ev.score_against
+
+    def slow(*args, **kwargs):
+        time.sleep(0.25)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(ev, "score_against", slow)
+
+    result = ev.run_case({"name": "t", "transcript": "Sarah: we ship.",
+                          "expected": []}, comprehend=instant)
+
+    assert result["score_seconds"] >= 0.25
+    assert result["read_seconds"] < 0.25

@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import time
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -307,6 +308,7 @@ def run_case(case: dict[str, Any],
     produced: list[Any] = []
     errors: list[str] = []
     calls = 0
+    reading = time.perf_counter()
     for chunk in chunks:
         understanding = comprehend(chunk)
         # What it COST, as reported by the variant that paid it. Counting
@@ -320,9 +322,13 @@ def run_case(case: dict[str, Any],
             continue
         produced.extend(understanding.artifacts)
 
+    read_seconds = time.perf_counter() - reading
+
+    scoring = time.perf_counter()
     reduced = consolidate(produced)
     scores = score_against(case["expected"], reduced["artifacts"],
                            case.get("must_not_find"))
+    score_seconds = time.perf_counter() - scoring
 
     return {
         "name": case.get("name", "unnamed"),
@@ -333,6 +339,16 @@ def run_case(case: dict[str, Any],
         "after_consolidation": len(reduced["artifacts"]),
         "merged": reduced["merged"],
         "scores": scores,
+        # Split, because the wall clock around this function is NOT the cost
+        # of reading a transcript -- and reporting it as though it were
+        # produced a false claim about memoisation. `_matcher` loads
+        # all-MiniLM-L6-v2 in order to SCORE, measured at ~10s on the first
+        # call in a process. So a run whose comprehension came entirely from
+        # cache still took seconds, and those seconds were written up as
+        # ingestion's residual cost. Ingestion embeds nothing; the scorer does.
+        # Two numbers, so the one being claimed about is the one measured.
+        "read_seconds": read_seconds,
+        "score_seconds": score_seconds,
     }
 
 
@@ -410,6 +426,10 @@ def audit_case(case: dict[str, Any], threshold: float | None = None) -> list[str
 def _report(result: dict[str, Any]) -> None:
     print(f"\n{result['name']}  —  {result['chunks']} chunks, "
           f"{result['calls']} LLM calls")
+    if "read_seconds" in result:
+        print(f"  read {result['read_seconds']:.1f}s  "
+              f"(scoring a further {result['score_seconds']:.1f}s, "
+              f"which is the harness and not the ingestion)")
     if result["errors"]:
         print(f"  {len(result['errors'])} chunk(s) failed: {result['errors'][0][:90]}")
     print(f"  {result['raw_artifacts']} artifacts -> "
@@ -463,6 +483,9 @@ def _aggregate(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "precision": (statistics.mean(precisions), min(precisions), max(precisions)),
         "traps": (statistics.mean(traps), min(traps), max(traps)),
         "calls": sum(r["calls"] for r in runs),
+        # .get, because this is a REPORTING field and reporting is not the
+        # work: a run assembled without a timing must still aggregate.
+        "read_seconds": statistics.mean(r.get("read_seconds", 0.0) for r in runs),
     }
 
 
@@ -474,7 +497,8 @@ def _report_spread(label: str, agg: dict[str, Any]) -> None:
           f"recall {r_mean:>4.0%} [{r_lo:.0%}-{r_hi:.0%}]  "
           f"prec {p_mean:>4.0%} [{p_lo:.0%}-{p_hi:.0%}]  "
           f"traps {t_mean:>4.1f} (worst {t_hi})  "
-          f"{agg['calls']} calls")
+          f"{agg['calls']} calls  "
+          f"{agg['read_seconds']:.1f}s/run")
 
 
 def _run_audit(cases: list[dict[str, Any]]) -> int:

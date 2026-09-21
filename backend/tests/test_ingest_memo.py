@@ -118,6 +118,8 @@ def test_a_round_trip_returns_the_raw_reply(monkeypatch):
     monkeypatch.setattr(store_mod, "get_ingest_store", lambda *a, **k: Store())
 
     memo.save("k", '{"decisions": []}')
+    memo.reset()              # or the in-process layer answers and the store
+                              # is never asked, which is not what this tests
     assert memo.load("k") == '{"decisions": []}'
 
 
@@ -129,3 +131,123 @@ def test_the_cache_holds_replies_not_verified_artifacts():
     `load` returns the raw reply text; parsing and every check re-run on a hit.
     """
     assert memo.load.__doc__ and "RAW reply" in memo.load.__doc__
+
+
+# -- reaching the store ----------------------------------------------------
+#
+# The first version built a store per call, so every lookup re-ran the schema
+# DDL before the SELECT it wanted. On the deployed Postgres that was 15.8ms of
+# the 35.6ms a load cost, twice per comprehension call -- 5.8s of pure
+# bookkeeping on a 40-chunk transcript, scaling with exactly the document
+# length this module exists to make cheap.
+
+
+class _CountingStore:
+    """A store that says how often it was built and how often it was asked."""
+
+    built = 0
+
+    def __init__(self):
+        type(self).built += 1
+        self.gets = 0
+        self.rows: dict[str, str] = {}
+
+    def get_comprehension(self, key):
+        self.gets += 1
+        return self.rows.get(key)
+
+    def save_comprehension(self, key, payload):
+        self.rows[key] = payload
+
+
+@pytest.fixture
+def counting(monkeypatch):
+    monkeypatch.delenv("INGEST_MEMO", raising=False)
+    memo.reset()
+    _CountingStore.built = 0
+    store = _CountingStore()
+
+    import brahmastra.ingest.store as store_mod
+    monkeypatch.setattr(store_mod, "get_ingest_store", lambda *a, **k: store)
+    yield store
+    memo.reset()
+
+
+def test_the_store_is_built_once_not_once_per_lookup(counting, monkeypatch):
+    """
+    The fix, stated as the measurement that prompted it: a cache whose LOOKUP
+    costs a connection and a schema rebuild is a smaller copy of the problem
+    it was built to solve.
+    """
+    calls = {"n": 0}
+
+    def factory(*args, **kwargs):
+        calls["n"] += 1
+        return counting
+
+    import brahmastra.ingest.store as store_mod
+    monkeypatch.setattr(store_mod, "get_ingest_store", factory)
+
+    for i in range(10):
+        memo.load(f"absent-{i}")
+    assert calls["n"] == 1
+
+
+def test_a_replaced_factory_is_obeyed(counting):
+    """
+    Module state that outlives a monkeypatch makes the patch silently
+    ineffective -- the exact shape of bug this cache could otherwise hide.
+    """
+    memo.save("k", "from the first store")
+    memo.reset()
+    assert memo.load("k") == "from the first store"
+
+    import brahmastra.ingest.store as store_mod
+    replacement = _CountingStore()
+    store_mod.get_ingest_store = lambda *a, **k: replacement
+    try:
+        memo.reset()
+        assert memo.load("k") is None          # the new store holds nothing
+    finally:
+        memo.reset()
+
+
+def test_a_second_read_of_one_passage_does_not_ask_the_database(counting):
+    """
+    Chunks overlap on purpose, so one document asks for the same passage more
+    than once, and a load straight after a save is a round trip for something
+    this process is already holding.
+    """
+    memo.save("k", "a reading")
+    assert memo.load("k") == "a reading"
+    assert memo.load("k") == "a reading"
+    assert counting.gets == 0
+
+    memo.reset()
+    assert memo.load("k") == "a reading"
+    assert counting.gets == 1
+
+
+def test_the_in_process_layer_is_bounded(counting):
+    """
+    It sits in a long-lived uvicorn process. Sized for one long document, not
+    for a corpus -- the store is the durable half.
+    """
+    for i in range(memo.LOCAL_MAX + 50):
+        memo.save(f"k{i}", "x")
+    assert len(memo._local) == memo.LOCAL_MAX
+
+
+def test_the_in_process_layer_is_scoped_by_workspace(counting, monkeypatch):
+    """
+    A reading does not actually depend on the workspace -- the key already
+    digests the passage, the prompt and the model. Scoped anyway, because
+    isolation in this project fails OPEN and every leak it has had came from a
+    filter that was fine to omit right up until it was not.
+    """
+    monkeypatch.setattr(memo, "_workspace", lambda: "office")
+    memo.save("k", "read for office")
+
+    monkeypatch.setattr(memo, "_workspace", lambda: "personal")
+    counting.rows.clear()
+    assert memo.load("k") is None

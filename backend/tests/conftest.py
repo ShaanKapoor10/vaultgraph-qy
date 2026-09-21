@@ -89,6 +89,14 @@ def _isolate_storage_choice(monkeypatch):
     # be served a reply cached by an earlier test and never notice.
     monkeypatch.setenv("INGEST_MEMO", "0")
 
+    # ...and drop whatever it is holding in memory. The env pin stops the cache
+    # being CONSULTED; it does nothing about the process-local layer in front
+    # of it, which a test that deliberately re-enables the cache fills and the
+    # next test would inherit. Module state outliving a monkeypatch is how a
+    # stub becomes ineffective without anything failing.
+    from brahmastra.ingest import memo
+    memo.reset()
+
     # And the cloud keys, EXPLICITLY -- BRAHMASTRA_NO_DOTENV is not enough here.
     #
     # This file's own docstring said the suite "clears the Notion and LLM
