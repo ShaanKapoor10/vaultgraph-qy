@@ -122,6 +122,12 @@ class Artifact:
     # was later reversed is worth keeping as history rather than deleting.
     mentions: int = 1
     superseded_by: str | None = None
+    # Filled by the store when the artifact is written, and DERIVED from the
+    # artifact rather than drawn at random -- so the same decision keeps the
+    # same id across re-ingestions. None until then: an artifact that has been
+    # comprehended but not stored genuinely has no identity yet, and inventing
+    # one here would make that indistinguishable. See store.artifact_id.
+    id: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

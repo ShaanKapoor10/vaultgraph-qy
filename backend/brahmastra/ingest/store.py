@@ -38,8 +38,10 @@ most likely to be crossed without noticing.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -138,6 +140,62 @@ class Transcript:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Bump to re-key every artifact at once. Only a change to what IDENTIFIES an
+# artifact needs it -- not a change to how one is scored, stored or rendered.
+ARTIFACT_ID_VERSION = "1"
+
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _identity_text(statement: str) -> str:
+    """
+    The part of a statement that decides WHICH artifact it is.
+
+    Case and whitespace are normalised and trailing punctuation dropped, so a
+    re-run that returns "Ship on April 15th." where the last one returned
+    "ship on April 15th" is recognised as the same record rather than as a new
+    one. Nothing fuzzier than that: a genuinely reworded statement IS a
+    different statement, and pretending otherwise would silently overwrite one
+    record with another.
+    """
+    return _WHITESPACE.sub(" ", statement.strip().lower()).rstrip(".!?;:, ")
+
+
+def artifact_id(transcript_id: str, kind: str, statement: str,
+                occurrence: int = 0) -> str:
+    """
+    A stable id for one artifact: derived from what it IS, never drawn at random.
+
+    This used to be `uuid.uuid4().hex[:12]`, assigned at write time. Because
+    `clear_derived` wipes a transcript's artifacts before a re-run re-inserts
+    them, every re-ingestion handed identical artifacts brand-new identities --
+    so nothing outside this table could hold a reference to a decision across
+    two runs, and "unchanged" was indistinguishable from "new". cocoindex names
+    this directly: random ids make every reprocessing run churn its target,
+    deleting rows and inserting identical ones under new keys.
+
+    CHUNK INDEX IS DELIBERATELY NOT IN THE KEY. Chunks overlap and the
+    segmenter is free to change; the same decision found at chunk 3 before and
+    chunk 4 after a re-segmentation is the SAME decision, and re-chunking
+    should not rewrite the identity of everything a transcript ever said. The
+    chunk stays on the row as provenance, where it belongs.
+
+    `occurrence` separates exact repeats. Consolidation normally folds those
+    together, but it can be switched off (INGEST_CONSOLIDATE=0), and a derived
+    key that collides would turn that switch into a primary-key violation
+    rather than a duplicate row. Stable given the same ordered artifacts, which
+    is what a re-run produces.
+    """
+    h = hashlib.sha256()
+    for part in (ARTIFACT_ID_VERSION, transcript_id, kind,
+                 _identity_text(statement), str(occurrence)):
+        h.update(part.encode("utf-8", "replace"))
+        h.update(b"\x00")          # so ("ab","c") and ("a","bc") differ
+    # 64 bits. Collisions are the one failure this cannot report, because a
+    # colliding INSERT looks exactly like a duplicate artifact.
+    return h.hexdigest()[:16]
 
 
 def _backend() -> str:
@@ -414,13 +472,28 @@ class IngestStore:
         self.init_schema()
         if not artifacts:
             return 0
-        rows = [
-            (uuid.uuid4().hex[:12], self.workspace, transcript_id, a.chunk_index,
-             a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
-             json.dumps(a.speakers), a.start_time, a.end_time,
-             getattr(a, "mentions", 1), getattr(a, "superseded_by", None), _now())
-            for a in artifacts
-        ]
+        # Identity is derived, not drawn. See `artifact_id`.
+        seen: dict[tuple[str, str], int] = {}
+        rows = []
+        for a in artifacts:
+            slot = (a.kind, _identity_text(a.statement))
+            occurrence = seen.get(slot, 0)
+            seen[slot] = occurrence + 1
+            aid = artifact_id(transcript_id, a.kind, a.statement, occurrence)
+            # Handed back to the caller too: an id nothing can observe is a
+            # primary key, not an identity, and the point of deriving it is
+            # that something downstream can hold on to it.
+            try:
+                a.id = aid
+            except Exception:
+                pass
+            rows.append(
+                (aid, self.workspace, transcript_id, a.chunk_index,
+                 a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
+                 json.dumps(a.speakers), a.start_time, a.end_time,
+                 getattr(a, "mentions", 1), getattr(a, "superseded_by", None),
+                 _now())
+            )
         with self._cursor() as cur:
             cur.executemany(self._ph(
                 """
