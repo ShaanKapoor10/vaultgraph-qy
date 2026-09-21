@@ -256,8 +256,21 @@ query is wrong. Add the filter.
 `backend/brahmastra/llm.py` owns provider selection for **everything** (extraction,
 GraphRAG, cluster summaries), so they can never disagree about which provider is live.
 
-- `LLM_PROVIDER` = `groq` (default) | `ollama` | `anthropic`. Auto order is cloud-first
-  so the same code deploys unchanged; set `ollama` to stay local and off the network.
+- `LLM_PROVIDER` = `groq` (default) | `openai` | `gemini` | `anthropic` | `ollama`.
+  Auto order is cloud-first so the same code deploys unchanged; set `ollama` to stay
+  local and off the network.
+- **Groq is what is affordable today, not what this is for.** A provider is one entry in
+  `_REGISTRY` in `llm.py` — name, key env, SDK module, model env, default model — and
+  `PROVIDERS`, `provider_status()`, `model_for()` and `active_model()` all derive from
+  it. Extraction reaches any registered provider through `llm.chat` with no code of its
+  own; Groq and Ollama keep bespoke paths only because Groq's tier words a 413 and a 429
+  almost identically and Ollama is plain HTTP with no SDK.
+  ⚠️ **A key in `.env` does not move production onto that provider** — it only makes it
+  available as a fallback. Moving is `LLM_PROVIDER=gemini`, deliberately, because a
+  silent switch of the model behind every extraction shows up later as "it got worse"
+  with nothing to explain it.
+  ⚠️ `_gemini_chat` has **never been run against a live endpoint** — no key on this
+  machine. Treat its first real call as a test.
 - An explicit `LLM_PROVIDER` only wins **if that provider is actually usable** — a stale
   `LLM_PROVIDER=ollama` with a dead server falls through instead of failing.
 - A cloud provider counts as available only with **both** its key and its SDK installed.
