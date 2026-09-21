@@ -27,6 +27,7 @@ from __future__ import annotations
 import json as _json
 import sys
 import os
+import re
 import time
 import urllib.request
 from pathlib import Path
@@ -37,6 +38,61 @@ from typing import Any
 from brahmastra.env import load_env
 
 load_env()
+
+
+# ---------------------------------------------------------------------------
+# Backing off the way the server asked
+# ---------------------------------------------------------------------------
+#
+# THIS RULE EXISTED AND WAS IN THE WRONG FILE. extraction.py has honoured the
+# delay Groq states since the day guessing was measured and found useless --
+# "a blind 2s+4s covers six seconds of a limit needing thirty, so all three
+# attempts land in the same closed window" -- and `_groq_chat` here, the path
+# every OTHER caller takes, still slept 2s, 4s, 6s. Comprehension, cluster
+# summaries, GraphRAG and checkpointing were all retrying into a window the
+# server had already told them was shut.
+#
+# It lives here now because this module is the one place that owns talking to
+# a provider. extraction.py imports it rather than keeping a second copy;
+# CLAUDE.md documents this rule once, and one rule should not have two
+# implementations that can drift.
+
+# Groq states how long to wait in the 429 itself: "Please try again in 7.5s",
+# or "in 1m14.2s".
+_RETRY_AFTER = re.compile(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s",
+                          re.IGNORECASE)
+
+
+def max_backoff() -> float:
+    """
+    Upper bound on a single in-run wait.
+
+    Past this, sleeping blocks the caller for work the NEXT run retries for
+    free. EXTRACT_MAX_BACKOFF is read too, because that is the name this knob
+    already had when it lived in extraction.py and a deployment may be setting
+    it.
+    """
+    return float(_env("LLM_MAX_BACKOFF", _env("EXTRACT_MAX_BACKOFF", "45")))
+
+
+def retry_delay(error: Exception, attempt: int) -> float:
+    """
+    How long to wait before retrying, preferring the server's own instruction.
+
+    Falls back to exponential backoff when the error carries no hint, and never
+    waits LESS than that fallback: a suspiciously short hint should not make us
+    retry sooner than we otherwise would.
+    """
+    fallback = 2.0 * (attempt + 1)          # 2s, 4s, 6s
+    match = _RETRY_AFTER.search(str(error))
+    if not match:
+        return fallback
+    minutes = float(match.group(1) or 0)
+    seconds = float(match.group(2))
+    # A hair over what was asked, so the retry does not land just inside the
+    # window that is still closed.
+    advised = minutes * 60 + seconds + 0.1
+    return min(max(advised, fallback), max_backoff())
 
 
 def _env(name: str, default: str) -> str:
@@ -398,7 +454,7 @@ def _groq_chat(
                     f"current one (list them with `client.models.list()`). "
                     f"Default is {GROQ_DEFAULT_MODEL!r}. Original error: {e}"
                 ) from e
-            time.sleep(2 * (attempt + 1))  # 2s, 4s, 6s
+            time.sleep(retry_delay(e, attempt))
 
     raise LLMUnavailable(f"Groq request failed after {retries} attempts: {last_err}")
 

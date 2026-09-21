@@ -230,18 +230,15 @@ def _parse_llm_response(raw_text: str) -> list[dict[str, Any]]:
         raise ValueError(f"LLM returned invalid JSON: {e}\nRaw: {raw_text[:300]}") from e
 
 
-# Groq states how long to wait in the 429 itself: "Please try again in 7.5s",
-# or "in 1m14.2s". Honouring that beats guessing, and guessing is what made
-# retries useless -- 2s + 4s covers about six seconds of a limit the server
-# says needs thirty, so all three attempts land inside the same closed window
-# and the note fails as though the outage were permanent.
-_RETRY_AFTER = re.compile(
-    r"try again in\s+(?:(\d+)m)?\s*([\d.]+)s", re.IGNORECASE
-)
+# Backing off the way the server asked now lives in llm.py, which is the one
+# module that owns talking to a provider. It was HERE first, and `_groq_chat`
+# over there kept guessing 2s/4s/6s for every other caller -- comprehension,
+# cluster summaries, GraphRAG, checkpointing -- all retrying into a window the
+# server had already said was shut. One rule, one implementation.
+from brahmastra.llm import retry_delay as _retry_delay      # noqa: F401
 
-# Upper bound on a single in-run wait. Past this, sleeping blocks the whole
-# pipeline for a note that the NEXT run will retry for free -- errored notes are
-# re-queued automatically. Better to fail this note fast and keep going.
+# Kept as a name because it is documented and a deployment may be setting it;
+# llm.max_backoff() reads the variable, so this stays a read of the same knob.
 EXTRACT_MAX_BACKOFF = float(os.environ.get("EXTRACT_MAX_BACKOFF", "45"))
 
 
@@ -358,26 +355,6 @@ def _is_too_large(error: Exception) -> bool:
     # No numbers to reason with: assume permanent, since a 413 that is really
     # transient will be retried by the next pipeline run anyway.
     return True
-
-
-def _retry_delay(error: Exception, attempt: int) -> float:
-    """
-    How long to wait before retrying, preferring the server's own instruction.
-
-    Falls back to exponential backoff when the error carries no hint, and
-    always waits at least as long as that fallback: a suspiciously short hint
-    should not make us retry sooner than we otherwise would.
-    """
-    fallback = 2.0 * (attempt + 1)          # 2s, 4s
-    match = _RETRY_AFTER.search(str(error))
-    if not match:
-        return fallback
-    minutes = float(match.group(1) or 0)
-    seconds = float(match.group(2) or 0)
-    # A tenth of a second of slack: waking exactly on the boundary tends to
-    # land just inside the window that is still closed.
-    advised = minutes * 60 + seconds + 0.1
-    return min(max(advised, fallback), EXTRACT_MAX_BACKOFF)
 
 
 def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str, Any]]:

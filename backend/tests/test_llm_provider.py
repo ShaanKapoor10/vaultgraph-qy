@@ -92,3 +92,68 @@ def test_a_transient_failure_does_not_trigger_a_downgrade(monkeypatch):
     with pytest.raises(RuntimeError):
         llm.chat("s", "u")
     assert calls == ["groq"]
+
+
+# -- backing off the way the server asked -----------------------------------
+#
+# This rule existed and was in the wrong file. extraction.py honoured the delay
+# Groq states; `_groq_chat` in llm.py -- the path comprehension, cluster
+# summaries, GraphRAG and checkpointing all take -- still slept 2s, 4s, 6s,
+# which CLAUDE.md already records as useless: a blind 2+4 covers six seconds of
+# a limit the server says needs thirty, so all three attempts land inside the
+# same closed window.
+
+
+def test_the_shared_path_waits_as_long_as_groq_asked():
+    from brahmastra.llm import retry_delay
+
+    delay = retry_delay(Exception("Rate limit reached. Please try again in 7.456s"), 0)
+    assert delay == pytest.approx(7.556)          # a hair over, not just inside
+
+
+def test_minutes_in_the_hint_are_read():
+    from brahmastra.llm import retry_delay
+
+    assert retry_delay(Exception("try again in 0m32s"), 0) == pytest.approx(32.1)
+
+
+def test_a_hint_that_would_block_the_run_is_capped():
+    """Past the cap, sleeping blocks the caller for work the next run retries
+    for free."""
+    from brahmastra.llm import retry_delay, max_backoff
+
+    assert retry_delay(Exception("try again in 1m14.2s"), 0) == max_backoff()
+
+
+def test_a_suspiciously_short_hint_never_beats_the_fallback():
+    from brahmastra.llm import retry_delay
+
+    assert retry_delay(Exception("try again in 0.2s"), 0) == 2.0
+
+
+def test_no_hint_falls_back_to_exponential():
+    from brahmastra.llm import retry_delay
+
+    assert retry_delay(Exception("connection reset"), 0) == 2.0
+    assert retry_delay(Exception("connection reset"), 1) == 4.0
+
+
+def test_groq_chat_uses_it_rather_than_a_guess():
+    """
+    The defect, pinned. A grep for the old constant is the cheapest way to
+    stop it coming back, because nothing about `time.sleep(2 * (attempt + 1))`
+    looks wrong on its own.
+    """
+    import inspect
+    from brahmastra import llm
+
+    source = inspect.getsource(llm._groq_chat)
+    assert "retry_delay(e, attempt)" in source
+    assert "2 * (attempt + 1)" not in source
+
+
+def test_extraction_shares_the_one_implementation():
+    """One rule should not have two implementations that can drift."""
+    from brahmastra import extraction, llm
+
+    assert extraction._retry_delay is llm.retry_delay

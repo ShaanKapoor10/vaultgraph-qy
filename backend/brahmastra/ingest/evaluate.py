@@ -577,7 +577,29 @@ def _run_audit(cases: list[dict[str, Any]]) -> int:
     return 1 if bad else 0
 
 
+def _printable_stdout() -> None:
+    """
+    A measurement must not die because of a character in a model's reply.
+
+    A run of this harness got through eleven of twelve cases and then raised
+    UnicodeEncodeError: the model had written a non-breaking hyphen (U+2011)
+    into a statement, Windows hands Python a cp1252 stdout, and `print` of an
+    unlabelled finding took the whole run down -- losing every number already
+    computed, including the summary the run existed for.
+
+    Reporting is not the work. The terminal's limits are the terminal's
+    problem, so stdout is switched to UTF-8 and told to substitute anything it
+    still cannot render rather than raise.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _printable_stdout()
     parser = argparse.ArgumentParser(
         prog="python -m brahmastra.ingest.evaluate",
         description="Score comprehension against labelled transcripts.",

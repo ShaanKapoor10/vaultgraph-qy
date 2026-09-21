@@ -59,6 +59,44 @@ QUOTE_ANCHOR_CHARS = 24
 QUOTE_COVERAGE = 0.6
 
 
+# A RULE THAT WAS TRIED, MEASURED AND REMOVED: "SELF-CONTAINED STATEMENTS"
+#
+# cocoindex's conversation_to_knowledge requires every extracted name to be
+# self-contained and forbids anaphora, and there was a real artifact here that
+# the rule should have fixed:
+#
+#     label      "Raj completes the reconciliation job by the 27th"
+#     produced   "take the reconciliation job"
+#
+# 0.570 against a 0.60 threshold, so it scored as BOTH a miss and an
+# unlabelled finding. So all five prompts were given a block forbidding bare
+# verbs and pronouns, with that exact before-and-after as the example.
+#
+# It did not work. focused, gpt-oss-120b, three runs over each of two cases:
+#
+#                      recall            precision        traps
+#     without      70% [64-79]       61% [50-73]      0.2 (worst 1)
+#     with         64% [57-71]       59% [54-77]      0.2 (worst 1)
+#
+# The ranges overlap, so the six-point drop is not a finding either -- this
+# harness has put the same configuration at 64% and 36% on consecutive runs.
+# The honest reading is NO MEASURABLE EFFECT, for a block of prompt in every
+# call. And the specific failure it targeted survived it: the same run still
+# produced "Change the alert to trigger after fifteen minutes of queue depth
+# growth", subject-less in exactly the way the rule forbade.
+#
+# WHAT THE MEASUREMENT DID FIND, and where to look instead. The pair that
+# scored worst was never a prompt problem at all:
+#
+#     label      "Whether to move off the current webhook vendor"
+#     produced   "Should we move off this vendor entirely?"      cosine 0.523
+#
+# The same open question, counted as a miss AND a fabrication. Attribution,
+# meanwhile, was already perfect -- 100% [100%-100%] over six runs -- so the
+# owner half of this idea had nothing to fix. The gap is in the MATCHER, not
+# in the prompts, and lowering its threshold to fit five hand-picked pairs is
+# how the cross-encoder in evidence.py came to be adopted and then reverted.
+
 SYSTEM_PROMPT = """\
 You extract a factual record from part of a meeting transcript.
 
@@ -413,7 +451,6 @@ def comprehend_chunk(chunk: Chunk, max_tokens: int | None = None) -> ChunkUnders
         raw = _cached_chat(
             SYSTEM_PROMPT,
             f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
-            chunk.text,
             json_mode=True,
             temperature=0.1,     # this is a record, not a composition
             max_tokens=budget,
@@ -518,15 +555,23 @@ _CONCERN_KINDS = ("risk", "open_question")
 
 
 
-def _cached_chat(system: str, user: str, chunk_text: str, **kwargs: Any) -> str:
+def _cached_chat(system: str, user: str, **kwargs: Any) -> str:
     """
     The model's reply, from cache when this exact reading has been done before.
 
-    Keyed on the passage, the prompt and the model -- cocoindex's
-    `hash(input) + hash(code)`, where the prompt IS the code. Editing a prompt
-    therefore invalidates everything read under the old one, which is the whole
-    reason the prompt is in the key rather than a version number somebody has
-    to remember to bump.
+    Keyed on the prompt, the model, and THE WHOLE USER MESSAGE -- cocoindex's
+    `hash(input) + hash(code)`, where the prompt is the code. Editing a prompt
+    therefore invalidates everything read under the old one, which is why the
+    prompt is in the key rather than a version number somebody has to remember
+    to bump.
+
+    It used to key on `chunk.text` alone rather than on the message built from
+    it. That was correct only by accident: the message happened to be a pure
+    function of the chunk. The moment anything else reaches the model -- a
+    speaker roster resolved across the whole document, a retrieved fact, the
+    first pass's output -- the key would silently stop covering part of the
+    input, and the cache would answer with a reading of something it was not
+    asked about. Keying the message itself cannot drift that way.
     """
     from brahmastra.llm import active_model, chat
     from brahmastra.ingest import memo
@@ -537,7 +582,7 @@ def _cached_chat(system: str, user: str, chunk_text: str, **kwargs: Any) -> str:
     except Exception:
         pass
 
-    key = memo.key_for(chunk_text, "chat", model, system)
+    key = memo.key_for(user, "chat", model, system)
     hit = memo.load(key)
     if hit is not None:
         return hit
@@ -561,8 +606,7 @@ def _one_pass(chunk: Chunk, system: str, budget: int,
     try:
         raw = _cached_chat(
             system, f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
-            chunk.text, json_mode=json_schema is None, json_schema=json_schema,
-            temperature=0.1, max_tokens=budget)
+            json_mode=json_schema is None, json_schema=json_schema,            temperature=0.1, max_tokens=budget)
     except Exception as exc:
         return None, f"{type(exc).__name__}: {exc}"[:300]
     try:
@@ -825,7 +869,6 @@ def comprehend_chunk_typed(chunk: Chunk,
         raw = _cached_chat(
             TYPED_PROMPT,
             f"Passage {chunk.index + 1} of the transcript:\n\n{chunk.text}",
-            chunk.text,
             json_schema=_artifact_schema(),
             temperature=0.1,
             max_tokens=budget,

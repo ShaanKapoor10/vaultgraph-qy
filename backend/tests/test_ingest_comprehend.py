@@ -454,3 +454,44 @@ def test_a_mismatched_quote_is_dropped_and_reported():
     result = build_understanding(payload, chunk)
     assert result.artifacts == []
     assert any("contradicts" in r for r in result.rejected)
+
+
+# -- a rule that was tried, measured and removed ---------------------------
+
+
+def test_the_self_contained_rule_is_not_quietly_back():
+    """
+    cocoindex's extraction prompt forbids anaphora and requires self-contained
+    names, and it reads as obviously right. It was tried here across all five
+    prompts and measured: 70% [64-79] recall without it, 64% [57-71] with it,
+    on three runs of each of two labelled cases. Overlapping ranges, so not
+    even the drop is a finding -- but nothing to show for a block of prompt in
+    every call, and the artifact it targeted survived it.
+
+    Pinned as a test because "surely stating the rule helps" is exactly the
+    kind of plausible change that gets re-added by someone reading the same
+    upstream repo. The measurement is in comprehend.py; re-read it before
+    trying again, and if you do try, change the MATCHER instead -- that is
+    where the measurement pointed.
+    """
+    from brahmastra.ingest import comprehend as c
+
+    for name in ("SYSTEM_PROMPT", "COMMITMENTS_PROMPT", "CONCERNS_PROMPT",
+                 "TYPED_PROMPT", "_ONE_KIND_PROMPT"):
+        assert "SELF-CONTAINED STATEMENTS" not in getattr(c, name), name
+
+
+def test_the_cache_key_covers_the_whole_message_not_just_the_chunk():
+    """
+    It used to key on chunk.text, which was correct only by accident: the
+    message happened to be a pure function of the chunk. The moment anything
+    else reaches the model -- a document-level speaker roster, a retrieved
+    fact, a previous pass's output -- a chunk-keyed cache would answer with a
+    reading of something it was not asked about.
+    """
+    import inspect
+    from brahmastra.ingest import comprehend as c
+
+    source = inspect.getsource(c._cached_chat)
+    assert 'memo.key_for(user,' in source
+    assert "chunk_text" not in inspect.signature(c._cached_chat).parameters

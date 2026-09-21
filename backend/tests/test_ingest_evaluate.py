@@ -529,3 +529,28 @@ def test_an_unlabelled_owner_is_not_scored():
     total = totals(score_against(expected, produced))
     assert total.attributable == 0
     assert total.attribution == 1.0
+
+
+def test_an_unrenderable_character_does_not_take_down_the_run():
+    """
+    A run got through eleven of twelve cases and then raised
+    UnicodeEncodeError: the model wrote a non-breaking hyphen (U+2011) into a
+    statement, Windows hands Python a cp1252 stdout, and printing an
+    unlabelled finding lost every number already computed -- including the
+    summary the run existed for.
+
+    Reporting is not the work.
+    """
+    import io
+    import sys
+    import brahmastra.ingest.evaluate as ev
+
+    narrow = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    real_out, real_err = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = narrow
+    try:
+        ev._printable_stdout()
+        print("a non\u2011breaking hyphen")      # would raise before
+        narrow.flush()
+    finally:
+        sys.stdout, sys.stderr = real_out, real_err
