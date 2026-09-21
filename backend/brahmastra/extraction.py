@@ -205,7 +205,46 @@ def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
     if provider == "anthropic":
         return _extract_with_anthropic(title, content, os.environ["ANTHROPIC_API_KEY"])
 
-    raise RuntimeError(f"Unknown LLM provider: {provider!r}")
+    # Everything else goes through llm.chat, which is the general path.
+    #
+    # THE BESPOKE ONES ARE THE EXCEPTION, not the rule, and they are bespoke
+    # for reasons that are specific to those vendors rather than to
+    # extraction: Groq's free tier words a 413 and a 429 almost identically
+    # and the numbers in the message decide which is permanent, and Ollama is
+    # spoken to over plain HTTP because it needs no SDK. A provider without
+    # that history needs none of it.
+    #
+    # This is what "not coupled to Groq" has to mean concretely -- adding
+    # Gemini or OpenAI reaches extraction with no work here at all, because
+    # llm.py already knows how to talk to them.
+    return _extract_via_chat(title, content, provider)
+
+
+def _extract_via_chat(title: str, content: str, provider: str) -> list[dict[str, Any]]:
+    """Extraction for any provider that llm.chat can already reach."""
+    from brahmastra.llm import chat, model_for
+
+    user_message = _build_user_message(title, content)
+    model = model_for(provider)
+
+    cached = _memo_load(user_message, model)
+    if cached is not None:
+        return _parse_llm_response(cached)
+
+    reply = chat(
+        SYSTEM_PROMPT,
+        user_message,
+        json_mode=True,
+        temperature=0.0,
+        # Sized to THIS note, for the same reason the Groq path sizes it: the
+        # reservation is billed against a per-minute allowance whether or not
+        # it is used, so a fixed ceiling large enough for the worst note makes
+        # every request too expensive on a small tier.
+        max_tokens=_output_budget(SYSTEM_PROMPT, user_message),
+        provider=provider,
+    )
+    _memo_save(user_message, model, reply)
+    return _parse_llm_response(reply)
 
 
 def _extract_with_ollama(title: str, content: str) -> list[dict[str, Any]]:

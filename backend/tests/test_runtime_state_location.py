@@ -125,13 +125,18 @@ def test_the_suite_cannot_reach_a_running_ollama():
     picks it up and any test that forgets to stub comprehension makes real
     inference calls. A run went from 70 seconds to 201 exactly that way.
     """
-    from brahmastra.llm import ollama_available, provider_status
+    from brahmastra.llm import PROVIDERS, ollama_available, provider_status
 
     assert ollama_available() is False, (
         "the suite can reach a local model; conftest must point OLLAMA_HOST "
         "at a dead port"
     )
-    assert provider_status() == {"groq": False, "anthropic": False, "ollama": False}
+    # Every provider in the registry, not a list of three that goes stale the
+    # next time one is added -- which is exactly what happened when openai and
+    # gemini arrived and this assertion failed for the right reason.
+    status = provider_status()
+    assert set(status) == set(PROVIDERS), "a provider escaped this check"
+    assert not any(status.values()), f"reachable under test: {status}"
 
 
 def test_no_provider_resolves_under_test():

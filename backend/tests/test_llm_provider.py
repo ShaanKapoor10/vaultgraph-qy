@@ -157,3 +157,120 @@ def test_extraction_shares_the_one_implementation():
     from brahmastra import extraction, llm
 
     assert extraction._retry_delay is llm.retry_delay
+
+
+# -- the provider registry --------------------------------------------------
+#
+# Groq is what is affordable today, not what this system is for. Its largest
+# hosted model is small, and the design has to survive being swapped for
+# Gemini or OpenAI without a rewrite. Adding a provider used to mean editing
+# six places -- the PROVIDERS tuple, a model default, a model accessor,
+# provider_status, active_model and _dispatch -- which is the same shape of
+# mistake that already shipped once here: selection was centralised while the
+# MODEL stayed hardcoded per call site, so when Groq retired llama-3.3-70b,
+# extraction kept calling the dead model while summaries succeeded.
+
+
+def test_every_provider_declares_everything_needed_to_reach_it():
+    """One entry per provider, or the six-places bug comes back."""
+    from brahmastra.llm import _REGISTRY
+
+    for spec in _REGISTRY:
+        assert spec.name and spec.model_env and spec.default_model, spec
+        if spec.is_cloud:
+            assert spec.key_env and spec.sdk, f"{spec.name} cannot be reached"
+
+
+def test_the_registry_is_the_only_list_of_providers():
+    from brahmastra.llm import _REGISTRY, PROVIDERS
+
+    assert PROVIDERS == tuple(p.name for p in _REGISTRY)
+
+
+def test_openai_and_gemini_are_reachable_providers():
+    """The two Shaan named as the likely replacements."""
+    from brahmastra.llm import PROVIDERS
+
+    assert "openai" in PROVIDERS and "gemini" in PROVIDERS
+
+
+def test_every_provider_can_be_dispatched_to():
+    """
+    A provider in the registry that _dispatch does not know is worse than one
+    that is absent: it resolves, then fails at call time.
+    """
+    import inspect
+    from brahmastra import llm
+
+    source = inspect.getsource(llm._dispatch)
+    for name in llm.PROVIDERS:
+        assert f'name == "{name}"' in source, f"_dispatch cannot reach {name}"
+
+
+def test_every_provider_reports_a_model(monkeypatch):
+    from brahmastra.llm import PROVIDERS, model_for
+
+    for name in PROVIDERS:
+        assert model_for(name), name
+
+
+def test_a_model_can_be_overridden_per_provider(monkeypatch):
+    from brahmastra.llm import model_for
+
+    monkeypatch.setenv("GEMINI_MODEL", "gemini-3-pro")
+    assert model_for("gemini") == "gemini-3-pro"
+    monkeypatch.setenv("GEMINI_MODEL", "")          # present-but-empty is unset
+    assert model_for("gemini") == "gemini-2.5-flash"
+
+
+def test_active_model_follows_whichever_provider_is_live(monkeypatch):
+    from brahmastra import llm
+
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "gemini")
+    assert llm.active_model() == llm.model_for("gemini")
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "openai")
+    assert llm.active_model() == llm.model_for("openai")
+
+
+def test_adding_a_key_does_not_silently_change_provider(monkeypatch):
+    """
+    A key appearing in .env makes a provider AVAILABLE as a fallback; it does
+    not move production onto it. A silent switch of the model behind every
+    extraction is the kind of change that shows up later as "it got worse"
+    with nothing to explain it. LLM_PROVIDER is how you move.
+    """
+    from brahmastra import llm
+
+    monkeypatch.setattr(llm, "provider_status",
+                        lambda: {"groq": True, "openai": True, "gemini": True,
+                                 "anthropic": False, "ollama": False})
+    monkeypatch.setenv("LLM_PROVIDER", "")
+    assert llm.resolve_provider() == "groq"          # unchanged by the new keys
+
+    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+    assert llm.resolve_provider() == "gemini"        # one line moves it
+
+
+def test_extraction_reaches_a_new_provider_without_its_own_code(monkeypatch):
+    """
+    What "not coupled to Groq" has to mean concretely. Groq and Ollama have
+    bespoke paths for reasons specific to those vendors -- a 413 that reads
+    like a 429, an HTTP endpoint with no SDK -- and a provider without that
+    history needs none of it.
+    """
+    import brahmastra.extraction as extraction
+    from brahmastra import llm
+
+    seen = {}
+
+    def fake_chat(system, user, **kwargs):
+        seen["provider"] = kwargs.get("provider")
+        return '{"triples": []}'
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
+    monkeypatch.setattr(extraction, "resolve_provider", lambda: "gemini",
+                        raising=False)
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "gemini")
+
+    assert extraction._extract_with_llm("T", "C") == []
+    assert seen["provider"] == "gemini"

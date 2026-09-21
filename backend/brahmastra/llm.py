@@ -30,6 +30,7 @@ import os
 import re
 import time
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -125,27 +126,112 @@ OLLAMA_HOST = _env("OLLAMA_HOST", "http://localhost:11434")
 # and fails JSON validation. Override per deployment with GROQ_MODEL.
 GROQ_DEFAULT_MODEL = "openai/gpt-oss-120b"
 ANTHROPIC_DEFAULT_MODEL = "claude-haiku-4-5-20251001"
+OPENAI_DEFAULT_MODEL = "gpt-4.1-mini"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
+
+
+# ---------------------------------------------------------------------------
+# The provider registry
+# ---------------------------------------------------------------------------
+#
+# ONE ENTRY PER PROVIDER, because the alternative is already a recorded bug in
+# this file. Provider SELECTION was centralised here so extraction, GraphRAG
+# and cluster summaries could never disagree about which provider is live --
+# and the MODEL stayed hardcoded at each call site, so they disagreed about
+# that instead: Groq retired llama-3.3-70b, this module was fixed, and
+# extraction kept calling the dead model and failing every note while
+# summaries succeeded in the same run.
+#
+# Adding a provider used to mean editing six places -- the PROVIDERS tuple, a
+# model default, a model accessor, provider_status, active_model and _dispatch
+# -- which is the same shape of mistake waiting to happen five more times.
+#
+# GROQ IS NOT THE POINT OF THIS SYSTEM. It is what is affordable today, and its
+# largest hosted model is small; the design has to survive being swapped for
+# Gemini or OpenAI without a rewrite. That swap is now one line:
+#
+#     LLM_PROVIDER=gemini      in backend/.env
+#
+# The auto-order below is deliberately UNCHANGED by adding providers. Picking a
+# new provider merely because a key appeared in .env would be a silent switch
+# of the model behind every extraction, and this system has a rule about silent
+# downgrades: they show up later as "it got worse" with nothing to explain it.
+# An explicit LLM_PROVIDER is how you move; a key on its own only makes a
+# provider available as a fallback.
+
+
+@dataclass(frozen=True)
+class Provider:
+    """Everything the rest of this module needs to know about one provider."""
+
+    name: str
+    key_env: str            # "" for a local provider that needs no credential
+    sdk: str                # importable module name; "" when none is needed
+    model_env: str
+    default_model: str
+
+    @property
+    def is_cloud(self) -> bool:
+        return bool(self.key_env)
+
+
+_REGISTRY: tuple[Provider, ...] = (
+    Provider("groq", "GROQ_API_KEY", "groq", "GROQ_MODEL", GROQ_DEFAULT_MODEL),
+    Provider("openai", "OPENAI_API_KEY", "openai", "OPENAI_MODEL",
+             OPENAI_DEFAULT_MODEL),
+    Provider("gemini", "GEMINI_API_KEY", "google.genai", "GEMINI_MODEL",
+             GEMINI_DEFAULT_MODEL),
+    Provider("anthropic", "ANTHROPIC_API_KEY", "anthropic", "ANTHROPIC_MODEL",
+             ANTHROPIC_DEFAULT_MODEL),
+    Provider("ollama", "", "", "OLLAMA_MODEL", OLLAMA_MODEL),
+)
+
+PROVIDERS = tuple(p.name for p in _REGISTRY)
+
+_BY_NAME = {p.name: p for p in _REGISTRY}
+
+
+def provider_spec(name: str) -> Provider:
+    try:
+        return _BY_NAME[name]
+    except KeyError:
+        raise LLMUnavailable(
+            f"Unknown provider {name!r}; expected one of {PROVIDERS}") from None
+
+
+def model_for(name: str) -> str:
+    """
+    The model a given provider will use. Read at call time, never cached.
+
+    Every caller must come through here rather than reading the environment
+    itself -- see the registry comment for the run where half the system had
+    been fixed and the other half was still calling a decommissioned model.
+    """
+    spec = provider_spec(name)
+    return _env(spec.model_env, spec.default_model)
 
 
 def groq_model() -> str:
-    """
-    The Groq model every caller must use.
-
-    Provider selection was centralised here so extraction, GraphRAG and cluster
-    summaries could never disagree about which provider is live — but the MODEL
-    was left hardcoded in each call site, so they disagreed about that instead.
-    When Groq retired llama-3.3-70b this module was fixed and extraction kept
-    calling the dead model, failing every note while summaries succeeded in the
-    same run.
-    """
-    return _env("GROQ_MODEL", GROQ_DEFAULT_MODEL)
+    """The Groq model every caller must use. See model_for()."""
+    return model_for("groq")
 
 
 def anthropic_model() -> str:
-    """The Anthropic model every caller must use. See groq_model()."""
-    return _env("ANTHROPIC_MODEL", ANTHROPIC_DEFAULT_MODEL)
+    """The Anthropic model every caller must use. See model_for()."""
+    return model_for("anthropic")
 
-PROVIDERS = ("groq", "anthropic", "ollama")
+
+def openai_model() -> str:
+    """The OpenAI model every caller must use. See model_for()."""
+    return model_for("openai")
+
+
+def gemini_model() -> str:
+    """The Gemini model every caller must use. See model_for()."""
+    return model_for("gemini")
+
+
+
 
 
 class LLMUnavailable(RuntimeError):
@@ -230,11 +316,13 @@ def provider_status() -> dict[str, bool]:
     would select it and then fail at call time instead of falling through
     to a provider that actually works.
     """
-    return {
-        "groq": bool(_env("GROQ_API_KEY", "")) and _installed("groq"),
-        "anthropic": bool(_env("ANTHROPIC_API_KEY", "")) and _installed("anthropic"),
-        "ollama": ollama_available(),
-    }
+    status: dict[str, bool] = {}
+    for spec in _REGISTRY:
+        if spec.is_cloud:
+            status[spec.name] = bool(_env(spec.key_env, "")) and _installed(spec.sdk)
+        else:
+            status[spec.name] = ollama_available()
+    return status
 
 
 def resolve_provider() -> str:
@@ -251,13 +339,14 @@ def resolve_provider() -> str:
     if requested in PROVIDERS and status[requested]:
         return requested
 
-    for name in PROVIDERS:  # groq -> anthropic -> ollama
+    for name in PROVIDERS:  # registry order: cloud first, local last
         if status[name]:
             return name
 
+    keys = ", ".join(p.key_env for p in _REGISTRY if p.is_cloud)
     raise LLMUnavailable(
-        "No LLM provider available. Set GROQ_API_KEY or ANTHROPIC_API_KEY in "
-        "backend/.env, or start a local model with `ollama serve`."
+        f"No LLM provider available. Set one of {keys} in backend/.env "
+        f"(and install its SDK), or start a local model with `ollama serve`."
     )
 
 
@@ -285,11 +374,7 @@ def active_model() -> str:
         provider = resolve_provider()
     except LLMUnavailable:
         return ""
-    if provider == "groq":
-        return groq_model()
-    if provider == "anthropic":
-        return anthropic_model()
-    return OLLAMA_MODEL
+    return model_for(provider)
 
 
 # ---------------------------------------------------------------------------
@@ -385,11 +470,155 @@ def _dispatch(
             system, user, json_mode=json_mode, json_schema=json_schema,
             temperature=temperature, max_tokens=max_tokens, retries=retries,
         )
+    if name == "openai":
+        return _openai_chat(
+            system, user, json_mode=json_mode, json_schema=json_schema,
+            temperature=temperature, max_tokens=max_tokens, retries=retries,
+        )
+    if name == "gemini":
+        return _gemini_chat(
+            system, user, json_mode=json_mode, json_schema=json_schema,
+            temperature=temperature, max_tokens=max_tokens, retries=retries,
+        )
     if name == "anthropic":
         return _anthropic_chat(
             system, user, temperature=temperature, max_tokens=max_tokens,
         )
     raise LLMUnavailable(f"Unknown provider {name!r}; expected one of {PROVIDERS}")
+
+
+def _openai_chat(
+    system: str,
+    user: str,
+    *,
+    json_mode: bool,
+    json_schema: dict[str, Any] | None = None,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+) -> str:
+    """
+    OpenAI, through the same contract every other provider here honours.
+
+    Same shape as _groq_chat on purpose -- Groq speaks the OpenAI wire format,
+    so the only real differences are the client and the token parameter name.
+    Kept as its own function rather than parameterising _groq_chat, because
+    the two will diverge the moment either vendor changes something and a
+    shared function would then need a flag per difference.
+    """
+    try:
+        from openai import OpenAI
+    except ImportError as e:
+        raise LLMUnavailable(
+            "openai package not installed -- run: uv pip install openai"
+        ) from e
+
+    client = OpenAI(api_key=_env("OPENAI_API_KEY", ""))
+    model = openai_model()
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+    }
+    if json_schema is not None:
+        kwargs["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "record", "schema": json_schema,
+                            "strict": True},
+        }
+    elif json_mode:
+        kwargs["response_format"] = {"type": "json_object"}
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = client.chat.completions.create(**kwargs)
+            return resp.choices[0].message.content or ""
+        except Exception as e:
+            last_err = e
+            if _is_quota_exhausted(e):
+                raise LLMQuotaExhausted(f"OpenAI quota exhausted: {e}") from e
+            if _is_model_missing(e):
+                raise LLMModelUnavailable(
+                    f"OpenAI model {model!r} is not available on this account. "
+                    f"Set OPENAI_MODEL in backend/.env to a current one. "
+                    f"Default is {OPENAI_DEFAULT_MODEL!r}. Original error: {e}"
+                ) from e
+            time.sleep(retry_delay(e, attempt))
+
+    raise LLMUnavailable(f"OpenAI request failed after {retries} attempts: {last_err}")
+
+
+def _gemini_chat(
+    system: str,
+    user: str,
+    *,
+    json_mode: bool,
+    json_schema: dict[str, Any] | None = None,
+    temperature: float,
+    max_tokens: int,
+    retries: int,
+) -> str:
+    """
+    Gemini, via the google-genai SDK.
+
+    Two differences worth knowing rather than discovering. The system prompt is
+    CONFIG, not a message -- there is no system role in `contents` -- and JSON
+    is requested with a response_mime_type rather than a response_format, with
+    the schema passed alongside it.
+
+    NOT EXERCISED AGAINST A LIVE ENDPOINT. There is no Gemini key on this
+    machine, so this is written from the SDK contract and is the one provider
+    here whose first real call should be treated as a test.
+    """
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as e:
+        raise LLMUnavailable(
+            "google-genai package not installed -- run: uv pip install google-genai"
+        ) from e
+
+    client = genai.Client(api_key=_env("GEMINI_API_KEY", ""))
+    model = gemini_model()
+
+    config: dict[str, Any] = {
+        "system_instruction": system,
+        "temperature": temperature,
+        "max_output_tokens": max_tokens,
+    }
+    if json_schema is not None:
+        config["response_mime_type"] = "application/json"
+        config["response_schema"] = json_schema
+    elif json_mode:
+        config["response_mime_type"] = "application/json"
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = client.models.generate_content(
+                model=model,
+                contents=user,
+                config=types.GenerateContentConfig(**config),
+            )
+            return resp.text or ""
+        except Exception as e:
+            last_err = e
+            if _is_quota_exhausted(e):
+                raise LLMQuotaExhausted(f"Gemini quota exhausted: {e}") from e
+            if _is_model_missing(e):
+                raise LLMModelUnavailable(
+                    f"Gemini model {model!r} is not available on this account. "
+                    f"Set GEMINI_MODEL in backend/.env to a current one. "
+                    f"Default is {GEMINI_DEFAULT_MODEL!r}. Original error: {e}"
+                ) from e
+            time.sleep(retry_delay(e, attempt))
+
+    raise LLMUnavailable(f"Gemini request failed after {retries} attempts: {last_err}")
 
 
 def _groq_chat(
