@@ -274,10 +274,26 @@ GraphRAG, cluster summaries), so they can never disagree about which provider is
 - Groq's free tier is rate limited: a `full=True` re-extraction of ~44 notes typically
   errors on a third of them. Those notes are **retried automatically on the next run**
   (`EXTRACT_RETRY_ERRORS=0` disables), so just run the pipeline again.
+- **Replies are memoised** (`brahmastra/memo.py`), so most of that re-extraction is now
+  free. The key is the note, the model and `SYSTEM_PROMPT` — **which carries the
+  ontology**, so an ontology edit correctly re-extracts everything while an unrelated
+  note edit costs nothing elsewhere. The RAW reply is cached, never the parsed triples:
+  validation and relation coercion re-run on every hit, or a fixed bug would stay fixed
+  only for notes nobody had extracted yet.
+  ```
+  LLM_MEMO=0      no caching anywhere
+  INGEST_MEMO=0   re-read every transcript passage, but keep extraction cached
+                  (what comparing comprehension variants needs)
+  ```
+  Table `llm_memo`, in whichever database holds the notes. DERIVED — drop it freely.
 - **Backoff honours the delay Groq states** ("Please try again in 7.5s"). Guessing made
   retries useless: a blind 2s+4s covers six seconds of a limit needing thirty, so all
   three attempts land in the same closed window. Capped at `EXTRACT_MAX_BACKOFF` (45s) —
   past that the note fails fast and the next run retries it for free.
+  ⚠️ This rule lived **only in `extraction.py`** for months, while `llm.chat` — the path
+  comprehension, cluster summaries, GraphRAG and checkpointing all take — still slept a
+  blind 2s/4s/6s into a window the server had already said was shut. It is now
+  `llm.retry_delay`, and `extraction.py` imports it. One rule, one implementation.
 - **A 413 is not a rate limit.** An oversized note fails permanently, so it is not
   retried — but unlike a spent quota it must not stop the run, because one big note says
   nothing about the next. Read `notes.extraction_error` before assuming which you have:
