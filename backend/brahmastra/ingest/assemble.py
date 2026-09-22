@@ -43,10 +43,16 @@ module, and nothing recorded that this transcript OWNED them -- so eighteen
 notes stayed, holding triples, answering searches, sourced from sentences that
 no longer exist anywhere.
 
-Every note this run writes is now DECLARED to `brahmastra.ownership`, which
-knows what the last run declared and deletes the difference. Same rule for a
-transcript that is deleted outright. See that module for why the ledger
-records an intent before acting.
+All three now go through `brahmastra.ownership`: every note, chunk and artifact
+a run produces is DECLARED, what changed is written, and what the last run
+declared and this one did not is deleted. `clear_derived` is no longer on this
+path at all -- deleting everything and rewriting it is not a reconciliation. It
+leaves a hole for as long as the run takes, destroys rows that did not change,
+and an interrupted run ends with nothing rather than with the older version.
+
+The same rule covers a transcript deleted outright, in cocoindex's two shapes:
+DESTROY takes the notes too, ABANDON leaves them and releases the claim. See
+`ownership.py` for why the ledger records an intent before acting.
 """
 
 from __future__ import annotations
@@ -173,6 +179,66 @@ def comprehension_strategy():
     if size is not None and size < SMALL_MODEL_PARAMS_B:
         return comprehend_chunk
     return comprehend_chunk_focused
+
+
+def _settle_chunks(owned: ownership.Streaming, store: IngestStore,
+                   transcript_id: str, report: dict[str, Any]) -> int:
+    """Delete the chunk rows a re-segmentation stopped producing."""
+    try:
+        return len(owned.finish(
+            lambda keys: store.delete_chunks(transcript_id, [int(k) for k in keys])
+        ).deletes)
+    except Exception as exc:
+        report["errors"].append(
+            {"stage": "ownership", "error": f"chunks: {type(exc).__name__}: {exc}"[:300]})
+        return 0
+
+
+def _settle_artifacts(ledger: ownership.Ledger, store: IngestStore,
+                      transcript_id: str, artifacts: list[Any],
+                      report: dict[str, Any], force: bool) -> int:
+    """
+    Reconcile the artifact table against what this run found.
+
+    A bulk `sync` rather than the streaming shape the notes and chunks use,
+    because artifacts are only known at the END: consolidation needs the whole
+    document, since chunks overlap and a decision in an overlap region is
+    comprehended twice.
+
+    Unchanged artifacts are genuinely skipped here. Their id is derived from
+    the statement, so "the ledger says this row already holds exactly this" is
+    a real answer rather than a guess -- and it means a re-run over an
+    unedited meeting stops rewriting every decision it ever recorded.
+    """
+    from brahmastra.ingest.store import identify_artifacts
+
+    identified = identify_artifacts(transcript_id, artifacts)
+    declared = [
+        ownership.Declared(
+            aid,
+            ownership.fingerprint(a.kind, a.statement, a.owner, a.due,
+                                  a.rationale, a.quote, a.chunk_index,
+                                  getattr(a, "mentions", 1),
+                                  getattr(a, "superseded_by", None)),
+            a,
+        )
+        for aid, a in identified
+    ]
+    try:
+        decided = ownership.sync(
+            ledger, OWNER_KIND, transcript_id, "artifact", declared,
+            write=lambda items: store.save_artifacts(
+                transcript_id, [d.payload for d in items]),
+            delete=store.delete_artifacts,
+            force=force,
+        )
+        report["artifacts_written"] = len(decided.upserts)
+        report["artifacts_removed"] = len(decided.deletes)
+    except Exception as exc:
+        report["errors"].append(
+            {"stage": "ownership",
+             "error": f"artifacts: {type(exc).__name__}: {exc}"[:300]})
+    return len(declared)
 
 
 def drop_transcript(transcript_id: str, store: IngestStore | None = None,
@@ -397,22 +463,31 @@ def _process(
         # unreportable before anything recorded ownership.
         "notes_written": 0,
         "notes_removed": 0,
+        "chunks_removed": 0,
+        "artifacts_written": 0,
+        "artifacts_removed": 0,
         "rejected": [],
         "degraded": [],
         "errors": [],
     }
 
     store.set_transcript_status(transcript_id, "processing")
-    # A second run corrects the first rather than doubling it.
-    store.clear_derived(transcript_id)
 
-    # What this transcript owns in the graph. Opened before the first note is
-    # written and settled after the last, so the run can answer "and what did
-    # the PREVIOUS one leave here?"
-    notes = ownership.Streaming(
-        ownership.Ledger(workspace=store.workspace),
-        OWNER_KIND, transcript_id, "note", force=force,
-    )
+    # EVERYTHING this transcript owns, opened before the first row is written
+    # and settled after the last, so the run can answer "and what did the
+    # PREVIOUS one leave here?"
+    #
+    # There used to be a `clear_derived` on this line: delete every chunk and
+    # every artifact, then write them all again. That is not a reconciliation.
+    # It leaves the transcript with nothing for as long as the run takes, it
+    # destroys rows that did not change, and an interrupted run leaves a hole
+    # rather than an older version. And it only ever covered the two tables
+    # next door, which is how eighteen notes came to survive a re-ingestion.
+    ledger = ownership.Ledger(workspace=store.workspace)
+    notes = ownership.Streaming(ledger, OWNER_KIND, transcript_id, "note",
+                                force=force)
+    owned_chunks = ownership.Streaming(ledger, OWNER_KIND, transcript_id,
+                                       "chunk", force=force)
 
     chunks = segment(record["content"])
     report["chunks"] = len(chunks)
@@ -424,6 +499,9 @@ def _process(
         # that made this module necessary: declaring no notes must delete every
         # note, not quietly leave the whole document behind.
         report["notes_removed"] = _settle(notes, report)
+        report["chunks_removed"] = _settle_chunks(owned_chunks, store,
+                                                  transcript_id, report)
+        _settle_artifacts(ledger, store, transcript_id, [], report, force)
         store.set_transcript_status(transcript_id, "done", chunk_count=0)
         report["status"] = "ok"
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -445,10 +523,21 @@ def _process(
     comprehend = comprehension_strategy()
 
     for chunk in chunks:
+        # Declared, then written UNCONDITIONALLY -- unlike a note, where the
+        # ledger's "unchanged" answer is allowed to skip the write. A chunk row
+        # carries status, summary and note_id, all of which this run is about
+        # to overwrite anyway, so there is nothing to save by skipping it and a
+        # stale status to gain. The declaration is what matters here: it is
+        # what lets a re-segmentation that produces fewer chunks delete the
+        # ones it stopped producing.
+        owned_chunks.begin(str(chunk.index),
+                           ownership.fingerprint(chunk.text, chunk.start_char,
+                                                 chunk.end_char))
         store.save_chunk(
             transcript_id, chunk.index, chunk.text, chunk.speakers,
             chunk.start_time, chunk.end_time, chunk.start_char, chunk.end_char,
         )
+        owned_chunks.commit(str(chunk.index))
 
         understanding = comprehend(chunk)
 
@@ -549,9 +638,12 @@ def _process(
     # not yet know what it declares -- and before the status is decided, so a
     # `partial` run still reports what it removed.
     report["notes_removed"] = _settle(notes, report)
+    report["chunks_removed"] = _settle_chunks(owned_chunks, store,
+                                              transcript_id, report)
 
     reduced = consolidate(pending_artifacts)
-    report["artifacts"] = store.save_artifacts(transcript_id, reduced["artifacts"])
+    report["artifacts"] = _settle_artifacts(
+        ledger, store, transcript_id, reduced["artifacts"], report, force)
     report["merged"] = reduced["merged"]
     report["superseded"] = reduced["superseded"]
     report["revisions"] = reduced["notes"]

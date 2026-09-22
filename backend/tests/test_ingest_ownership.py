@@ -232,6 +232,97 @@ def test_only_the_chunk_that_changed_is_rewritten(store, monkeypatch):
     assert second["notes"] == first["notes"]
 
 
+# -- chunks and artifacts, under the same rule -------------------------------
+
+def test_a_shorter_re_ingestion_removes_chunks_and_artifacts(store, understood):
+    """
+    What `clear_derived` used to do by deleting everything first. The outcome
+    is the same; the difference is that nothing is destroyed on the way.
+    """
+    tid = store.create_transcript(Transcript("", "Release planning", talk(40)))
+    first = assemble.process_transcript(tid, store=store)
+    assert len(store.get_chunks(tid)) == first["chunks"] > 1
+
+    _rewrite(store, tid, talk(4))
+    second = assemble.process_transcript(tid, store=store)
+
+    assert len(store.get_chunks(tid)) == second["chunks"]
+    assert second["chunks_removed"] == first["chunks"] - second["chunks"]
+    assert (len(store.get_artifacts(transcript_id=tid, limit=500))
+            == second["artifacts"])
+
+
+def test_an_interrupted_run_no_longer_empties_the_transcript(store, understood,
+                                                             monkeypatch):
+    """
+    THE REASON clear_derived HAD TO GO. It deleted every chunk and artifact
+    before the run produced their replacements, so a run that died in between
+    left the transcript holding nothing -- not an older version, nothing. A
+    reconciliation writes over the old rows instead, so a failed run leaves
+    exactly what the last good one left.
+    """
+    tid = store.create_transcript(Transcript("", "Release planning", talk(40)))
+    first = assemble.process_transcript(tid, store=store)
+    assert first["chunks"] > 1
+
+    def die(chunk, max_tokens=None):
+        raise RuntimeError("the provider went away")
+
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: die)
+    with pytest.raises(RuntimeError):
+        assemble.process_transcript(tid, store=store)
+
+    assert len(store.get_chunks(tid)) == first["chunks"]
+    assert len(store.get_artifacts(transcript_id=tid, limit=500)) \
+        == first["artifacts"]
+
+
+def test_an_unchanged_re_ingestion_rewrites_no_artifacts(store, understood):
+    """
+    An artifact's id is derived from its statement, so "already exactly this"
+    is a real answer rather than a guess -- and a re-run over an unedited
+    meeting stops rewriting every decision it ever recorded.
+    """
+    tid = store.create_transcript(Transcript("", "Release planning", talk(8)))
+    first = assemble.process_transcript(tid, store=store)
+    assert first["artifacts_written"] == first["artifacts"] > 1
+
+    second = assemble.process_transcript(tid, store=store)
+    assert second["artifacts"] == first["artifacts"]
+    assert second["artifacts_written"] == 0
+    assert second["artifacts_removed"] == 0
+
+
+def test_an_artifact_that_changed_is_rewritten_in_place(store, monkeypatch):
+    owner = ["Sarah"]
+
+    def fake(chunk, max_tokens=None):
+        return ChunkUnderstanding(
+            chunk_index=chunk.index, summary=f"Part {chunk.index}.",
+            participants=["Sarah"], topics=["release"],
+            artifacts=[Artifact("decision", "The release moves to April 15th",
+                                owner=owner[0], chunk_index=chunk.index,
+                                speakers=chunk.speakers)],
+        )
+    monkeypatch.setattr(assemble, "comprehension_strategy", lambda: fake)
+
+    tid = store.create_transcript(Transcript("", "Release planning", talk(4)))
+    assemble.process_transcript(tid, store=store)
+    before = store.get_artifacts(transcript_id=tid, limit=50)
+    assert len(before) == 1
+
+    owner[0] = "Mei"
+    report = assemble.process_transcript(tid, store=store)
+    after = store.get_artifacts(transcript_id=tid, limit=50)
+
+    # Same identity -- the statement did not change -- with a new owner.
+    assert report["artifacts_written"] == 1
+    assert report["artifacts_removed"] == 0
+    assert len(after) == 1
+    assert after[0]["id"] == before[0]["id"]
+    assert after[0]["owner"] == "Mei"
+
+
 # -- deleting the transcript outright ---------------------------------------
 
 def test_deleting_a_transcript_abandons_its_notes_by_default(store, understood):

@@ -45,7 +45,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any, Iterator, Sequence
 
 from brahmastra.workspace import current_workspace
 
@@ -186,6 +186,39 @@ def artifact_id(transcript_id: str, kind: str, statement: str,
     # 64 bits. Collisions are the one failure this cannot report, because a
     # colliding INSERT looks exactly like a duplicate artifact.
     return h.hexdigest()[:16]
+
+
+def identify_artifacts(transcript_id: str,
+                       artifacts: Sequence[Any]) -> list[tuple[str, Any]]:
+    """
+    Pair each artifact with its derived id, and stamp the id onto it.
+
+    Lifted out of `save_artifacts` because ownership has to DECLARE these rows
+    before deciding which of them to write, and a declaration keyed on
+    something other than the primary key would reconcile against the wrong
+    thing. One implementation, called from both places.
+
+    `occurrence` separates exact repeats within one transcript, so a document
+    that genuinely says the same thing twice yields two rows rather than a
+    primary-key collision. See `artifact_id` for why the chunk index is not in
+    the key.
+    """
+    seen: dict[tuple[str, str], int] = {}
+    out: list[tuple[str, Any]] = []
+    for a in artifacts:
+        slot = (a.kind, _identity_text(a.statement))
+        occurrence = seen.get(slot, 0)
+        seen[slot] = occurrence + 1
+        aid = artifact_id(transcript_id, a.kind, a.statement, occurrence)
+        # Stamped on the object too: an id nothing can observe is a primary
+        # key, not an identity, and the point of deriving it is that something
+        # downstream can hold on to it.
+        try:
+            a.id = aid
+        except Exception:
+            pass
+        out.append((aid, a))
+    return out
 
 
 def _backend() -> str:
@@ -359,11 +392,18 @@ class IngestStore:
 
     def clear_derived(self, transcript_id: str) -> None:
         """
-        Drop what a previous ingestion produced.
+        Drop every chunk and artifact this transcript produced.
 
-        Called before re-ingesting so a second run REPLACES rather than
-        duplicates -- the same reason extraction deletes a note's triples
-        before re-inserting them.
+        NO LONGER WHAT A RE-RUN DOES, and that is the point. Deleting
+        everything and rewriting it is not a reconciliation: it is a hole for
+        as long as the run takes, it destroys rows that did not change, and an
+        interrupted run leaves the transcript with nothing at all. Re-ingestion
+        now declares what it produces to `brahmastra.ownership`, which writes
+        what differs and deletes what is no longer declared.
+
+        Kept because "remove the lot" is still a real operation -- a wipe
+        before a deliberate rebuild, and what `delete_transcript` does on its
+        way out.
         """
         self.init_schema()
         with self._cursor() as cur:
@@ -376,6 +416,10 @@ class IngestStore:
                    speakers: list[str], start_time: str | None,
                    end_time: str | None, start_char: int, end_char: int) -> None:
         self.init_schema()
+        # IDEMPOTENT, because ownership requires it: an interrupted run is
+        # redone rather than undone, so this must be safe to apply twice. A
+        # plain INSERT raised on the primary key the second time, which is why
+        # the old path had to delete everything first.
         with self._cursor() as cur:
             cur.execute(self._ph(
                 """
@@ -383,6 +427,17 @@ class IngestStore:
                     (transcript_id, workspace_id, idx, text, speakers,
                      start_time, end_time, start_char, end_char)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, transcript_id, idx) DO UPDATE SET
+                    text = excluded.text,
+                    speakers = excluded.speakers,
+                    start_time = excluded.start_time,
+                    end_time = excluded.end_time,
+                    start_char = excluded.start_char,
+                    end_char = excluded.end_char,
+                    status = 'pending',
+                    summary = NULL,
+                    note_id = NULL,
+                    error = NULL
                 """),
                 (transcript_id, self.workspace, idx, text, json.dumps(speakers),
                  start_time, end_time, start_char, end_char),
@@ -416,21 +471,8 @@ class IngestStore:
         self.init_schema()
         if not artifacts:
             return 0
-        # Identity is derived, not drawn. See `artifact_id`.
-        seen: dict[tuple[str, str], int] = {}
         rows = []
-        for a in artifacts:
-            slot = (a.kind, _identity_text(a.statement))
-            occurrence = seen.get(slot, 0)
-            seen[slot] = occurrence + 1
-            aid = artifact_id(transcript_id, a.kind, a.statement, occurrence)
-            # Handed back to the caller too: an id nothing can observe is a
-            # primary key, not an identity, and the point of deriving it is
-            # that something downstream can hold on to it.
-            try:
-                a.id = aid
-            except Exception:
-                pass
+        for aid, a in identify_artifacts(transcript_id, artifacts):
             rows.append(
                 (aid, self.workspace, transcript_id, a.chunk_index,
                  a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
@@ -438,6 +480,10 @@ class IngestStore:
                  getattr(a, "mentions", 1), getattr(a, "superseded_by", None),
                  _now())
             )
+        # IDEMPOTENT, because ownership requires it. `created_at` is
+        # deliberately NOT overwritten: it records when this system first knew
+        # about the artifact, and a re-run that changes nothing else must not
+        # make every decision in the corpus look newly taken.
         with self._cursor() as cur:
             cur.executemany(self._ph(
                 """
@@ -446,8 +492,45 @@ class IngestStore:
                      owner, due, rationale, quote, speakers, start_time, end_time,
                      mentions, superseded_by, created_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, id) DO UPDATE SET
+                    transcript_id = excluded.transcript_id,
+                    chunk_index = excluded.chunk_index,
+                    kind = excluded.kind,
+                    statement = excluded.statement,
+                    owner = excluded.owner,
+                    due = excluded.due,
+                    rationale = excluded.rationale,
+                    quote = excluded.quote,
+                    speakers = excluded.speakers,
+                    start_time = excluded.start_time,
+                    end_time = excluded.end_time,
+                    mentions = excluded.mentions,
+                    superseded_by = excluded.superseded_by
                 """), rows)
         return len(rows)
+
+    def delete_artifacts(self, ids: Sequence[str]) -> int:
+        """Remove artifacts by id. Idempotent: an absent id is not an error."""
+        if not ids:
+            return 0
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.executemany(self._ph(
+                "DELETE FROM meeting_artifacts WHERE workspace_id = ? AND id = ?"),
+                [(self.workspace, aid) for aid in ids])
+        return len(ids)
+
+    def delete_chunks(self, transcript_id: str, indexes: Sequence[int]) -> int:
+        """Remove chunks by index. Idempotent: an absent index is not an error."""
+        if not indexes:
+            return 0
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.executemany(self._ph(
+                "DELETE FROM transcript_chunks WHERE workspace_id = ? "
+                "AND transcript_id = ? AND idx = ?"),
+                [(self.workspace, transcript_id, int(i)) for i in indexes])
+        return len(indexes)
 
     def get_artifacts(self, kind: str | None = None, owner: str | None = None,
                       transcript_id: str | None = None,

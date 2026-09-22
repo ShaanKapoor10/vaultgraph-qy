@@ -204,6 +204,12 @@ insert           |  update                |  DELETE
 - Deleting a transcript has two shapes, both from cocoindex. **Abandon** (default) keeps
   the notes and releases the claim — deleting a transcript deletes the SOURCE, and
   nothing can recompute them afterwards. **Destroy** (`?purge_notes=true`) takes them.
+- **`clear_derived` is no longer on the re-ingestion path.** Deleting every chunk and
+  artifact and rewriting them is not a reconciliation: it leaves a hole for as long as
+  the run takes, and an interrupted run ended with *nothing* rather than with the older
+  version. All three derived kinds — notes, chunks, artifacts — now reconcile, so
+  `save_chunk` and `save_artifacts` are upserts (ownership requires idempotent actions).
+  The method is kept for a deliberate wipe.
 
 Losing the ledger is not losing data, it is **losing cleanup**: an empty ledger means
 "nothing known to have been written", so it is DERIVED, never migrated, and lives beside
