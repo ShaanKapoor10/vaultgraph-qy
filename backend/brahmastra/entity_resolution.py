@@ -33,7 +33,7 @@ os.environ.setdefault("TRANSFORMERS_NO_ADVISORY_WARNINGS", "1")
 for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
     logging.getLogger(_noisy).setLevel(logging.ERROR)
 
-from brahmastra import db
+from brahmastra import db, entity_confirm
 
 # ---------------------------------------------------------------------------
 # Thresholds
@@ -464,6 +464,30 @@ def run_resolution() -> dict[str, Any]:
             refused.add((a, b))
             continue
         embedding_pairs[(a, b)] = sim
+    # OPT-IN second opinion, off by default. See entity_confirm.py for the
+    # four-run measurement that kept it off: it reliably prevents two wrong
+    # merges here and reliably costs one or two right ones, and the ones it
+    # costs change between runs at temperature 0.
+    #
+    # Only the EMBEDDING candidates are put to it. The heuristic ones -- exact
+    # match after normalisation, token subset, acronym -- are precise by
+    # construction, and paying a model to re-confirm "pipeline.py" against
+    # "pipeline.py" would be spending the budget where there is no doubt.
+    #
+    # A pair nobody answered for keeps the behaviour it had before the judge
+    # existed. An outage must not silently change the shape of the graph.
+    judged = {"asked": 0, "refused": 0, "unanswered": 0}
+    if embedding_pairs and entity_confirm.enabled():
+        candidates = list(embedding_pairs)
+        verdicts, unanswered = entity_confirm.confirm(candidates)
+        judged["asked"] = len(candidates)
+        judged["unanswered"] = len(unanswered)
+        for pair, same in verdicts.items():
+            if not same:
+                embedding_pairs.pop(pair, None)
+                refused.add(pair)
+                judged["refused"] += 1
+
     embedding_used = bool(embedding_pairs)
     for (a, b), sim in embedding_pairs.items():
         uf.union(a, b)
@@ -490,6 +514,7 @@ def run_resolution() -> dict[str, Any]:
         "mentions": len(mentions),
         "merge_edges": len(merge_edges),
         "refused_merges": len(refused),
+        "judged": judged,
         "embedding_used": embedding_used,
         "details": {
             "clusters": clusters,

@@ -33,6 +33,33 @@ in pairs and feeds them to a Union-Find. Pairs are also batched -- eight
 verdicts per call -- because the corpus produces ~143 candidate pairs and the
 tier that runs this counts requests.
 
+MEASURED, AND NOT ADOPTED -- IT IS OFF BY DEFAULT.
+
+Four runs against 21 labelled pairs from the live graph, judging only what the
+deterministic guards in entity_resolution.py leave undecided:
+
+    true merges kept       14-15 of 16
+    false merges refused    3-4 of 5
+
+Read carefully, that is not a win. Two of the five "false" pairs it lets
+through every single time -- "GraphRAG"/"Microsoft GraphRAG" and
+"vaultgraph-qy repository"/"...repository root" -- are pairs where my own
+label is arguable, so the honest count is that it reliably prevents TWO wrong
+merges ("Neo4j Aura"/"Neo4j Aura Free", "PageRank"/"PageRank results") and
+reliably costs ONE OR TWO right ones.
+
+And the ones it costs CHANGE BETWEEN RUNS at temperature 0 -- extract.ts in
+one run, Neo4j Aura backend in the next, backend-adapter.ts in the third. That
+is the part that decides it. A resolver whose clusters differ run to run makes
+the graph churn for no reason, and the deterministic guards next door get the
+same class of merge right for free and get it right every time.
+
+WHAT WOULD CHANGE THE ANSWER, in order of promise: a larger model (this was
+measured on gpt-oss-120b, which is the small thing the free tier offers);
+asking only about pairs in the ambiguous similarity band rather than all of
+them; and giving the judge the SENTENCES the two names appeared in, which is
+the one piece of evidence a human uses here and this prompt withholds.
+
 THE REMAINING WEAKNESS, stated rather than hidden: Union-Find is transitive.
 If A~B and B~C are both confirmed, A and C merge without ever being asked
 about. Confirming every edge makes that far less likely than it was; it does
@@ -106,13 +133,14 @@ _SCHEMA: dict[str, Any] = {
 
 def enabled() -> bool:
     """
-    On unless switched off. ENTITY_CONFIRM=0 restores embedding-only merging.
+    OFF unless asked for. ENTITY_CONFIRM=1 turns the judge on.
 
-    Kept switchable because this is the one part of resolution that costs
-    model calls, and somebody re-running a pipeline purely to rebuild a graph
-    should be able to say no.
+    Off by default because the measurement did not earn it -- see MEASURED,
+    AND NOT ADOPTED in the module docstring. Opt-in rather than deleted,
+    because the same code on a larger model is the obvious next thing to try
+    and the harness for judging it already exists.
     """
-    return os.environ.get("ENTITY_CONFIRM", "").strip() != "0"
+    return os.environ.get("ENTITY_CONFIRM", "").strip() == "1"
 
 
 def available() -> bool:
@@ -134,13 +162,24 @@ def _render(pairs: list[tuple[str, str]]) -> str:
     return "\n".join(lines)
 
 
+class Unanswered(Exception):
+    """The model never gave a verdict. NOT the same as a verdict of `no`."""
+
+
 def _ask(pairs: list[tuple[str, str]]) -> dict[int, bool]:
     """
-    One call. Returns {pair_number: same}, possibly partial. Never raises.
+    One call. Returns {pair_number: same}. Raises Unanswered if the model
+    could not be reached or its reply could not be read.
 
-    A pair the model did not answer about is simply absent, and the caller
-    treats absence as "not confirmed" -- so a truncated or malformed reply
-    costs recall and can never invent a merge.
+    THE DISTINCTION IS THE WHOLE POINT, and getting it wrong wasted a
+    measurement. An earlier version swallowed every exception and returned an
+    empty dict, which the caller read as "not confirmed" -- so when Groq's
+    DAILY quota ran out mid-run, a whole batch came back refused and the
+    numbers looked like a model being cautious. The first eight pairs of a
+    sixteen-pair probe were "rejected"; they had simply never been asked.
+
+    A cache that cannot be reached degrades to paying again. A JUDGE that
+    cannot be reached must not silently return a verdict.
     """
     from brahmastra import memo
     from brahmastra.llm import active_model, chat
@@ -157,46 +196,60 @@ def _ask(pairs: list[tuple[str, str]]) -> dict[int, bool]:
     if raw is None:
         try:
             raw = chat(SYSTEM_PROMPT, user, json_schema=_SCHEMA,
-                       temperature=0.0, max_tokens=800)
-        except Exception:
-            return {}
+                       temperature=0.0, max_tokens=1200)
+        except Exception as exc:
+            raise Unanswered(f"{type(exc).__name__}: {exc}"[:200]) from exc
         memo.save(key, raw, VARIANT)
 
     try:
         payload = json.loads(raw)
-    except Exception:
-        return {}
+    except Exception as exc:
+        raise Unanswered(f"unreadable reply: {exc}"[:200]) from exc
 
     out: dict[int, bool] = {}
     for verdict in payload.get("verdicts") or []:
         try:
             number = int(verdict["pair"])
             # Only verdicts about pairs we actually asked about. A model that
-            # invents a pair 9 in a batch of 8 must not merge anything.
+            # invents a pair 9 in a batch of 8 must not decide anything.
             if 1 <= number <= len(pairs):
                 out[number] = bool(verdict["same"])
         except Exception:
             continue
+    if not out:
+        raise Unanswered("reply contained no usable verdicts")
     return out
 
 
-def confirm(pairs: Iterable[tuple[str, str]]) -> dict[tuple[str, str], bool]:
+def confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
+        dict[tuple[str, str], bool], list[tuple[str, str]]]:
     """
-    Which of these candidate merges a model will vouch for.
+    Verdicts, and the pairs nobody managed to answer for.
 
-    Returns a verdict for every pair given. Absent, unparseable or unreachable
-    answers all come back False, because this function's job is to be the
-    thing that must SAY YES before two entities become one.
+    Returns (verdicts, unanswered). A pair in `unanswered` has NO verdict: the
+    caller decides what to do about it, and the only safe default is to leave
+    the pipeline behaving as it did before this judge existed. Silently
+    refusing them would turn an outage into a change in the graph.
     """
     todo = list(pairs)
-    verdicts: dict[tuple[str, str], bool] = {pair: False for pair in todo}
-    if not todo or not available():
-        return verdicts
+    verdicts: dict[tuple[str, str], bool] = {}
+    unanswered: list[tuple[str, str]] = []
+    if not todo:
+        return verdicts, unanswered
+    if not available():
+        return verdicts, todo
 
     for start in range(0, len(todo), BATCH):
         batch = todo[start:start + BATCH]
-        answers = _ask(batch)
+        try:
+            answers = _ask(batch)
+        except Unanswered:
+            unanswered.extend(batch)
+            continue
         for offset, pair in enumerate(batch, start=1):
-            if answers.get(offset):
-                verdicts[pair] = True
-    return verdicts
+            if offset in answers:
+                verdicts[pair] = answers[offset]
+            else:
+                # Asked, and the model skipped it. Not a verdict either.
+                unanswered.append(pair)
+    return verdicts, unanswered
