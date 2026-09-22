@@ -112,3 +112,89 @@ def test_a_proper_noun_still_beats_a_longer_lowercase_one():
 
 def test_a_cluster_with_no_proper_noun_still_gets_a_name():
     assert _pick_canonical(["cache", "the reply cache"]) == "the reply cache"
+
+
+# -- PINNED: a name that already won keeps winning ---------------------------
+#
+# MEASURED by simulating corpus growth on the live graph -- cluster 70% of the
+# notes, take that run's canonical map as `existing`, then cluster all of them:
+#
+#     renames after growth, heuristic alone   9 of 727 mentions
+#     renames after growth, pinned            0
+#
+# Pinning changed the answer in 8 of 676 clusters, and kept the better name in
+# every one. The pairs below are those eight, verbatim.
+
+MEASURED_WINS = [
+    ("Shaan Kapoor", "ShaanKapoor10"),          # a person renamed to a handle
+    ("CocoIndex", "Cocoindex"),                 # correct casing, lost
+    ("2026-08-12", "2026-08-18"),               # a DIFFERENT DATE
+    ("embedding model", "embeddings.get_model"),
+    ("decision", "decisions"),
+    ("action_item", "action items"),
+    ("SQLite deployment", "SQLite deployments"),
+    ("function run_pipeline", "run_pipeline function"),
+]
+
+
+def test_the_heuristic_alone_renames_all_eight():
+    """The premise. Without pinning every one of these flips on corpus growth."""
+    for established, newcomer in MEASURED_WINS:
+        assert _pick_canonical([established, newcomer]) == newcomer
+
+
+def test_pinning_keeps_every_one_of_them():
+    for established, newcomer in MEASURED_WINS:
+        assert _pick_canonical([established, newcomer], {established}) == established
+
+
+def test_a_fuller_form_of_the_same_name_still_wins():
+    """
+    The one escape hatch, and the case pinning alone would get wrong: a cluster
+    first seen as "Sarah" that later gains "Sarah Chen" should take the fuller
+    name. A STRICT word-superset only -- reasoned rather than observed, because
+    corpus growth did not produce one, and deliberately narrow enough that it
+    promotes none of the eight above.
+    """
+    assert _pick_canonical(["Sarah", "Sarah Chen"], {"Sarah"}) == "Sarah Chen"
+    assert _pick_canonical(["pipeline.py", "file pipeline.py"],
+                           {"pipeline.py"}) == "file pipeline.py"
+
+
+def test_a_respelling_is_not_a_fuller_form():
+    """Plurals, casing and reorderings are the same name written differently --
+    which is exactly what pinning exists to stop flapping between."""
+    assert _pick_canonical(["decision", "decisions"], {"decision"}) == "decision"
+    assert _pick_canonical(["CocoIndex", "cocoindex", "Cocoindex"],
+                           {"CocoIndex"}) == "CocoIndex"
+    assert _pick_canonical(["function run_pipeline", "run_pipeline function"],
+                           {"function run_pipeline"}) == "function run_pipeline"
+
+
+def test_a_cluster_with_no_established_name_falls_back_to_the_heuristic():
+    assert _pick_canonical(["Sarah", "Sarah Chen"], {"somebody else"}) == "Sarah Chen"
+    assert _pick_canonical(["Sarah", "Sarah Chen"], set()) == "Sarah Chen"
+
+
+def test_pinning_is_still_deterministic():
+    """Two established names in one cluster is two entities merging. It never
+    happened while this was measured, so it falls back to the heuristic among
+    them -- but it must not fall back to luck."""
+    both = {"function _ask", "_ask function"}
+    a = _pick_canonical(["function _ask", "_ask function"], both)
+    b = _pick_canonical(["_ask function", "function _ask"], both)
+    assert a == b
+
+
+def test_it_can_be_switched_off(monkeypatch):
+    """
+    ENTITY_PINNED=0, which is also how a name frozen by mistake gets re-picked:
+    pinning reads the previous run's answer, so nothing else would ever let go
+    of it.
+    """
+    from brahmastra.entity_resolution import pinned_enabled
+
+    monkeypatch.setenv("ENTITY_PINNED", "0")
+    assert pinned_enabled() is False
+    assert _pick_canonical(["Shaan Kapoor", "ShaanKapoor10"],
+                           {"Shaan Kapoor"}) == "ShaanKapoor10"

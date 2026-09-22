@@ -426,9 +426,68 @@ Growing the corpus tells the same story: 70% of the notes then all of them left 
 consequence plainly — ids not derived from the data make every reprocessing run churn the
 target, deleting rows and re-inserting identical ones under new keys.
 
-Still open: corpus growth **renames** 11 of 716 mentions, and some are wrong
-(`Shaan Kapoor` → `ShaanKapoor10`, because it is longer and title-cased). That needs a
-PINNED existing-canonical policy, not a better tie-break.
+### A name that already won keeps winning (PINNED)
+The tie-break fixed *identical* runs. Corpus **growth** was a separate bug: the heuristic
+re-runs a popularity contest every time a cluster gains a member, and "longest
+title-cased" is a poor judge of which name a person means. Simulating growth on the live
+graph — cluster 70% of the notes, take that map as `existing`, then cluster all of them:
+
+| | renames |
+|---|---|
+| heuristic alone | 9 / 727 mentions |
+| **pinned** | **0** |
+
+Pinning changed the answer in 8 of 676 clusters and kept the better name in every one:
+
+```
+Shaan Kapoor      →  ShaanKapoor10      a person, renamed to a handle
+CocoIndex         →  Cocoindex          correct casing, lost
+2026-08-12        →  2026-08-18         a DIFFERENT DATE
+embedding model   →  embeddings.get_model
+decision          →  decisions
+```
+
+One escape hatch, deliberately narrow: a **strict word-superset** still wins, so a cluster
+first seen as `Sarah` that later gains `Sarah Chen` takes the fuller name. Plurals, casing
+and reorderings are not fuller forms — they are what pinning exists to stop flapping
+between. The eight are measured; the `Sarah Chen` case is reasoned, because growth did not
+produce one. `ENTITY_PINNED=0` turns it off, which is also how a name frozen by mistake
+gets re-picked.
+
+**What is NOT copied from cocoindex:** their PINNED also says *two existing canonicals
+never merge*. That rule does not survive the trip — here a lone mention is its own cluster
+and therefore trivially its own canonical, so 676 of 676 names were "existing" and the
+rule would refuse nearly every merge. The equivalent event (a cluster holding several
+former canonicals) occurred **0 times** in that growth, so it is reported as
+`absorbed_canonicals` rather than decided by an untested rule.
+
+### How this compares to cocoindex's resolver
+Different halves of the same problem, and we are ahead on one of them.
+
+| | cocoindex | Brahmastra |
+|---|---|---|
+| blocking | FAISS, `top_n=5`, distance ≤ 0.3 | all-pairs Jaro-Winkler **and** embeddings |
+| deciding | LLM pair-resolver, **required** | deterministic guards; LLM judge opt-in |
+| naming | the resolver picks (`CanonicalSide.NEW`) | heuristic + PINNED |
+| existing canonicals | PINNED / PREFERRED | PINNED |
+| structure | entity → candidates, sequential | all-pairs → Union-Find |
+
+**Where we are better.** Our guards removed 12 wrong merges on the live graph with 100%
+precision, every run; their shape *requires* a resolver, and our measured LLM judge was
+break-even and unstable at temperature 0. We also carry two signals — four of those 12
+came from Jaro-Winkler scoring `brahmastra_search_entities`/`brahmastra_search_notes` at
+0.951, which embeddings alone rank differently — and a negation rule, which nothing in
+their default prompt covers.
+
+**Where they are better, and what is still open here:**
+- **Union-Find is transitive.** A~B and B~C confirmed merges A~C *unasked*. Their
+  entity→candidates shape has no equivalent hole. This is the real remaining weakness.
+- **All-pairs is O(n²).** Fine at 925 mentions; 10k mentions is 50M comparisons. Blocking
+  is the fix when that day comes, not before.
+- **`entity_type` hints and `extra_guidance`** — "be conservative with personal names" is
+  exactly the `Shaan Kapoor` case, and our judge asks one generic question.
+- **Validate-and-re-prompt.** Theirs re-prompts with feedback (2 retries); ours validates
+  the pair number and gives up.
 
 ## Search & retrieval
 

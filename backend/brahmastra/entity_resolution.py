@@ -24,7 +24,7 @@ import hashlib
 import logging
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable
 
 # Quiet the noisy HF / transformers output ("unauthenticated requests to HF Hub",
 # "Loading weights 100%") emitted when the sentence-transformers model loads.
@@ -405,7 +405,42 @@ def cluster_id_for(mentions: Iterable[str]) -> str:
     return "c" + h.hexdigest()[:12]
 
 
-def _pick_canonical(mentions: list[str]) -> str:
+_WORD = re.compile(r"[A-Za-z0-9]+")
+
+
+def _words(name: str) -> set[str]:
+    return {w.lower() for w in _WORD.findall(name)}
+
+
+def _more_specific(existing: str, candidate: str) -> bool:
+    """
+    Is `candidate` the same name as `existing`, stated more fully?
+
+    True only for a STRICT word-superset: "Sarah" -> "Sarah Chen",
+    "pipeline.py" -> "file pipeline.py". Not for a respelling, a plural or a
+    reordering, all of which are the same name written differently and are
+    exactly what pinning exists to stop flapping between.
+
+    This is the one escape hatch in the PINNED policy, and it is narrow on
+    purpose. Checked against all eight clusters where pinning actually changed
+    the answer on the live corpus -- it promotes none of them -- while fixing
+    the case pinning alone gets wrong: a cluster first seen as "Sarah" that
+    later gains "Sarah Chen" should take the fuller name. The eight are
+    measured; this case is reasoned, because corpus growth did not produce one.
+    """
+    return _words(existing) < _words(candidate)
+
+
+def pinned_enabled() -> bool:
+    """
+    ON unless switched off. ENTITY_PINNED=0 goes back to naming by heuristic
+    alone, which is also how a name frozen by mistake gets re-picked.
+    """
+    return os.environ.get("ENTITY_PINNED", "").strip() != "0"
+
+
+def _pick_canonical(mentions: list[str],
+                    existing: Collection[str] = ()) -> str:
     """
     Pick the best canonical name from a cluster:
     - Prefer title-cased names (likely proper nouns).
@@ -426,7 +461,50 @@ def _pick_canonical(mentions: list[str]) -> str:
     the property that was missing -- there is no reason to prefer either
     spelling of "run_pipeline", and every reason to keep answering with the
     same one.
+
+    PINNED: A NAME THAT ALREADY WON KEEPS WINNING
+    ---------------------------------------------
+    `existing` is what the LAST run called things. A member that was already a
+    canonical name stays canonical, which is cocoindex's PINNED policy and the
+    half of entity resolution this system did not have.
+
+    Measured by simulating corpus growth on the live graph -- cluster 70% of
+    the notes, take that run's canonical map as `existing`, then cluster all of
+    them:
+
+        renames after growth, heuristic alone   9 of 727 mentions
+        renames after growth, pinned            0
+
+    The heuristic renames because it re-runs a popularity contest every time
+    the cluster gains a member, and "longest title-cased" is a poor judge of
+    which name a person means:
+
+        Shaan Kapoor      ->  ShaanKapoor10          a person, renamed to a handle
+        CocoIndex         ->  Cocoindex              correct casing, lost
+        2026-08-12        ->  2026-08-18             a DIFFERENT DATE
+        embedding model   ->  embeddings.get_model
+        decision          ->  decisions
+
+    Pinning kept the left-hand name in all eight clusters where it differed
+    from the heuristic, and produced no rename anywhere else.
+
+    WHAT IS NOT COPIED. cocoindex's PINNED also says two existing canonicals
+    never merge. That rule does not survive the trip: here a name is canonical
+    the moment it appears, because a lone mention is its own cluster, so
+    "never merge two existings" would refuse nearly every merge. The
+    equivalent case -- a cluster containing several former canonicals -- did
+    not occur once during that growth, so it falls back to the heuristic among
+    them rather than to a rule nothing has tested.
     """
+    if existing and pinned_enabled():
+        kept = [m for m in mentions if m in existing]
+        if kept:
+            held = max(kept, key=lambda m: (len(m), m))
+            fuller = [m for m in mentions if _more_specific(held, m)]
+            if not fuller:
+                return held
+            return max(fuller, key=lambda m: (len(m), m))
+
     titled = [m for m in mentions if m and m[0].isupper()]
     pool = titled if titled else mentions
     return max(pool, key=lambda m: (len(m), m))
@@ -554,10 +632,30 @@ def run_resolution() -> dict[str, Any]:
     # 4. Build cluster list
     components = uf.components()
     clusters: list[dict[str, Any]] = []
+    # WHAT THE LAST RUN CALLED THINGS. Read here rather than passed in,
+    # because `replace_canonical_map` below overwrites it -- so this is the
+    # only moment the previous answer still exists. An empty map (a first run,
+    # or a deliberate reset) means every name is new and the heuristic decides,
+    # which is also how a name frozen by mistake gets re-picked.
+    try:
+        established = frozenset(db.get_canonical_map().values())
+    except Exception:
+        established = frozenset()
+
+    renamed: list[dict[str, str]] = []
     for component in components:
+        canonical = _pick_canonical(component, established)
+        # A cluster holding more than one former canonical is two established
+        # entities being merged. It did not happen once while this was
+        # measured, so it is REPORTED rather than decided by an untested rule.
+        contested = sorted(m for m in component if m in established)
+        if len(contested) > 1:
+            renamed.append({"canonical": canonical,
+                            "absorbed": ", ".join(m for m in contested
+                                                  if m != canonical)})
         clusters.append({
             "cluster_id": cluster_id_for(component),
-            "canonical_name": _pick_canonical(component),
+            "canonical_name": canonical,
             "mentions": sorted(component),
         })
     # Sorted so the LIST is stable too, not only the ids in it. Set iteration
@@ -576,6 +674,11 @@ def run_resolution() -> dict[str, Any]:
         "merge_edges": len(merge_edges),
         "refused_merges": len(refused),
         "judged": judged,
+        "pinned": pinned_enabled() and bool(established),
+        # Established names that absorbed another established name. Reported
+        # because a merge of two things the graph already had names for is the
+        # one event somebody should actually look at.
+        "absorbed_canonicals": renamed,
         "embedding_used": embedding_used,
         "details": {
             "clusters": clusters,
