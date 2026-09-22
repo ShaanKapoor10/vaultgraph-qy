@@ -486,6 +486,80 @@ def sync(
     return decided
 
 
+class Streaming:
+    """
+    A sync for a producer that writes as it goes.
+
+    `sync` suits a caller that can name everything it declares before writing
+    any of it. Ingestion cannot: each note costs an LLM call, and a run that
+    dies at chunk 35 of 40 must keep the 35 notes it already has. Holding them
+    all until the end to reconcile in one shot would trade a real failure mode
+    for a tidier API.
+
+    So the phases are the same three, taken one key at a time:
+
+        begin(key, fp)  records the intent, and answers whether a write is
+                        needed at all -- False means the ledger can prove the
+                        target already holds exactly this.
+        commit(key)     the write landed; collapse the key to one state.
+        finish(delete)  everything this owner used to have and did not declare
+                        this time is an orphan. Delete it.
+
+    `finish` MUST be reached for the deletions to happen, which is the one
+    thing this shape gives up next to `sync`: a run that dies mid-document
+    leaves last run's extra rows in place for the next run to remove. They were
+    there before, so nothing is made worse, and the alternative -- deleting
+    them up front -- is the delete-all-then-rewrite this module exists to end.
+    """
+
+    def __init__(self, ledger: Ledger, owner_kind: str, owner_id: str,
+                 target_kind: str, force: bool = False) -> None:
+        self.ledger = ledger
+        self.owner_kind = owner_kind
+        self.owner_id = owner_id
+        self.target_kind = target_kind
+        self.force = force
+        # Read ONCE. Every answer below comes from this snapshot, so the
+        # decisions a run makes cannot drift under it while the run is going.
+        self.stored = ledger.read(owner_kind, owner_id, target_kind)
+        self.declared: list[Declared] = []
+        self.written: list[str] = []
+        self.unchanged: list[str] = []
+
+    def begin(self, key: str, fp: str, payload: Any = None) -> bool:
+        """Declare a row. True if it must be written, False if provably current."""
+        self.declared.append(Declared(key, fp, payload))
+        record = self.stored.get(key)
+        if (not self.force and record is not None
+                and record.possible == frozenset({fp})):
+            self.unchanged.append(key)
+            return False
+        self.ledger.intend(self.owner_kind, self.owner_id, self.target_kind,
+                           [(key, fp)])
+        return True
+
+    def commit(self, key: str) -> None:
+        """The write landed."""
+        self.written.append(key)
+        self.ledger.confirm(self.owner_kind, self.owner_id, self.target_kind,
+                            [key], [])
+
+    def finish(self, delete: Callable[[Sequence[str]], None]) -> Plan:
+        """Remove what this owner no longer declares, and report the whole run."""
+        orphans = plan(self.declared, self.stored).deletes
+        if orphans:
+            self.ledger.intend(self.owner_kind, self.owner_id, self.target_kind,
+                               [(key, GONE) for key in orphans])
+            delete(orphans)
+            self.ledger.confirm(self.owner_kind, self.owner_id,
+                                self.target_kind, [], orphans)
+        return Plan(
+            upserts=[d for d in self.declared if d.key in set(self.written)],
+            deletes=orphans,
+            unchanged=list(self.unchanged),
+        )
+
+
 def drop_owner(
     ledger: Ledger,
     owner_kind: str,

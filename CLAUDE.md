@@ -171,6 +171,44 @@ and `CompositeStore` raises `CapabilityDowngrade` at construction rather than de
 Use the `pgvector/pgvector` image; compose does. Without it the store still holds notes
 but reports itself lexical-only, and the composite refuses it.
 
+### ⚠️ Derived data needs an OWNER, or it becomes an orphan
+A derived row that no source item claims is a row nothing can delete. Measured on the
+real path: a 40-turn transcript segments into 19 chunks and writes 19 notes; edited down
+to 4 turns and re-ingested it writes 1 — and **18 notes stayed in the graph**, still
+holding triples, still answering searches, sourced from sentences that no longer exist.
+Chunks and artifacts shrank correctly because `clear_derived` deletes from the two tables
+beside it; the notes live in another store reached through another module, and nothing
+recorded that the transcript owned them.
+
+`backend/brahmastra/ownership.py` is the fix, and it is general — a transcript today, a
+code file or a dropped PDF next. A ledger maps `(owner_kind, owner_id, target_kind,
+target_key) -> fingerprint`, and a sync applies the same three columns to everything:
+
+```
+first declared   |  declared differently  |  no longer declared
+insert           |  update                |  DELETE
+```
+
+- `plan()` is **pure** — declared vs remembered, no I/O — so every edge case is testable
+  without a database. That split is deliberate (cocoindex requires the same of
+  `reconcile()`).
+- **Intent is recorded before the write**, so a key an interrupted run left in an unknown
+  state has TWO possible fingerprints and is redone rather than trusted. Nothing is ever
+  rolled back; runs converge forwards. Write and delete callbacks **must be idempotent**.
+- **Absence is a possible state.** A row with a `pending` fingerprint and no `confirmed`
+  one is a first write that never landed. Counting only the fingerprints present made it
+  look unchanged — losing exactly the case the two-phase protocol exists for.
+- Re-ingesting an **unchanged** transcript now writes nothing, so it does not re-mark
+  notes pending and does not buy a fresh round of extraction. `force=True` rebuilds
+  anyway: the ledger knows what *this system* last wrote, not what the store holds.
+- Deleting a transcript has two shapes, both from cocoindex. **Abandon** (default) keeps
+  the notes and releases the claim — deleting a transcript deletes the SOURCE, and
+  nothing can recompute them afterwards. **Destroy** (`?purge_notes=true`) takes them.
+
+Losing the ledger is not losing data, it is **losing cleanup**: an empty ledger means
+"nothing known to have been written", so it is DERIVED, never migrated, and lives beside
+the notes so the two are lost together.
+
 ### Migrations
 ```
 python -m brahmastra.migrate_to_postgres --apply   # notes: sqlite -> postgres

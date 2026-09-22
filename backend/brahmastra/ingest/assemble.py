@@ -28,12 +28,25 @@ anticipation; feeding meetings through this path produces exactly that
 evidence, and `decided`/`attended` can then be added because the data asked
 for them rather than because it seemed likely.
 
-RE-INGESTION REPLACES
----------------------
-Derived rows are cleared first and note ids are deterministic
-(`<transcript>-c<n>`), so running a transcript twice corrects it instead of
-doubling it -- the same contract extraction has when it deletes a note's
-triples before re-inserting them.
+RE-INGESTION REPLACES -- AND, NOW, REMOVES
+------------------------------------------
+Note ids are deterministic (`<transcript>-c<n>`), so running a transcript twice
+corrects each note instead of doubling it. That was only ever half the
+contract, and the missing half was measured:
+
+    a 40-turn transcript    -> 19 chunks, 19 notes
+    edited down to 4 turns  -> 1 chunk, 1 note, and 19 notes still in the graph
+
+Chunks and artifacts shrank correctly, because `clear_derived` deletes from the
+two tables beside it. The notes live in another store, reached through another
+module, and nothing recorded that this transcript OWNED them -- so eighteen
+notes stayed, holding triples, answering searches, sourced from sentences that
+no longer exist anywhere.
+
+Every note this run writes is now DECLARED to `brahmastra.ownership`, which
+knows what the last run declared and deletes the difference. Same rule for a
+transcript that is deleted outright. See that module for why the ledger
+records an intent before acting.
 """
 
 from __future__ import annotations
@@ -51,6 +64,7 @@ from brahmastra.ingest.comprehend import (
 from brahmastra.ingest.consolidate import consolidate
 from brahmastra.ingest.segment import Chunk, segment
 from brahmastra.ingest.store import IngestStore, get_ingest_store
+from brahmastra import ownership
 
 # Headings used in the generated note. Plain words on purpose: the note is read
 # by an extraction prompt, and prose beats a data structure there.
@@ -70,6 +84,15 @@ _SECTIONS = [
 # Defaulting an UNKNOWN model to `focused` therefore risks calls rather than
 # correctness, which is the right way round for a guess to be wrong.
 SMALL_MODEL_PARAMS_B = 30.0
+
+# What a transcript's notes are marked as, and part of their fingerprint --
+# retrieval weights a paragraph a model distilled from speech differently from
+# prose a person wrote, so changing it changes the note and must rewrite it.
+NOTE_SOURCE = "transcript"
+
+# Who owns the notes, in the ledger. A second kind of source -- a code file, a
+# dropped PDF -- gets its own owner_kind and the same three columns.
+OWNER_KIND = "transcript"
 
 _MODEL_SIZE = re.compile(r"(\d+(?:\.\d+)?)\s*b\b", re.IGNORECASE)
 
@@ -150,6 +173,79 @@ def comprehension_strategy():
     if size is not None and size < SMALL_MODEL_PARAMS_B:
         return comprehend_chunk
     return comprehend_chunk_focused
+
+
+def drop_transcript(transcript_id: str, store: IngestStore | None = None,
+                    purge_notes: bool = False) -> dict[str, Any]:
+    """
+    The transcript is gone. Settle what it owned, one way or the other.
+
+    cocoindex names exactly these two shapes for a container that is no longer
+    declared, and the distinction is not a preference -- it is about who can
+    recreate the contents:
+
+      DESTROY (`purge_notes=True`)  the notes go too. Coherent with every other
+        path here: shortening a transcript already deletes the notes it stopped
+        declaring, so deleting the whole thing should not be the one case that
+        leaves nineteen behind.
+
+      ABANDON (the default)  the notes stay, and this system RELEASES its claim
+        on them. They become ordinary notes that nothing will ever rewrite or
+        remove. The default, because deleting a transcript deletes the SOURCE:
+        unlike a re-ingestion, nothing can recompute those notes afterwards,
+        and CLAUDE.md's first rule is that source data is not owed the same
+        treatment as derived data.
+
+    Releasing the claim is not optional in either case. A ledger full of
+    records naming owners that no longer exist is a slow leak, and worse, it is
+    a lie about what the system is tracking.
+    """
+    from brahmastra import db
+
+    store = store or get_ingest_store()
+    ledger = ownership.Ledger(workspace=store.workspace)
+
+    removed: dict[str, int] = {}
+    if purge_notes:
+        def remove(keys):
+            for note_id in keys:
+                db.delete_note(note_id)
+
+        removed = ownership.drop_owner(ledger, OWNER_KIND, transcript_id,
+                                       {"note": remove})
+    ledger.forget_owner(OWNER_KIND, transcript_id)
+    store.delete_transcript(transcript_id)
+    return {"deleted": transcript_id, "notes_removed": removed.get("note", 0),
+            "notes_kept": not purge_notes}
+
+
+def _settle(notes: ownership.Streaming, report: dict[str, Any]) -> int:
+    """
+    Delete the notes this transcript owns and no longer declares.
+
+    `db.delete_note` takes the note's triples with it, which is the whole
+    point: an orphan note is not merely an extra row, it is a set of entities
+    and relations asserting things about sentences that were deleted.
+
+    Reported, never raised, and never SILENT. One note that will not delete
+    must not fail a run that has already comprehended forty chunks -- and
+    leaving it costs nothing, because the ledger still says this transcript
+    owns it and the next run tries again. But a failure that nobody can see is
+    how the quota outage turned into four invalid measurements, so it lands in
+    `report["errors"]` rather than being swallowed into a zero.
+    """
+    from brahmastra import db
+
+    def remove(keys):
+        for note_id in keys:
+            db.delete_note(note_id)
+
+    try:
+        return len(notes.finish(remove).deletes)
+    except Exception as exc:
+        report["errors"].append(
+            {"stage": "ownership", "error": f"{type(exc).__name__}: {exc}"[:300]})
+        return 0
 
 
 def note_id_for(transcript_id: str, chunk_index: int) -> str:
@@ -234,9 +330,14 @@ def process_transcript(
     store: IngestStore | None = None,
     workspace: str | None = None,
     on_progress: Callable[[dict[str, Any]], None] | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """
     Segment, comprehend and store one transcript.
+
+    `force` rewrites every note even where the ledger can prove it is already
+    current. The ledger only knows what THIS system last wrote, so a note
+    deleted by hand looks unchanged to it; this is the way to say so.
 
     Reports rather than raises for anything a single chunk can cause. A
     transcript is many LLM calls on a rate-limited tier, and one failed chunk
@@ -261,7 +362,7 @@ def process_transcript(
     target = workspace or (store.workspace if store is not None else None)
     token = set_request_workspace(target) if target else None
     try:
-        return _process(transcript_id, store, target, on_progress)
+        return _process(transcript_id, store, target, on_progress, force)
     finally:
         if token is not None:
             reset_request_workspace(token)
@@ -272,6 +373,7 @@ def _process(
     store: IngestStore | None,
     workspace: str | None,
     on_progress: Callable[[dict[str, Any]], None] | None,
+    force: bool = False,
 ) -> dict[str, Any]:
     store = store or get_ingest_store(workspace)
     started = datetime.now(timezone.utc).isoformat()
@@ -289,6 +391,12 @@ def _process(
         "comprehended": 0,
         "artifacts": 0,
         "notes": 0,
+        # Split out because "19 notes" hid the whole bug. `notes` is what this
+        # run declares, `notes_written` what it actually had to store, and
+        # `notes_removed` what the last run left behind -- which was
+        # unreportable before anything recorded ownership.
+        "notes_written": 0,
+        "notes_removed": 0,
         "rejected": [],
         "degraded": [],
         "errors": [],
@@ -298,11 +406,24 @@ def _process(
     # A second run corrects the first rather than doubling it.
     store.clear_derived(transcript_id)
 
+    # What this transcript owns in the graph. Opened before the first note is
+    # written and settled after the last, so the run can answer "and what did
+    # the PREVIOUS one leave here?"
+    notes = ownership.Streaming(
+        ownership.Ledger(workspace=store.workspace),
+        OWNER_KIND, transcript_id, "note", force=force,
+    )
+
     chunks = segment(record["content"])
     report["chunks"] = len(chunks)
     store.set_transcript_status(transcript_id, "processing", chunk_count=len(chunks))
 
     if not chunks:
+        # A transcript emptied to nothing still OWNS whatever the last run
+        # left in the graph, and this is the most extreme version of the bug
+        # that made this module necessary: declaring no notes must delete every
+        # note, not quietly leave the whole document behind.
+        report["notes_removed"] = _settle(notes, report)
         store.set_transcript_status(transcript_id, "done", chunk_count=0)
         report["status"] = "ok"
         report["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -356,15 +477,24 @@ def _process(
         if body:
             note_id = note_id_for(transcript_id, chunk.index)
             part = f" — part {chunk.index + 1}" if len(chunks) > 1 else ""
-            db.upsert_note(
-                note_id,
-                f"{record['title']}{part}",
-                body,
-                mark_pending=True,
-                # Recorded so retrieval can weight it later: a paragraph a
-                # model distilled from speech is not prose a person wrote.
-                source="transcript",
-            )
+            title = f"{record['title']}{part}"
+            # Declared first, written second. `begin` records the intent and
+            # answers whether the write is needed at all: a chunk whose note
+            # is byte-for-byte what the ledger says is already stored costs
+            # nothing, and -- more to the point -- is NOT re-marked pending, so
+            # an unchanged chunk does not buy another round of extraction.
+            if notes.begin(note_id, ownership.fingerprint(title, body, NOTE_SOURCE)):
+                db.upsert_note(
+                    note_id,
+                    title,
+                    body,
+                    mark_pending=True,
+                    # Recorded so retrieval can weight it later: a paragraph a
+                    # model distilled from speech is not prose a person wrote.
+                    source=NOTE_SOURCE,
+                )
+                notes.commit(note_id)
+                report["notes_written"] += 1
             report["notes"] += 1
 
         # A chunk where one comprehension pass failed is NOT "done", and
@@ -414,19 +544,29 @@ def _process(
     # overlap deliberately: two notes asserting the same fact is ordinary
     # provenance in a knowledge graph, whereas three rows in a decisions table
     # is a false claim about how many decisions were taken.
+    # Everything this transcript used to own and did not declare this time.
+    # After the loop, because until the last chunk is comprehended the run does
+    # not yet know what it declares -- and before the status is decided, so a
+    # `partial` run still reports what it removed.
+    report["notes_removed"] = _settle(notes, report)
+
     reduced = consolidate(pending_artifacts)
     report["artifacts"] = store.save_artifacts(transcript_id, reduced["artifacts"])
     report["merged"] = reduced["merged"]
     report["superseded"] = reduced["superseded"]
     report["revisions"] = reduced["notes"]
 
-    failed = len(report["errors"])
+    # Counted from the CHUNK failures only. `errors` also carries an ownership
+    # failure now, and a one-chunk transcript whose cleanup failed would
+    # otherwise satisfy `failed == len(chunks)` and be declared a total loss.
+    chunk_errors = [e for e in report["errors"] if "chunk" in e]
+    failed = len(chunk_errors)
     degraded = len(report["degraded"])
     if failed == len(chunks):
         report["status"] = "error"
         store.set_transcript_status(
             transcript_id, "error",
-            error=f"every chunk failed; first: {report['errors'][0]['error']}"[:400],
+            error=f"every chunk failed; first: {chunk_errors[0]['error']}"[:400],
         )
     elif failed or degraded:
         report["status"] = "partial"

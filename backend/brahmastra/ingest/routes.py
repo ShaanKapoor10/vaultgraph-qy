@@ -18,6 +18,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from brahmastra.ingest import assemble
 from brahmastra.ingest.assemble import process_transcript
 from brahmastra.ingest.store import Transcript, get_ingest_store
 from brahmastra.workspace import current_workspace
@@ -184,14 +185,22 @@ async def reprocess(transcript_id: str,
 
 
 @router.delete("/transcripts/{transcript_id}")
-async def delete_transcript(transcript_id: str) -> dict[str, Any]:
-    """Removes the transcript and everything derived from it. Notes are left
-    alone: they are in the graph now and deleting them is a separate decision."""
+async def delete_transcript(transcript_id: str,
+                            purge_notes: bool = False) -> dict[str, Any]:
+    """
+    Removes the transcript, its chunks and its artifacts.
+
+    `purge_notes=true` takes the generated notes and their triples with it.
+    The default leaves them and RELEASES the claim on them -- they become
+    ordinary notes nothing will rewrite or remove. Deleting a transcript
+    deletes the source, so unlike a re-ingestion nothing can recompute them
+    afterwards; see `assemble.drop_transcript` for the two shapes.
+    """
     store = get_ingest_store()
     if store.get_transcript(transcript_id) is None:
         raise HTTPException(status_code=404, detail=f"no transcript {transcript_id!r}")
-    store.delete_transcript(transcript_id)
-    return {"deleted": transcript_id}
+    return assemble.drop_transcript(transcript_id, store=store,
+                                    purge_notes=purge_notes)
 
 
 @router.get("/artifacts")
