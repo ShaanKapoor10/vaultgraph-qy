@@ -411,6 +411,163 @@ class _UnionFind:
 
 
 # ---------------------------------------------------------------------------
+# Candidate pairs
+# ---------------------------------------------------------------------------
+
+# Below this many mentions, every pair is compared and nothing is blocked.
+#
+# Blocking trades a little recall risk for a lot of speed, and at this corpus
+# size there is no speed to buy: 1007 mentions is 506,521 pairs and 5.07
+# seconds. The cost is quadratic, so the picture changes fast --
+#
+#       1,000 mentions        506,521 pairs         5s
+#       5,000               12,497,500           125s
+#      10,000               49,995,000           501s
+#      50,000            1,249,975,000        12,517s
+#
+# -- but paying 5 seconds to keep the simple, obviously-complete path is the
+# right trade until it is not. Above the cut the blocker runs, and
+# `test_entity_blocking.py` pins that it produces the SAME merges either way.
+BLOCKING_MIN_MENTIONS = 2000
+
+
+def _jaro_floor() -> float:
+    """
+    The plain-Jaro score a pair must reach to stand any chance of passing
+    JARO_THRESHOLD after the Winkler prefix bonus.
+
+    Winkler adds l*p*(1-J) with l at most 4 and p = 0.1, so the most it can
+    ever add is 0.4*(1-J):  JW <= 0.6J + 0.4. Turning that round, JW >= T is
+    impossible unless J >= (T - 0.4) / 0.6.
+    """
+    return (JARO_THRESHOLD - 0.4) / 0.6
+
+
+def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
+    """
+    Every pair `_heuristic_sim` could possibly score above the threshold.
+
+    A FILTER, NOT A GUESS. `_heuristic_sim` has four ways to match and this
+    covers all four, because a blocker that covers three silently loses a
+    class of merge -- and a lost merge is invisible, which is the failure mode
+    this file spends most of its length guarding against.
+
+        exact          identical once normalised   -> same normalised form
+        token_subset   one token set inside the
+                       other, sharing at least half -> share a token
+        acronym        initials of the other        -> share the initials key
+        jaro_winkler   >= JARO_THRESHOLD            -> the bound below
+
+    THE JARO BOUND, which is the only one that needs arithmetic. Jaro is
+
+        J = (1/3) * (m/|a| + m/|b| + (m-t)/m)
+
+    where m is matched characters. The last term is at most 1, so
+
+        J <= (1/3) * (m/|a| + m/|b| + 1)
+
+    and therefore J >= x forces m >= (3x - 1) / (1/|a| + 1/|b|). A character
+    can only be matched against an equal character, so m is at most the size of
+    the two strings' character MULTISET INTERSECTION -- computable without
+    running Jaro at all, and on the live corpus it takes 506,521 pairs down to
+    479. Yielding a pair that turns out not to match costs one wasted
+    comparison; dropping one that would have matched is the thing that must
+    never happen, and both inequalities are the safe way round.
+
+    Normalisation matters here and got this wrong once: the bound must be
+    computed on exactly the text Jaro sees. Measured against the raw strings
+    instead, the filter lost six real merges -- 'CLAUDE.md' with 'Claude Code'
+    among them -- because punctuation it counted was punctuation `_normalise`
+    had already removed.
+    """
+    from collections import Counter
+
+    n = len(mentions)
+    normalised = [_normalise(m) for m in mentions]
+    tokens = [set(x.split()) for x in normalised]
+    counts = [Counter(x) for x in normalised]
+    lengths = [len(x) for x in normalised]
+
+    floor = _jaro_floor()
+    # Slack, and it has to be here. The bound is a real-number inequality
+    # evaluated in binary floating point, and the boundary is where real pairs
+    # sit: 'PROVIDERS' against 'provider_status' needs exactly 9 matching
+    # characters and has exactly 9, but the division produced 9.000000000000002
+    # and dropped a merge that scores 0.92 -- precisely JARO_THRESHOLD.
+    #
+    # Rounding must always err towards OFFERING a candidate. A spurious one
+    # costs a comparison that then fails; a dropped one is a merge nobody can
+    # see was not made.
+    numerator = 3.0 * floor - 1.0 - 1e-9
+
+    out: set[tuple[int, int]] = set()
+
+    def offer(i: int, j: int) -> None:
+        out.add((i, j) if i < j else (j, i))
+
+    # exact
+    by_form: dict[str, list[int]] = {}
+    for i, form in enumerate(normalised):
+        by_form.setdefault(form, []).append(i)
+    for group in by_form.values():
+        for x in range(len(group)):
+            for y in range(x + 1, len(group)):
+                offer(group[x], group[y])
+
+    # token_subset -- a subset that shares at least half its tokens shares at
+    # least one, so an inverted index over tokens is complete for this method.
+    by_token: dict[str, list[int]] = {}
+    for i, ts in enumerate(tokens):
+        for token in ts:
+            by_token.setdefault(token, []).append(i)
+    for holders in by_token.values():
+        for x in range(len(holders)):
+            for y in range(x + 1, len(holders)):
+                offer(holders[x], holders[y])
+
+    # acronym -- the short side is the initials of the long side's words, so
+    # both map to the same key.
+    by_initials: dict[str, list[int]] = {}
+    for i, (raw, ts) in enumerate(zip(mentions, normalised)):
+        words = [w for w in ts.split() if w]
+        if len(words) > 1:
+            by_initials.setdefault("".join(w[0] for w in words), []).append(i)
+        stripped = re.sub(r"[^A-Za-z]", "", raw)
+        if stripped.isupper() and len(stripped) >= 2:
+            by_initials.setdefault(stripped.lower(), []).append(i)
+    for holders in by_initials.values():
+        for x in range(len(holders)):
+            for y in range(x + 1, len(holders)):
+                offer(holders[x], holders[y])
+
+    # jaro_winkler
+    for i in range(n):
+        la = lengths[i]
+        if not la:
+            continue
+        ci = counts[i]
+        for j in range(i + 1, n):
+            lb = lengths[j]
+            if not lb:
+                continue
+            need = numerator / (1.0 / la + 1.0 / lb)
+            if min(la, lb) < need:
+                continue
+            if sum((ci & counts[j]).values()) >= need:
+                offer(i, j)
+
+    return sorted(out)
+
+
+def _pairs_to_compare(mentions: list[str]) -> Iterable[tuple[int, int]]:
+    """Blocked candidates above the cut, every pair below it."""
+    if len(mentions) < BLOCKING_MIN_MENTIONS:
+        return ((i, j) for i in range(len(mentions))
+                for j in range(i + 1, len(mentions)))
+    return _candidate_pairs(mentions)
+
+
+# ---------------------------------------------------------------------------
 # Transitivity
 # ---------------------------------------------------------------------------
 
@@ -704,28 +861,28 @@ def run_resolution() -> dict[str, Any]:
     # 2. Heuristic pairs
     heuristic_merged: list[tuple[str, str, float, str]] = []
     n = len(mentions)
-    for i in range(n):
-        for j in range(i + 1, n):
-            a, b = mentions[i], mentions[j]
-            sim, method = _heuristic_sim(a, b)
-            # SIMILARITY FIRST, then the guard -- so a refusal means "this
-            # would have merged and was stopped", not "these two were never
-            # going to merge anyway". The other order counted 16 refusals on a
-            # six-pair probe that only ever had 4 real merges to stop, which
-            # is precisely the kind of number that reads as work being done.
-            if sim < MERGE_THRESHOLD:
-                continue
-            # BOTH paths are guarded, not only the embedding one: four of the
-            # ten merges this refuses on the live corpus came from
-            # Jaro-Winkler, which scored "brahmastra_search_entities" against
-            # "brahmastra_search_notes" at 0.951. A string metric is if
-            # anything MORE confident about names differing by a few
-            # characters than an embedding is.
-            if _is_contrasting(a, b) or is_distinct(a, b):
-                refused.add((a, b))
-                continue
-            uf.union(a, b)
-            heuristic_merged.append((a, b, sim, method))
+    # Every pair below BLOCKING_MIN_MENTIONS, a provably complete subset above
+    # it. `test_entity_blocking.py` pins that the two agree.
+    for i, j in _pairs_to_compare(mentions):
+        a, b = mentions[i], mentions[j]
+        sim, method = _heuristic_sim(a, b)
+        # SIMILARITY FIRST, then the guard -- so a refusal means "this would
+        # have merged and was stopped", not "these two were never going to
+        # merge anyway". The other order counted 16 refusals on a six-pair
+        # probe that only ever had 4 real merges to stop, which is precisely
+        # the kind of number that reads as work being done.
+        if sim < MERGE_THRESHOLD:
+            continue
+        # BOTH paths are guarded, not only the embedding one: four of the ten
+        # merges this refuses on the live corpus came from Jaro-Winkler, which
+        # scored "brahmastra_search_entities" against "brahmastra_search_notes"
+        # at 0.951. A string metric is if anything MORE confident about names
+        # differing by a few characters than an embedding is.
+        if _is_contrasting(a, b) or is_distinct(a, b):
+            refused.add((a, b))
+            continue
+        uf.union(a, b)
+        heuristic_merged.append((a, b, sim, method))
 
     # 3. Embedding pairs (skip antonym/contrast pairs that embed deceptively high)
     raw_embedding_pairs = _embedding_sim(mentions)

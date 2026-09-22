@@ -479,15 +479,31 @@ came from Jaro-Winkler scoring `brahmastra_search_entities`/`brahmastra_search_n
 0.951, which embeddings alone rank differently — and a negation rule, which nothing in
 their default prompt covers.
 
-**Where they are better, and what is still open here:**
-- **Union-Find is transitive.** A~B and B~C confirmed merges A~C *unasked*. Their
-  entity→candidates shape has no equivalent hole. This is the real remaining weakness.
-- **All-pairs is O(n²).** Fine at 925 mentions; 10k mentions is 50M comparisons. Blocking
-  is the fix when that day comes, not before.
-- **`entity_type` hints and `extra_guidance`** — "be conservative with personal names" is
-  exactly the `Shaan Kapoor` case, and our judge asks one generic question.
-- **Validate-and-re-prompt.** Theirs re-prompts with feedback (2 retries); ours validates
-  the pair number and gives up.
+**What they had that we now do too** — all four, each measured:
+- **Transitivity.** A~B and B~C confirmed merged A~C *unasked*. `_split_incoherent`
+  re-clusters greedily over the accepted edges, strongest first, skipping any union that
+  would put a refused pair in one set. Live graph: **0** pairs remain inside a cluster
+  that the guards would refuse.
+- **Blocking.** `_candidate_pairs` covers all four match methods — exact, token_subset,
+  acronym, and a provable Jaro bound (`J ≥ x ⟹ m ≥ (3x−1)/(1/|a|+1/|b|)`, with `m`
+  capped by the character multiset intersection). 506,521 pairs → 7,228, **111 merges
+  either way**, 6× faster. Off below `BLOCKING_MIN_MENTIONS` (2000), because 5s is not
+  worth trading for a filter that only *almost* covers the methods.
+- **`entity_type` hints + `extra_guidance`.** Inferred per pair (theirs is one type per
+  resolver); batches are grouped so a file pair and a person pair get opposite advice.
+  `ENTITY_CONFIRM_GUIDANCE` appends domain rules. **Unmeasured** — the judge is off and
+  the numbers that turned it off used one generic question.
+- **Validate-and-re-prompt.** Two retries, told *why* the last reply was rejected. A
+  verdict that parsed is never re-asked, so this cannot become "ask until it agrees".
+
+⚠️ **Rounding in a blocker must err toward offering a candidate.** `PROVIDERS` vs
+`provider_status` needs exactly 9 matching characters and has exactly 9 — the bound
+computed `9.000000000000002` and dropped a merge scoring exactly `JARO_THRESHOLD`.
+
+⚠️ **`entity_confirm` resolves the model once per `confirm`, not per batch.** Provider
+resolution *probes*; against an unreachable host that probe waits out its timeout —
+measured at **2.0s per batch**, silent because the call is wrapped in try/except. The same
+leak made 18 tests take 29 seconds; stubbing it took them to 0.10s.
 
 ## Search & retrieval
 

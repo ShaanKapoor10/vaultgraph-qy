@@ -70,12 +70,18 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Any, Iterable
 
 # How many pairs go in one call. Small enough that the model is still reading
 # each pair rather than pattern-matching down a list, large enough that a
 # 900-mention corpus costs tens of calls rather than hundreds.
 BATCH = 8
+
+# How many times a REJECTED reply is asked again, with the reason. cocoindex's
+# resolver defaults to the same number. A retry never re-asks a verdict that
+# parsed, so this cannot become "keep asking until it agrees".
+RETRIES = 2
 
 VARIANT = "entity-pair"
 
@@ -155,6 +161,88 @@ def available() -> bool:
         return False
 
 
+# What KIND of thing a pair is about, and the one sentence that matters for it.
+#
+# cocoindex's LlmPairResolver takes an `entity_type` hint -- "person",
+# "technology", "organization" -- and weaves it into the prompt, on the grounds
+# that a model judges names better when it knows what it is looking at. Its
+# docs give the example directly: be more conservative with personal names.
+#
+# It takes ONE type per resolver, because there a caller resolves one column of
+# one table. Here the candidates arrive mixed -- a file, a person and a
+# threshold in the same batch -- so the type is INFERRED per pair and the batch
+# is grouped by it. Same idea, adapted to a heterogeneous corpus.
+#
+# UNMEASURED, and stated as such. The judge is off by default and the numbers
+# that turned it off were taken with one generic question; whether typed
+# guidance moves them is exactly the experiment to run when there is quota for
+# it. `brahmastra/ingest/evaluate.py` is the shape that harness should take.
+_GUIDANCE = {
+    "person": (
+        "These are PEOPLE. Be conservative: a handle, a username or an email "
+        "local-part is not the person's name, and two people can share a "
+        "first name. Merge only a short and long form of one person's name."
+    ),
+    "path": (
+        "These are FILE PATHS. Two paths are the same file only when one is a "
+        "tail of the other, as 'page.tsx' is of 'app/page.tsx'. A shared "
+        "directory means nothing -- files that sit together have near-"
+        "identical names and are still different files."
+    ),
+    "identifier": (
+        "These are CODE IDENTIFIERS -- functions, tools, modules, variables. "
+        "Two that differ by a word are two different things: a caller and a "
+        "helper, a tool and its test. Merge only a bare name and the same "
+        "name with a word like 'function' or 'the' around it."
+    ),
+    "versioned": (
+        "These carry NUMBERS -- versions, dates, thresholds, ports. The number "
+        "is the fact. Different numbers mean different things, however alike "
+        "the rest of the string reads."
+    ),
+    "general": (
+        "These are general names: products, concepts, teams, systems."
+    ),
+}
+
+_PATHY = re.compile(r"[\w./-]+\.[A-Za-z]{1,5}(?:\s|$)")
+_SNAKE = re.compile(r"\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+_DIGIT = re.compile(r"\d")
+_PERSONISH = re.compile(r"^[A-Z][a-z]+(?: [A-Z][a-z'-]+)+$")
+
+
+def entity_type(a: str, b: str) -> str:
+    """
+    What kind of thing this pair is about. A hint for the prompt, never a rule.
+
+    Checked most-specific first, and it only has to be right often enough to
+    make the guidance relevant -- nothing here decides a merge, so a wrong
+    guess costs a sentence of irrelevant advice rather than a wrong node.
+    """
+    both = (a, b)
+    if all(_PATHY.search(x) for x in both):
+        return "path"
+    if all(_PERSONISH.match(x.strip()) for x in both):
+        return "person"
+    if all(_DIGIT.search(x) for x in both):
+        return "versioned"
+    if all(_SNAKE.search(x.lower()) for x in both):
+        return "identifier"
+    return "general"
+
+
+def _prompt_for(kind: str) -> str:
+    """The base prompt plus the one sentence this kind of name needs."""
+    guidance = _GUIDANCE.get(kind) or _GUIDANCE["general"]
+    parts = [SYSTEM_PROMPT, f"\nAbout this batch in particular: {guidance}"]
+    extra = (os.environ.get("ENTITY_CONFIRM_GUIDANCE") or "").strip()
+    if extra:
+        # Domain rules only, as cocoindex puts it -- the output format is not
+        # the caller's to change, and the schema is what parses the reply.
+        parts.append(f"\nAlso: {extra}")
+    return "\n".join(parts)
+
+
 def _render(pairs: list[tuple[str, str]]) -> str:
     lines = []
     for i, (a, b) in enumerate(pairs, start=1):
@@ -166,7 +254,54 @@ class Unanswered(Exception):
     """The model never gave a verdict. NOT the same as a verdict of `no`."""
 
 
-def _ask(pairs: list[tuple[str, str]]) -> dict[int, bool]:
+def _read_verdicts(raw: str, count: int) -> dict[int, bool]:
+    """
+    Whatever the reply actually answered. Raises Unanswered if that is nothing.
+
+    Only verdicts about pairs we asked about: a model that invents a pair 9 in
+    a batch of 8 must not decide anything.
+    """
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        raise Unanswered(f"unreadable reply: {exc}"[:200]) from exc
+
+    out: dict[int, bool] = {}
+    for verdict in payload.get("verdicts") or []:
+        try:
+            number = int(verdict["pair"])
+            if 1 <= number <= count:
+                out[number] = bool(verdict["same"])
+        except Exception:
+            continue
+    if not out:
+        raise Unanswered("reply contained no usable verdicts")
+    return out
+
+
+def _active_model() -> str:
+    """
+    Which model is answering, for the cache key. Never raises.
+
+    RESOLVED ONCE PER `confirm`, not once per batch, and that is not a
+    micro-optimisation. Provider resolution PROBES -- it asks whether Ollama is
+    up before deciding -- and against an unreachable host that probe waits out
+    its timeout. Measured in the test suite, where the host is deliberately
+    pointed at a closed port: 2.0 seconds per batch, on a path that otherwise
+    does no I/O at all, silent because the call is wrapped in a try/except.
+
+    A 900-mention corpus produces tens of batches. That was tens of seconds of
+    waiting to re-learn an answer that cannot change mid-run.
+    """
+    try:
+        from brahmastra.llm import active_model
+
+        return active_model()
+    except Exception:
+        return ""
+
+
+def _ask(pairs: list[tuple[str, str]], model: str = "") -> dict[int, bool]:
     """
     One call. Returns {pair_number: same}. Raises Unanswered if the model
     could not be reached or its reply could not be read.
@@ -182,43 +317,63 @@ def _ask(pairs: list[tuple[str, str]]) -> dict[int, bool]:
     cannot be reached must not silently return a verdict.
     """
     from brahmastra import memo
-    from brahmastra.llm import active_model, chat
+    from brahmastra.llm import chat
 
     user = _render(pairs)
-    model = ""
-    try:
-        model = active_model()
-    except Exception:
-        pass
-
-    key = memo.key_for(user, VARIANT, model, SYSTEM_PROMPT)
+    # Every pair in a batch shares a type, because `confirm` groups them.
+    system = _prompt_for(entity_type(*pairs[0]))
+    key = memo.key_for(user, VARIANT, model, system)
     raw = memo.load(key)
-    if raw is None:
+    if raw is not None:
+        return _read_verdicts(raw, len(pairs))
+
+    # ASK, THEN RE-ASK WITH THE REASON IT FAILED.
+    #
+    # cocoindex's resolver validates the reply and, when it does not hold up,
+    # re-prompts with explicit feedback rather than giving up -- two retries by
+    # default. This version validated and then raised, which throws away a
+    # model that would have got it right on being told what was wrong, and
+    # turns a reply missing one verdict into eight unanswered pairs.
+    #
+    # A RETRY IS NOT A SECOND OPINION. It only ever happens when the reply was
+    # unreadable or incomplete: a verdict that parsed is never asked again, or
+    # this would quietly become "keep asking until it agrees". And it is still
+    # bounded -- exhausting the budget raises Unanswered, because a judge that
+    # cannot be reached must not return a verdict.
+    complaint = ""
+    last = Unanswered("never asked")
+    for attempt in range(RETRIES + 1):
+        question = user if not complaint else (
+            f"{user}\n\nYour previous reply was rejected: {complaint}\n"
+            f"Answer again, with exactly one verdict for each of the "
+            f"{len(pairs)} pairs above, numbered 1 to {len(pairs)}."
+        )
         try:
-            raw = chat(SYSTEM_PROMPT, user, json_schema=_SCHEMA,
+            raw = chat(system, question, json_schema=_SCHEMA,
                        temperature=0.0, max_tokens=1200)
         except Exception as exc:
+            # An outage is not a bad reply; asking again will not fix it.
             raise Unanswered(f"{type(exc).__name__}: {exc}"[:200]) from exc
-        memo.save(key, raw, VARIANT)
 
-    try:
-        payload = json.loads(raw)
-    except Exception as exc:
-        raise Unanswered(f"unreadable reply: {exc}"[:200]) from exc
-
-    out: dict[int, bool] = {}
-    for verdict in payload.get("verdicts") or []:
         try:
-            number = int(verdict["pair"])
-            # Only verdicts about pairs we actually asked about. A model that
-            # invents a pair 9 in a batch of 8 must not decide anything.
-            if 1 <= number <= len(pairs):
-                out[number] = bool(verdict["same"])
-        except Exception:
+            verdicts = _read_verdicts(raw, len(pairs))
+        except Unanswered as exc:
+            last, complaint = exc, str(exc)
             continue
-    if not out:
-        raise Unanswered("reply contained no usable verdicts")
-    return out
+
+        missing = [n for n in range(1, len(pairs) + 1) if n not in verdicts]
+        if missing and attempt < RETRIES:
+            complaint = f"it gave no verdict for pair(s) {missing}"
+            last = Unanswered(complaint)
+            continue
+
+        # Only a reply that is going to be USED gets cached. Caching a partial
+        # one would make this run's shortfall permanent for that batch.
+        if not missing:
+            memo.save(key, raw, VARIANT)
+        return verdicts
+
+    raise last
 
 
 def confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
@@ -239,17 +394,30 @@ def confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
     if not available():
         return verdicts, todo
 
-    for start in range(0, len(todo), BATCH):
-        batch = todo[start:start + BATCH]
-        try:
-            answers = _ask(batch)
-        except Unanswered:
-            unanswered.extend(batch)
-            continue
-        for offset, pair in enumerate(batch, start=1):
-            if offset in answers:
-                verdicts[pair] = answers[offset]
-            else:
-                # Asked, and the model skipped it. Not a verdict either.
-                unanswered.append(pair)
+    # GROUPED BY KIND, so every batch can carry guidance that fits it. A file
+    # pair and a person pair need opposite advice -- "a shared directory means
+    # nothing" against "a handle is not a name" -- and a batch holding both can
+    # be given neither.
+    by_kind: dict[str, list[tuple[str, str]]] = {}
+    for pair in todo:
+        by_kind.setdefault(entity_type(*pair), []).append(pair)
+
+    # Once, for the whole call. See `_active_model`.
+    model = _active_model()
+
+    for kind in sorted(by_kind):
+        group = by_kind[kind]
+        for start in range(0, len(group), BATCH):
+            batch = group[start:start + BATCH]
+            try:
+                answers = _ask(batch, model)
+            except Unanswered:
+                unanswered.extend(batch)
+                continue
+            for offset, pair in enumerate(batch, start=1):
+                if offset in answers:
+                    verdicts[pair] = answers[offset]
+                else:
+                    # Asked, and the model skipped it. Not a verdict either.
+                    unanswered.append(pair)
     return verdicts, unanswered
