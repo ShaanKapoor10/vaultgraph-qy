@@ -155,18 +155,67 @@ def _different_files(a: str, b: str) -> bool:
     """
     True when both names denote files and they are provably NOT the same file.
 
-    Same basename, different directory. "app/page.tsx" and "page.tsx" are one
-    file written two ways, because one path ends with the other; "src/a/util.py"
-    and "src/b/util.py" are two files, because neither does.
+    Two different paths are two different files. The ONE exception is a path
+    that is a tail of the other -- "page.tsx" and "app/page.tsx" are one file
+    written short and long -- and that is the only way two distinct path
+    strings can name the same thing.
+
+    THIS RULE USED TO GIVE UP ON DIFFERENT BASENAMES, and the comment where it
+    did said "the cascade can judge it". The cascade cannot. Jaro-Winkler
+    rewards a long shared prefix, and every file in one directory shares one:
+
+        0.961  backend/brahmastra/llm.py         == backend/brahmastra/memo.py
+        0.964  backend/brahmastra/ingest/memo.py == backend/brahmastra/ingest/store.py
+        0.965  backend/.env                      == backend/.venv
+        0.936  ontology.py                       == ontology.yaml
+        0.926  checkpoint.log                    == checkpoint.py
+
+    Measured on the live graph: of 105 merges the resolver made, 32 were two
+    different files, and every one was verified wrong by hand. Fifteen source
+    files had fused into a SINGLE entity -- the whole of backend/brahmastra as
+    one node -- and among them the three ontology files that CLAUDE.md exists
+    to keep distinct, and the .env/.venv pair whose confusion it documents as a
+    real incident.
+
+    No refusal on that list was wrong, which is what makes this provable rather
+    than a threshold: two paths that are not tails of each other are two files,
+    and no similarity score is evidence against that.
     """
     pa, pb = _path_of(a), _path_of(b)
     if not pa or not pb or pa == pb:
         return False
-    if pa.split("/")[-1] != pb.split("/")[-1]:
-        return False          # different basenames: the cascade can judge it
     long, short = (pa, pb) if len(pa) >= len(pb) else (pb, pa)
     # One path being a tail of the other is the same file named more fully.
-    return not long.endswith("/" + short) and long != short
+    return not long.endswith("/" + short)
+
+
+_NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
+
+
+def _different_numbers(a: str, b: str) -> bool:
+    """
+    True when both names carry numbers and the numbers are not the same.
+
+    A version, a date, a threshold and a port are the parts of a name that
+    carry the fact. Change them and it is a different fact, however alike the
+    two strings read -- and they read very alike indeed, because everything
+    around the number is identical:
+
+        0.960  2026-08-12                  == 2026-08-18
+        0.962  notion-client version 2.2.1 == notion-client version 3.1.0
+        0.943  threshold 0.55              == threshold 0.60
+
+    Three of 105 merges on the live graph, all three wrong. The middle one is
+    the exact version divergence CLAUDE.md records as the cause of a real bug:
+    fusing those two nodes destroys the distinction the note exists to make.
+
+    Only fires when BOTH sides carry numbers. "44 notes" and "notes" are a
+    count and the thing counted, not two counts, so the rule abstains -- the
+    same shape as every other guard here.
+    """
+    na = [x.replace(",", "") for x in _NUMBER.findall(a)]
+    nb = [x.replace(",", "") for x in _NUMBER.findall(b)]
+    return bool(na) and bool(nb) and na != nb
 
 
 def _different_identifiers(a: str, b: str) -> bool:
@@ -199,8 +248,10 @@ def _different_identifiers(a: str, b: str) -> bool:
 
 
 def is_distinct(a: str, b: str) -> bool:
-    """Provably two things. See _different_files and _different_identifiers."""
-    return _different_files(a, b) or _different_identifiers(a, b)
+    """Provably two things. See the three rules above."""
+    return (_different_files(a, b)
+            or _different_numbers(a, b)
+            or _different_identifiers(a, b))
 
 
 def _is_contrasting(a: str, b: str) -> bool:
@@ -357,6 +408,89 @@ class _UnionFind:
             root = self.find(x)
             groups.setdefault(root, []).append(x)
         return list(groups.values())
+
+
+# ---------------------------------------------------------------------------
+# Transitivity
+# ---------------------------------------------------------------------------
+
+
+def _split_incoherent(
+    component: list[str],
+    similarity: dict[tuple[str, str], float],
+) -> list[list[str]]:
+    """
+    A cluster must not contain a pair the guards would have refused.
+
+    THE HOLE THIS CLOSES. Union-Find is transitive: confirm A~B and B~C and it
+    merges A with C without ever asking. Every guard in this file judges PAIRS,
+    so a pair that never comes up is a pair that is never judged -- and one
+    permissive bridge fuses everything it touches.
+
+    Measured on the live graph, after the file and number rules had already
+    removed 35 wrong merges, one cluster still looked like this:
+
+        backend/brahmastra/ingest/assemble.py
+        backend/brahmastra/ingest/cases          <- the bridge
+        backend/brahmastra/ingest/comprehend.py
+        backend/brahmastra/ingest/evaluate.py
+        backend/brahmastra/ingest/evidence.py
+        backend/brahmastra/ingest/memo.py
+        backend/brahmastra/ingest/store.py
+
+    FIFTEEN of its twenty-one internal pairs are pairs `is_distinct` refuses
+    outright. They are in one node anyway, because "ingest/cases" carries no
+    file extension, so `_path_of` returns None, so the file rule abstains on
+    every pair involving it -- and those six abstentions were enough to join
+    all seven.
+
+    HOW IT SPLITS. Greedily, over the accepted edges in descending similarity,
+    skipping any union that would put a refused pair in one set. Ties break on
+    the names, so the result does not depend on iteration order -- the same
+    property `cluster_id_for` and `_pick_canonical` had to be given.
+
+    Greedy rather than optimal on purpose. Partitioning to satisfy the most
+    constraints is correlation clustering, which is NP-hard, and the goal here
+    is not the best split but the ABSENCE of a fusion nobody asked for. The
+    strongest evidence wins first, and anything it rules out stays apart.
+    """
+    members = sorted(component)
+    if len(members) < 3:
+        return [members]
+
+    refused: set[tuple[str, str]] = set()
+    for i, x in enumerate(members):
+        for y in members[i + 1:]:
+            if _is_contrasting(x, y) or is_distinct(x, y):
+                refused.add((x, y))
+    if not refused:
+        return [members]
+
+    edges: list[tuple[float, str, str]] = []
+    for i, x in enumerate(members):
+        for y in members[i + 1:]:
+            if (x, y) in refused:
+                continue
+            score = similarity.get((x, y))
+            if score is None:
+                score, _ = _heuristic_sim(x, y)
+            edges.append((score, x, y))
+    # Strongest first; the names break ties so nothing depends on luck.
+    edges.sort(key=lambda e: (-e[0], e[1], e[2]))
+
+    uf = _UnionFind(members)
+    for _, x, y in edges:
+        if uf.find(x) == uf.find(y):
+            continue
+        joined = {m for m in members if uf.find(m) in (uf.find(x), uf.find(y))}
+        if any(p in refused for p in
+               ((u, v) for i, u in enumerate(sorted(joined))
+                for v in sorted(joined)[i + 1:])):
+            continue
+        uf.union(x, y)
+
+    return sorted((sorted(group) for group in uf.components()),
+                  key=lambda g: g[0])
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +764,24 @@ def run_resolution() -> dict[str, Any]:
         uf.union(a, b)
 
     # 4. Build cluster list
-    components = uf.components()
+    #
+    # Split anything Union-Find fused THROUGH a bridge. Every guard above
+    # judges pairs, so a pair that never came up was never judged -- and on the
+    # live graph one extensionless path held seven distinct files in one node,
+    # fifteen of whose internal pairs are refused outright.
+    similarity: dict[tuple[str, str], float] = {}
+    for a, b, sim, _method in heuristic_merged:
+        similarity[(min(a, b), max(a, b))] = sim
+    for (a, b), sim in embedding_pairs.items():
+        similarity.setdefault((min(a, b), max(a, b)), sim)
+
+    components: list[list[str]] = []
+    split_clusters = 0
+    for component in uf.components():
+        parts = _split_incoherent(component, similarity)
+        if len(parts) > 1:
+            split_clusters += 1
+        components.extend(parts)
     clusters: list[dict[str, Any]] = []
     # WHAT THE LAST RUN CALLED THINGS. Read here rather than passed in,
     # because `replace_canonical_map` below overwrites it -- so this is the
@@ -675,6 +826,9 @@ def run_resolution() -> dict[str, Any]:
         "refused_merges": len(refused),
         "judged": judged,
         "pinned": pinned_enabled() and bool(established),
+        # Clusters Union-Find fused through a bridge and that were taken apart
+        # again. A number above zero is the transitivity hole being caught.
+        "split_clusters": split_clusters,
         # Established names that absorbed another established name. Reported
         # because a merge of two things the graph already had names for is the
         # one event somebody should actually look at.
