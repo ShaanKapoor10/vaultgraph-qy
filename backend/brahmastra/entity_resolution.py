@@ -20,10 +20,11 @@ before the model downloads), heuristics-only mode is used automatically.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
-from typing import Any
+from typing import Any, Iterable
 
 # Quiet the noisy HF / transformers output ("unauthenticated requests to HF Hub",
 # "Loading weights 100%") emitted when the sentence-transformers model loads.
@@ -362,15 +363,73 @@ class _UnionFind:
 # Canonical name selection
 # ---------------------------------------------------------------------------
 
+# Bump to re-key every cluster at once. Only a change to what IDENTIFIES a
+# cluster needs it -- not a change to how one is named, scored or rendered.
+CLUSTER_ID_VERSION = "1"
+
+
+def cluster_id_for(mentions: Iterable[str]) -> str:
+    """
+    A cluster's id, derived from WHO IS IN IT rather than from where it landed.
+
+    It used to be `f"c{i:04d}"` -- the cluster's position in the list
+    UnionFind happened to return. Measured on the live graph, 970 triples and
+    901 clusters, by running the resolver twice in two processes over
+    BYTE-IDENTICAL input:
+
+        cluster ids naming the same members    2 of 901
+        derived ids naming the same members  901 of 901
+
+    Two, out of nine hundred and one. The mentions are collected into a SET,
+    and set iteration order for strings depends on the hash seed, which differs
+    per process -- so the positions were never stable, and every pipeline run
+    rewrote the entire canonical map for no reason at all. Growing the corpus
+    was no better: clustering 70% of the notes and then all of them left 1 of
+    667 positional ids intact, against 645 of 667 derived ones.
+
+    cocoindex names this exactly: ids not derived from the data mean every
+    reprocessing run produces different ids for the same data, so the target
+    churns -- old rows deleted, identical rows inserted under new keys.
+
+    The id changes when the MEMBERSHIP changes, which is correct and is the
+    same rule cluster summaries already use: a cluster that gained a mention is
+    not the cluster that existed before, and nothing downstream should assume
+    it is.
+    """
+    h = hashlib.sha256()
+    h.update(CLUSTER_ID_VERSION.encode("utf-8"))
+    h.update(bytes([0]))
+    for mention in sorted(mentions):
+        h.update(mention.encode("utf-8", "replace"))
+        h.update(bytes([0]))
+    return "c" + h.hexdigest()[:12]
+
+
 def _pick_canonical(mentions: list[str]) -> str:
     """
     Pick the best canonical name from a cluster:
     - Prefer title-cased names (likely proper nouns).
     - Among those, pick the longest (most specific).
+    - Break ties by the name itself, so the answer does not depend on luck.
+
+    THE TIE-BREAK IS NOT COSMETIC. `max(pool, key=len)` returns the first
+    longest item in ITERATION ORDER, and that order comes from a set, so it
+    varies per process. Two runs over byte-identical input gave 14 of 980
+    mentions a different canonical name:
+
+        'function run_pipeline'   vs  'run_pipeline function'
+        'Apollo Project'          vs  'Apollo project'
+        'function _ask'           vs  '_ask function'
+
+    Every one of those is a graph that renamed an entity because a hash seed
+    changed. Sorting the tie makes the choice arbitrary but STABLE, which is
+    the property that was missing -- there is no reason to prefer either
+    spelling of "run_pipeline", and every reason to keep answering with the
+    same one.
     """
     titled = [m for m in mentions if m and m[0].isupper()]
     pool = titled if titled else mentions
-    return max(pool, key=len)
+    return max(pool, key=lambda m: (len(m), m))
 
 
 # ---------------------------------------------------------------------------
@@ -495,14 +554,16 @@ def run_resolution() -> dict[str, Any]:
     # 4. Build cluster list
     components = uf.components()
     clusters: list[dict[str, Any]] = []
-    for i, component in enumerate(components):
-        canonical = _pick_canonical(component)
-        cluster_id = f"c{i:04d}"
+    for component in components:
         clusters.append({
-            "cluster_id": cluster_id,
-            "canonical_name": canonical,
+            "cluster_id": cluster_id_for(component),
+            "canonical_name": _pick_canonical(component),
             "mentions": sorted(component),
         })
+    # Sorted so the LIST is stable too, not only the ids in it. Set iteration
+    # decides what order UnionFind hands these back in, and a caller comparing
+    # two runs should not have to sort them itself.
+    clusters.sort(key=lambda c: c["cluster_id"])
 
     # 5. Persist
     db.replace_canonical_map(clusters)

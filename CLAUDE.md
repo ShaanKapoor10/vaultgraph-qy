@@ -401,6 +401,35 @@ that evidence**, not in anticipation — see `docs/ONTOLOGY_DESIGN.md`.
 
 ---
 
+### ⚠️ Entity identity must not depend on the hash seed
+Measured on the live graph — 970 triples, 901 clusters — by running the resolver twice in
+two **processes** over byte-identical input:
+
+| | before | after |
+|---|---|---|
+| cluster ids naming the same members | 2 / 901 | **901 / 901** |
+| mentions under a different canonical name | 14 / 980 | **0** |
+
+Mentions are collected into a **set**, set iteration order for strings depends on
+`PYTHONHASHSEED`, and that differs per process. So `f"c{i:04d}"` numbered clusters by
+luck, and `max(pool, key=len)` broke ties by the same luck — `function run_pipeline` vs
+`run_pipeline function`, `Apollo Project` vs `Apollo project`. Every pipeline run rewrote
+the whole canonical map for no reason.
+
+- `cluster_id_for(members)` derives the id from **who is in the cluster**. Membership
+  changing changes the id, which is correct — the same rule cluster summaries follow.
+- `_pick_canonical` breaks ties on `(len, name)`. Arbitrary but **stable**, which is the
+  property that was missing.
+
+Growing the corpus tells the same story: 70% of the notes then all of them left **1 of
+667** positional ids intact against **645 of 667** derived ones. cocoindex states the
+consequence plainly — ids not derived from the data make every reprocessing run churn the
+target, deleting rows and re-inserting identical ones under new keys.
+
+Still open: corpus growth **renames** 11 of 716 mentions, and some are wrong
+(`Shaan Kapoor` → `ShaanKapoor10`, because it is longer and title-cased). That needs a
+PINNED existing-canonical policy, not a better tie-break.
+
 ## Search & retrieval
 
 - **Hybrid search** on **Neo4j and Postgres**: lexical relevance fused with vector
