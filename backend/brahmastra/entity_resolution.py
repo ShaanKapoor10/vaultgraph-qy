@@ -194,6 +194,68 @@ def _different_files(a: str, b: str) -> bool:
     return not long.endswith("/" + short)
 
 
+def _is_tail(short: str, long: str) -> bool:
+    """One path naming the same file as another, written more fully."""
+    return long.endswith("/" + short)
+
+
+def _same_file_groups(mentions: list[str]) -> list[list[int]]:
+    """
+    Mentions that provably name ONE file, written short and long.
+
+    THE MIRROR OF `_different_files`, and it was missing. That rule proves two
+    paths are different; the tail exception inside it proves two paths are the
+    SAME -- and nothing ever acted on the second half. Measured on the live
+    graph, 18 pairs sat in the knowledge base as two nodes for one file:
+
+        backend/brahmastra/ingest/memo.py   and  ingest/memo.py       0.640
+        backend/brahmastra/llm.py           and  llm.py               0.550
+        tests/test_checkpoint.py            and  test_checkpoint.py   0.700
+        frontend/lib/backend-adapter.ts     and  backend-adapter.ts   0.640
+        backend/brahmastra/ingest/evaluate.py and evaluate.py         0.000
+
+    Every one below MERGE_THRESHOLD, several scoring nothing at all, because a
+    full path and a bare filename share almost no text. The similarity cascade
+    was never going to find these, and it did not have to: the path says so.
+
+    A CORPUS-LEVEL PASS, not a pairwise rule, because the danger is only
+    visible with every path in view. "memo.py" is a tail of BOTH
+    "brahmastra/memo.py" and "brahmastra/ingest/memo.py", which `_different_files`
+    proves are two files -- so merging on the bare name would fuse them through
+    it. A pairwise check cannot see that; this one refuses the short path
+    entirely unless every longer path it matches is tail-related to all the
+    others, which is exactly "they are all the same file".
+
+    On the live corpus one short path is ambiguous by that test -- "extract.ts"
+    against both "app/actions/extract.ts" and "frontend/app/actions/extract.ts"
+    -- and those two ARE tail-related, so it merges. The guard cost nothing
+    there and is the difference between a correct merge and an invisible
+    fusion the next time a filename repeats.
+    """
+    by_path: dict[str, list[int]] = {}
+    for index, mention in enumerate(mentions):
+        path = _path_of(mention)
+        if path:
+            by_path.setdefault(path, []).append(index)
+
+    distinct = sorted(by_path)
+    groups: list[list[int]] = []
+    for short in distinct:
+        longer = [p for p in distinct if p != short and _is_tail(short, p)]
+        if not longer:
+            continue
+        # Every longer path must be the same file as every other, or the short
+        # one does not identify which of them it means.
+        if any(not (_is_tail(x, y) or _is_tail(y, x))
+               for i, x in enumerate(longer) for y in longer[i + 1:]):
+            continue
+        members = list(by_path[short])
+        for path in longer:
+            members.extend(by_path[path])
+        groups.append(sorted(set(members)))
+    return groups
+
+
 _NUMBER = re.compile(r"\d+(?:[.,]\d+)*")
 
 
@@ -933,6 +995,23 @@ def run_resolution() -> dict[str, Any]:
         uf.union(a, b)
         heuristic_merged.append((a, b, sim, method))
 
+    # 2b. One file, written short and long.
+    #
+    # Not part of the cascade above, because the check needs every path in view
+    # at once -- see `_same_file_groups`. And not reachable from it either: a
+    # full path and a bare filename share almost no text, so several of these
+    # score 0.000 and the strongest scores 0.775, all below MERGE_THRESHOLD.
+    same_file = 0
+    for group in _same_file_groups(mentions):
+        head = mentions[group[0]]
+        for index in group[1:]:
+            other = mentions[index]
+            if uf.find(head) == uf.find(other):
+                continue
+            uf.union(head, other)
+            heuristic_merged.append((head, other, 1.0, "same_file"))
+            same_file += 1
+
     # 3. Embedding pairs (skip antonym/contrast pairs that embed deceptively high)
     raw_embedding_pairs = _embedding_sim(mentions)
     embedding_pairs = {}
@@ -1035,6 +1114,10 @@ def run_resolution() -> dict[str, Any]:
         # Clusters Union-Find fused through a bridge and that were taken apart
         # again. A number above zero is the transitivity hole being caught.
         "split_clusters": split_clusters,
+        # Mentions joined because one path is a tail of another -- the same
+        # file written short and long. Reported separately because the
+        # similarity cascade cannot find these at all.
+        "same_file_merges": same_file,
         # Present only when embeddings were meant to run and could not. The
         # heuristics still merged, so the run is degraded rather than failed --
         # but a stage that quietly stops contributing must say so.

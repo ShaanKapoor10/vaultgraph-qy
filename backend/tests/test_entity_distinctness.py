@@ -197,3 +197,104 @@ def test_the_strongest_evidence_survives_the_split():
         ("Brahmastra", "brahmastra_ask"): 0.99,
     })
     assert ["Brahmastra", "brahmastra_ask"] in keep_ask
+
+
+# -- the mirror: one file, written short and long ----------------------------
+#
+# `_different_files` proves two paths are different; the tail exception inside
+# it proves two paths are the SAME -- and nothing acted on the second half.
+# Measured on the live graph, 18 pairs sat in the knowledge base as TWO NODES
+# FOR ONE FILE:
+#
+#     backend/brahmastra/ingest/memo.py  and  ingest/memo.py        0.640
+#     backend/brahmastra/llm.py          and  llm.py                0.550
+#     tests/test_checkpoint.py           and  test_checkpoint.py    0.700
+#     backend/brahmastra/ingest/evaluate.py and evaluate.py         0.000
+#
+# Every one below MERGE_THRESHOLD, several scoring nothing at all, because a
+# full path and a bare filename share almost no text. The similarity cascade
+# was never going to find these, and it does not have to: the path says so.
+
+from brahmastra.entity_resolution import _same_file_groups
+
+
+def _grouped(mentions):
+    return [sorted(mentions[i] for i in g) for g in _same_file_groups(mentions)]
+
+
+def test_a_bare_filename_joins_its_full_path():
+    mentions = sorted(["backend/brahmastra/llm.py", "llm.py"])
+    assert _grouped(mentions) == [["backend/brahmastra/llm.py", "llm.py"]]
+
+
+def test_the_cascade_could_never_have_found_these():
+    """The premise, and the reason this is a separate pass."""
+    from brahmastra.entity_resolution import MERGE_THRESHOLD, _heuristic_sim
+
+    for a, b in [("backend/brahmastra/llm.py", "llm.py"),
+                 ("backend/brahmastra/ingest/evaluate.py", "evaluate.py"),
+                 ("tests/test_checkpoint.py", "test_checkpoint.py")]:
+        sim, _ = _heuristic_sim(a, b)
+        assert sim < MERGE_THRESHOLD, f"{a!r}/{b!r} already merged at {sim}"
+
+
+def test_an_ambiguous_short_name_is_refused():
+    """
+    THE REASON THIS IS A CORPUS-LEVEL PASS. 'memo.py' is a tail of BOTH
+    'brahmastra/memo.py' and 'brahmastra/ingest/memo.py', which
+    `_different_files` proves are two files -- so merging on the bare name
+    would fuse them through it. A pairwise rule cannot see that.
+    """
+    mentions = sorted(["memo.py", "brahmastra/memo.py",
+                       "brahmastra/ingest/memo.py"])
+    assert _grouped(mentions) == []
+
+
+def test_an_ambiguity_that_resolves_is_still_merged():
+    """
+    'extract.ts' matches two longer paths on the live corpus, and those two are
+    themselves tail-related -- one file, three spellings. The guard must refuse
+    only genuine ambiguity, or it would undo the whole point.
+
+    Groups OVERLAP by design: the short path forms one and the middle path
+    forms another. The caller feeds them all to Union-Find, so what matters is
+    that the three end up connected, not that one group holds them.
+    """
+    mentions = sorted(["extract.ts", "app/actions/extract.ts",
+                       "frontend/app/actions/extract.ts"])
+    groups = _grouped(mentions)
+    assert groups, "the resolvable ambiguity must not be refused"
+
+    reachable = set(groups[0])
+    changed = True
+    while changed:
+        changed = False
+        for group in groups:
+            if reachable & set(group) and not set(group) <= reachable:
+                reachable |= set(group)
+                changed = True
+    assert reachable == set(mentions)
+
+
+def test_two_files_sharing_a_basename_are_never_grouped():
+    mentions = sorted(["src/a/util.py", "src/b/util.py"])
+    assert _grouped(mentions) == []
+
+
+def test_a_group_never_contains_a_pair_the_guards_refuse():
+    """The same invariant `_split_incoherent` enforces, checked at the source."""
+    mentions = sorted([
+        "backend/brahmastra/llm.py", "llm.py",
+        "backend/brahmastra/memo.py", "brahmastra/memo.py",
+        "backend/brahmastra/ingest/memo.py", "ingest/memo.py",
+        "tests/test_checkpoint.py", "test_checkpoint.py",
+        "app/page.tsx", "page.tsx",
+    ])
+    for group in _grouped(mentions):
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                assert not is_distinct(a, b), f"{a!r} grouped with {b!r}"
+
+
+def test_a_mention_with_no_path_is_ignored():
+    assert _grouped(sorted(["Sarah", "the release", "a decision"])) == []
