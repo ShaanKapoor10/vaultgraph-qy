@@ -79,6 +79,22 @@ failure each defence came from, and where to take this next.
 
 ---
 
+## What is left to build
+
+**`docs/ROADMAP.md`** carries the backlog, each item with the measurement that put
+it there. Read it before starting anything new — several items are gated on each
+other, and one section records what was tried, measured and deliberately dropped
+so it is not re-proposed.
+
+The two at the front, both with evidence already in hand:
+1. **Persist `coercions`** — `extract_note()` returns them and `run_extraction`
+   discards them, so ONTOLOGY_DESIGN.md's "grow the vocabulary from evidence"
+   rule has had no evidence since it was written.
+2. **Typed extraction for core `extraction.py`** — it asks for
+   `response_format={"type":"json_object"}` (any shape); ingestion asks for a real
+   `json_schema`, and that enforcement measured **+15 points (43% → 58%)**.
+   `llm.py` already carries `json_schema` through every provider.
+
 ## Project: Brahmastra (repo: vaultgraph-qy)
 
 Knowledge graph engine that replaces Obsidian — turns notes into a queryable graph.
