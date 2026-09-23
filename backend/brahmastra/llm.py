@@ -85,14 +85,18 @@ def retry_delay(error: Exception, attempt: int) -> float:
     retry sooner than we otherwise would.
     """
     fallback = 2.0 * (attempt + 1)          # 2s, 4s, 6s
-    match = _RETRY_AFTER.search(str(error))
-    if not match:
+    # One parser for Groq's stated waits, in groq_pool. The regex that used to
+    # live here could not read hours -- "try again in 1h12m3.36s" did not match
+    # at all -- which was harmless while a daily cap raised at once, and would
+    # not be for anything that trusted this number.
+    from brahmastra.groq_pool import parse_wait
+
+    stated = parse_wait(str(error))
+    if stated is None:
         return fallback
-    minutes = float(match.group(1) or 0)
-    seconds = float(match.group(2))
     # A hair over what was asked, so the retry does not land just inside the
     # window that is still closed.
-    advised = minutes * 60 + seconds + 0.1
+    advised = stated + 0.1
     return min(max(advised, fallback), max_backoff())
 
 
@@ -318,7 +322,12 @@ def provider_status() -> dict[str, bool]:
     """
     status: dict[str, bool] = {}
     for spec in _REGISTRY:
-        if spec.is_cloud:
+        if spec.name == "groq":
+            # A LIST of keys counts as configured too -- a deployment that sets
+            # only GROQ_API_KEYS must not look like it has no Groq at all.
+            from brahmastra.groq_pool import configured_keys
+            status[spec.name] = bool(configured_keys()) and _installed(spec.sdk)
+        elif spec.is_cloud:
             status[spec.name] = bool(_env(spec.key_env, "")) and _installed(spec.sdk)
         else:
             status[spec.name] = ollama_available()
@@ -638,7 +647,8 @@ def _groq_chat(
             "groq package not installed — run: uv pip install groq"
         ) from e
 
-    client = Groq(api_key=_env("GROQ_API_KEY", ""))
+    from brahmastra import groq_pool
+
     model = groq_model()
     kwargs: dict = {
         "model": model,
@@ -661,31 +671,26 @@ def _groq_chat(
     elif json_mode:
         kwargs["response_format"] = {"type": "json_object"}
 
-    # The free tier is rate limited (~12k TPM); back off rather than fail the
-    # whole pipeline run on a burst.
-    last_err: Exception | None = None
-    for attempt in range(retries):
-        try:
-            resp = client.chat.completions.create(**kwargs)
-            return resp.choices[0].message.content or ""
-        except Exception as e:
-            last_err = e
-            if _is_quota_exhausted(e):
-                # A daily cap will not clear in 2-6 seconds. Backing off here
-                # only wastes ~12s per note and still fails.
-                raise LLMQuotaExhausted(f"Groq daily quota exhausted: {e}") from e
-            if _is_model_missing(e):
-                # Retrying a retired model is as pointless as retrying a daily
-                # cap, and the raw 404 gives no hint that the fix is one env var.
-                raise LLMModelUnavailable(
-                    f"Groq model {model!r} is not available on this account. "
-                    f"Groq retires hosted models; set GROQ_MODEL in backend/.env to a "
-                    f"current one (list them with `client.models.list()`). "
-                    f"Default is {GROQ_DEFAULT_MODEL!r}. Original error: {e}"
-                ) from e
-            time.sleep(retry_delay(e, attempt))
-
-    raise LLMUnavailable(f"Groq request failed after {retries} attempts: {last_err}")
+    # Rotation, per-minute waits and daily-cap handling all live in the key
+    # pool now -- see brahmastra/groq_pool.py. What stays here is the one
+    # failure no other key can fix: a model that does not exist.
+    try:
+        resp = groq_pool.pool().call(
+            lambda client: client.chat.completions.create(**kwargs))
+        return resp.choices[0].message.content or ""
+    except LLMUnavailable:
+        raise
+    except Exception as e:
+        if _is_model_missing(e):
+            # Retrying a retired model is as pointless as retrying a daily cap,
+            # and the raw 404 gives no hint that the fix is one env var.
+            raise LLMModelUnavailable(
+                f"Groq model {model!r} is not available on this account. "
+                f"Groq retires hosted models; set GROQ_MODEL in backend/.env to a "
+                f"current one (list them with `client.models.list()`). "
+                f"Default is {GROQ_DEFAULT_MODEL!r}. Original error: {e}"
+            ) from e
+        raise LLMUnavailable(f"Groq request failed: {e}") from e
 
 
 def _anthropic_chat(

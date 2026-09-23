@@ -145,11 +145,18 @@ def test_groq_chat_uses_it_rather_than_a_guess():
     looks wrong on its own.
     """
     import inspect
-    from brahmastra import llm
+    from brahmastra import groq_pool, llm
 
-    source = inspect.getsource(llm._groq_chat)
-    assert "retry_delay(e, attempt)" in source
-    assert "2 * (attempt + 1)" not in source
+    # The wait moved: both Groq call sites go through the key pool, and the
+    # pool is where the stated delay is honoured. Pinned in both places so a
+    # future edit cannot quietly bring a guessed sleep back into either.
+    chat = inspect.getsource(llm._groq_chat)
+    assert "groq_pool.pool().call" in chat
+    assert "2 * (attempt + 1)" not in chat
+    assert "time.sleep" not in chat
+
+    pool = inspect.getsource(groq_pool.GroqKeyPool.call)
+    assert "parse_wait(str(exc))" in pool
 
 
 def test_extraction_shares_the_one_implementation():

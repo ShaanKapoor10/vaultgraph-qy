@@ -116,8 +116,18 @@ def _isolate_storage_choice(monkeypatch):
     # that forgot to stub an LLM call would have made a real one and spent real
     # quota, silently.
     for credential in ("GROQ_API_KEY", "ANTHROPIC_API_KEY", "GROQ_MODEL",
-                       "ANTHROPIC_MODEL"):
+                       "ANTHROPIC_MODEL",
+                       # The key LIST too. Adding it to .env without adding it
+                       # here would have handed every unstubbed test four live
+                       # keys -- the same leak this block was written to close,
+                       # reopened by a new variable nobody listed.
+                       "GROQ_API_KEYS", "OPENAI_API_KEY", "GEMINI_API_KEY"):
         monkeypatch.setenv(credential, "")
+
+    # And the key pool's memory of which keys are resting. Module state
+    # outliving a monkeypatch is how a stub becomes ineffective silently.
+    from brahmastra import groq_pool
+    groq_pool.reset()
 
 
 @pytest.fixture(autouse=True)

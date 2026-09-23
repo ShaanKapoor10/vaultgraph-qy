@@ -90,6 +90,8 @@ services:
       # ---- language model ------------------------------------------------
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Several keys, tried in turn -- see brahmastra/groq_pool.py.
+      GROQ_API_KEYS: ${GROQ_API_KEYS:-}
       GROQ_MODEL: ${GROQ_MODEL:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Reaches the host's Ollama from inside the container; a bare localhost
@@ -208,6 +210,8 @@ services:
       NEO4J_ENCRYPTED: ${NEO4J_ENCRYPTED:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-groq}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Several keys, tried in turn -- see brahmastra/groq_pool.py.
+      GROQ_API_KEYS: ${GROQ_API_KEYS:-}
       GROQ_MODEL: ${GROQ_MODEL:-}
       NOTION_TOKEN: ${NOTION_TOKEN:-}
       NOTION_DATABASE_ID: ${NOTION_DATABASE_ID:-}

@@ -201,7 +201,8 @@ def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
     if provider == "ollama":
         return _extract_with_ollama(title, content)
     if provider == "groq":
-        return _extract_with_groq(title, content, os.environ["GROQ_API_KEY"])
+        # No key passed: the pool rotates through every configured one.
+        return _extract_with_groq(title, content)
     if provider == "anthropic":
         return _extract_with_anthropic(title, content, os.environ["ANTHROPIC_API_KEY"])
 
@@ -443,17 +444,25 @@ def _is_too_large(error: Exception) -> bool:
     return True
 
 
-def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str, Any]]:
+def _extract_with_groq(title: str, content: str,
+                       api_key: str | None = None) -> list[dict[str, Any]]:
+    """
+    Extract through Groq, rotating across every configured key.
+
+    `api_key=None` (what the pipeline passes) uses the process-wide pool in
+    brahmastra/groq_pool.py: GROQ_API_KEYS, tried in order, each rested for as
+    long as Groq says when it runs out. An explicit key gets a pool of one --
+    the old single-key behaviour, kept for callers and tests that name a key.
+    """
     try:
-        from groq import Groq
+        import groq  # noqa: F401  -- only to fail early with a clear message
     except ImportError as e:
         raise RuntimeError("groq package not installed — run: uv pip install groq") from e
 
+    from brahmastra import groq_pool
     from brahmastra.llm import groq_model
 
-    from brahmastra.llm import _is_model_missing, _is_quota_exhausted
-
-    client = Groq(api_key=api_key)
+    keys = (groq_pool.GroqKeyPool([api_key]) if api_key else groq_pool.pool())
     user_message = _build_user_message(title, content)
     model = groq_model()
 
@@ -490,43 +499,36 @@ def _extract_with_groq(title: str, content: str, api_key: str) -> list[dict[str,
     # succeeded with 55 triples. Nothing was lost (errored notes are retried on
     # the next run) but the run reported `status: error` and skipped write-back
     # for a condition that clears in seconds.
-    last: Exception | None = None
-    for attempt in range(3):
+    # Rate limits, daily caps and dead keys are the pool's business now: it
+    # waits out a per-minute window Groq names, moves to the next key on a
+    # daily cap, and raises LLMQuotaExhausted only when EVERY key is spent --
+    # which run_extraction still recognises and stops the run on.
+    #
+    # What stays here is the one failure specific to THIS request: a 413. It
+    # is settled -- waiting cannot make the request smaller -- and unlike a
+    # spent quota it must not stop the run, because one oversized note says
+    # nothing about the next. Found via extraction_error; the failure had been
+    # read as a rate limit until the message was actually recorded.
+    for _ in range(2):
         try:
-            response = client.chat.completions.create(**kwargs)
-            reply = response.choices[0].message.content or ""
-            _memo_save(user_message, model, reply)
-            return _parse_llm_response(reply)
+            response = keys.call(
+                lambda client: client.chat.completions.create(**kwargs))
         except Exception as e:
-            last = e
-            # Both of these are settled facts, not congestion: backing off
-            # cannot make a spent daily quota refill or a deleted model exist.
-            # run_extraction stops the whole run on them.
-            if _is_quota_exhausted(e) or _is_model_missing(e):
-                raise
-            # A 413 is settled too -- waiting cannot make the request smaller,
-            # so three attempts just spend the backoff to fail identically.
-            # Unlike the two above it must NOT stop the run: one oversized note
-            # says nothing about the next one, so this fails just this note and
-            # extraction carries on. Found via extraction_error, which is what
-            # that column was added for -- the failure had been read as a rate
-            # limit until the message was actually recorded.
-            if _is_too_large(e):
+            if _is_too_large(e) and _learn_tpm(e):
                 # The provider just stated its per-minute limit. If that is new
                 # information, the same note is worth one more attempt with a
                 # reservation that now fits -- otherwise the very first
                 # oversized request would kill a note that a smaller budget
                 # extracts perfectly well.
-                if _learn_tpm(e):
-                    kwargs["max_tokens"] = _output_budget(SYSTEM_PROMPT, user_message)
-                    if kwargs["max_tokens"] >= MIN_OUTPUT_TOKENS:
-                        continue
-                raise
-            if attempt == 2:
-                break                      # no point sleeping before giving up
-            time.sleep(_retry_delay(e, attempt))
+                kwargs["max_tokens"] = _output_budget(SYSTEM_PROMPT, user_message)
+                if kwargs["max_tokens"] >= MIN_OUTPUT_TOKENS:
+                    continue
+            raise
+        reply = response.choices[0].message.content or ""
+        _memo_save(user_message, model, reply)
+        return _parse_llm_response(reply)
 
-    raise RuntimeError(f"Groq extraction failed after 3 attempts: {last}")
+    raise RuntimeError("Groq extraction did not settle after re-budgeting a 413")
 
 
 def _extract_with_anthropic(title: str, content: str, api_key: str) -> list[dict[str, Any]]:
