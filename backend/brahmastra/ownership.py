@@ -68,12 +68,11 @@ and it is why the ledger lives beside the notes rather than in a temp file.
 from __future__ import annotations
 
 import hashlib
-import os
-import sqlite3
-from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable, Iterator, Sequence
+from typing import Any, Callable, Iterable, Sequence
+
+from brahmastra.sidecar import SidecarStore
 
 # Bump to force every owner to re-declare from scratch. Only a change to what a
 # fingerprint MEANS needs it -- not a change to what is done with one.
@@ -233,87 +232,23 @@ def plan(declared: Iterable[Declared], stored: dict[str, Record],
 
 # -- storage ----------------------------------------------------------------
 #
-# The same shape as brahmastra/memo.py, and for the same reason: this is
-# bookkeeping about the notes, so it belongs in whichever database holds them,
-# and it has no business on the GraphStore contract -- adding it there would
-# oblige Neo4j to store ownership records about rows it does not have.
+# Bookkeeping about the notes, so it lives in whichever database holds them and
+# stays off the GraphStore contract -- adding it there would oblige Neo4j to
+# store ownership records about rows it does not have. The connection code is
+# shared with every other table like this one; see brahmastra/sidecar.py.
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _backend() -> str:
-    from brahmastra.env import load_env
-
-    load_env()
-    name = (os.environ.get("NOTE_BACKEND") or "").strip().lower()
-    if not name:
-        name = (os.environ.get("GRAPH_BACKEND") or "sqlite").strip().lower()
-    return "sqlite" if name in ("", "neo4j") else name
-
-
-class Ledger:
+class Ledger(SidecarStore):
     """One workspace's ownership records. Bound at construction, never filtered."""
 
-    def __init__(self, workspace: str | None = None) -> None:
-        from brahmastra.workspace import current_workspace
-
-        self.workspace = workspace or current_workspace()
-        self.backend = _backend()
-        self._ready = False
-
-    @contextmanager
-    def _cursor(self) -> Iterator[Any]:
-        if self.backend == "postgres":
-            import psycopg
-            from psycopg.rows import dict_row
-
-            from brahmastra.stores.postgres_store import dsn
-
-            conn = psycopg.connect(
-                dsn(),
-                autocommit=True,
-                connect_timeout=int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")),
-            )
-            conn.row_factory = dict_row
-            try:
-                with conn.cursor() as cur:
-                    yield cur
-            finally:
-                conn.close()
-        else:
-            from brahmastra.stores.sqlite_store import db_path
-
-            path = db_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(path), timeout=10.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
-            try:
-                with conn:
-                    yield conn.cursor()
-            finally:
-                conn.close()
-
-    def _ph(self, sql: str) -> str:
-        return sql.replace("?", "%s") if self.backend == "postgres" else sql
-
-    def init_schema(self) -> None:
-        if self._ready:
-            return
-        with self._cursor() as cur:
-            for statement in filter(None, (s.strip() for s in _SCHEMA.split(";"))):
-                cur.execute(statement)
-        self._ready = True
+    SCHEMA = _SCHEMA
 
     def describe(self) -> str:
         return f"ownership:{self.backend}#{self.workspace}"
-
-    @staticmethod
-    def _dict(row: Any) -> dict[str, Any]:
-        return row if isinstance(row, dict) else dict(row)
 
     # -- reading -----------------------------------------------------------
 

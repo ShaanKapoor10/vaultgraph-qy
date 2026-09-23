@@ -46,11 +46,11 @@ from __future__ import annotations
 
 import hashlib
 import os
-import sqlite3
 from collections import OrderedDict
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Any, Iterator
+from typing import Any
+
+from brahmastra.sidecar import SidecarStore
 
 # One place to bump when a change should invalidate every cached reply at once.
 # A change to how a reply is PARSED needs it; a change to how the parsed result
@@ -103,82 +103,20 @@ def enabled() -> bool:
 
 
 # -- storage ----------------------------------------------------------------
+#
+# Beside the notes, off the GraphStore contract, on the shared connection code
+# in brahmastra/sidecar.py -- see there for why the backend is chosen the way
+# it is, and why load_env() is called explicitly rather than by side effect.
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _backend() -> str:
-    """
-    Whichever database holds the notes. Cached replies follow the corpus.
-
-    load_env() first, and not as a side effect of something else: the same
-    omission in ingest/store.py made `get_ingest_store("office")` silently
-    choose SQLite in a deployment whose notes live in Postgres, because the
-    only thing reading .env on that path was a call it short-circuited past.
-    """
-    from brahmastra.env import load_env
-
-    load_env()
-    name = (os.environ.get("NOTE_BACKEND") or "").strip().lower()
-    if not name:
-        name = (os.environ.get("GRAPH_BACKEND") or "sqlite").strip().lower()
-    return "sqlite" if name in ("", "neo4j") else name
-
-
-class MemoStore:
+class MemoStore(SidecarStore):
     """One workspace's cached replies. Bound at construction, never filtered."""
 
-    def __init__(self, workspace: str) -> None:
-        self.workspace = workspace
-        self.backend = _backend()
-        self._ready = False
-
-    @contextmanager
-    def _cursor(self) -> Iterator[Any]:
-        if self.backend == "postgres":
-            import psycopg
-            from psycopg.rows import dict_row
-
-            from brahmastra.stores.postgres_store import dsn
-
-            conn = psycopg.connect(
-                dsn(),
-                autocommit=True,
-                connect_timeout=int(os.environ.get("POSTGRES_CONNECT_TIMEOUT", "10")),
-            )
-            conn.row_factory = dict_row
-            try:
-                with conn.cursor() as cur:
-                    yield cur
-            finally:
-                conn.close()
-        else:
-            from brahmastra.stores.sqlite_store import db_path
-
-            path = db_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(path), timeout=10.0)
-            conn.row_factory = sqlite3.Row
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA busy_timeout=10000")
-            try:
-                with conn:
-                    yield conn.cursor()
-            finally:
-                conn.close()
-
-    def _ph(self, sql: str) -> str:
-        return sql.replace("?", "%s") if self.backend == "postgres" else sql
-
-    def init_schema(self) -> None:
-        if self._ready:
-            return
-        with self._cursor() as cur:
-            for statement in filter(None, (s.strip() for s in _SCHEMA.split(";"))):
-                cur.execute(statement)
-        self._ready = True
+    SCHEMA = _SCHEMA
 
     def get(self, cache_key: str) -> str | None:
         self.init_schema()

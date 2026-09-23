@@ -162,8 +162,13 @@ def mark_note_error(id: str, error: str | None = None) -> None:
 
 
 def delete_note(id: str) -> None:
-    """Delete a note and its derived triples."""
+    """Delete a note, its derived triples, and the coercions its extraction
+    recorded -- evidence for a relation from a sentence nobody can find any
+    more is an orphan, and it would keep voting in the vocabulary report."""
     get_store().delete_note(id)
+    from brahmastra import coercions
+
+    coercions.forget(id)
 
 
 # ---------------------------------------------------------------------------

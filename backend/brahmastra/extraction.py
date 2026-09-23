@@ -587,6 +587,14 @@ def _is_quota_error(message: str) -> bool:
     return _is_quota_exhausted(exc) or _is_model_missing(exc)
 
 
+def _describe_coercion(raw: dict[str, Any], stored: dict[str, Any] | None,
+                       reason: str) -> dict[str, Any]:
+    """A coercion as a row. See brahmastra.coercions.describe."""
+    from brahmastra.coercions import describe
+
+    return describe(raw, stored, reason)
+
+
 def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     """
     Normalise a model-produced triple onto the ontology.
@@ -685,14 +693,22 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
 
     valid: list[dict[str, Any]] = []
     coercions: list[str] = []
+    # The same coercions, as rows -- for `brahmastra.coercions`, which is where
+    # ONTOLOGY_DESIGN.md's "grow the vocabulary from evidence" rule finally gets
+    # its evidence. The list above is the display form this function has always
+    # returned; the rows carry the raw relation and both endpoints, which is
+    # what deciding whether to add a relation actually needs.
+    coercion_rows: list[dict[str, Any]] = []
     for t in raw:
         triple, reason = _coerce_triple(t)
         if triple is None:
             # Only genuinely unusable facts are dropped now.
             coercions.append(reason or "dropped")
+            coercion_rows.append(_describe_coercion(t, None, reason or "dropped"))
             continue
         if reason:
             coercions.append(reason)
+            coercion_rows.append(_describe_coercion(t, triple, reason))
         valid.append(triple)
     skipped = len(raw) - len(valid)
 
@@ -712,6 +728,13 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
             mark_dirty(f"extracted {note_id}")
         except Exception:                              # noqa: BLE001
             pass
+
+    # Replaced at the same moment as the triples, from the same reply, so the
+    # two never describe different extractions. Recorded even when EMPTY: a
+    # note that used to need coercing and no longer does must lose its old
+    # rows, or the report keeps citing a sentence the model now handles.
+    from brahmastra import coercions as coercion_log
+    coercion_log.record(note_id, coercion_rows)
 
     db.mark_note_done(note_id)
     return {
@@ -775,11 +798,17 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
                 break
 
     total_added = sum(r["triples_added"] for r in results)
+    reasons = [c for r in results for c in r.get("coercions") or []]
     out = {
         "extracted": len([r for r in results if not r["error"]]),
         "total_pending": len(queue),
         "retried": len(retried),
         "triples_added": total_added,
+        # Counted here, stored in brahmastra.coercions. `unmapped` is the one
+        # to watch: each is a relation the model reached for and the ontology
+        # did not have. `python -m brahmastra.coercions` says which.
+        "coercions": len(reasons),
+        "unmapped": sum(1 for c in reasons if c.startswith("unmapped_relation:")),
         "errors": errors,
     }
     if quota_exhausted:
