@@ -1,6 +1,8 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-23 (afternoon), on branch `brahmastra-v3`, at 701 passing tests.
+Revised 2026-09-24, on branch `brahmastra-v3`, at 783 passing tests, deployed to the
+local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
+confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
 they produced rewrote three of its items.
 
@@ -11,34 +13,24 @@ repeated: a change earns its place by measurement.
 
 ---
 
-## ⚠️ Tier 0 — needs a decision, and blocks seeing any of the rest
+## Tier 0 — resolved 2026-09-24
 
-### The running stack is three days stale, and it reverts every fix
+The stack was rebuilt from this branch and every note re-extracted. Resolving it
+turned up four more things, all fixed and deployed:
 
-`docker ps` shows the whole stack — `backend`, `scheduler`, `keepalive` — on an
-image **built 2026-09-20**, before any of this branch's work. The `scheduler`
-container re-runs the pipeline with that image's resolver, so every
-fresh-process run that wrote the corrected graph was overwritten within minutes:
+| | found by | fix |
+|---|---|---|
+| **The scheduler only ever ran `default`** — notes in every other workspace, a transcript's included, sat at `pending` forever | counting notes per workspace | `live_sync` ticks every workspace |
+| **That change leaked the personal Notion into three workspaces**, and they wrote their insights onto the real pages | its first tick | the global Notion source is for the home workspace only, enforced in the resolver; copies removed, pages restored |
+| **Deleting a note never reached Neo4j** — every deleted note's triples survived in the deployed arrangement | cleaning up the leak | `CompositeStore.delete_note` / `delete_workspace` reach both halves, derived first |
+| **Nothing could say which code was running** | the stale Docker image and MCP server | `version.py`: fingerprint in `/health` and every pipeline result |
 
-```
-fresh process, today's code      886 clusters, 0 incoherent pairs
-what /graph serves right now     850 clusters, a 20-file mega-cluster, and
-                                 'BRAHMASTRA_API_KEY located_in Vercel'
-```
+Also shipped: **Groq key rotation** (`GROQ_API_KEYS`, waits as long as Groq says),
+and **meeting records** (item 3 below).
 
-Nothing below is visible in the running system until this is resolved. It is a
-decision rather than a task because the stack presumably tracks `main`, and this
-branch is unmerged. The options:
-
-- **Merge `brahmastra-v3`, then rebuild** (`docker compose up --build -d` from
-  the repo root). Volumes hold the data and survive a rebuild.
-- **Rebuild from the branch** to try it live before merging.
-- **Stop the `scheduler` container** while testing, so fresh-process runs stick.
-
-Then, once the running code is current: a re-extraction of every note (item 1
-below applied to the live graph). **41 of 92 notes cost nothing** — their
-replies are memoised and the ontology change left every key intact — and the
-rest cost one call each.
+⚠️ **The MCP server still runs code from before all of this.** It is a host process
+started by Claude Code, not a container; restart it (reconnect the Brahmastra MCP
+server, or restart Claude Code) to pick up the fixes.
 
 ---
 
@@ -75,34 +67,11 @@ ONTOLOGY_DESIGN.md should say so.
 
 ## Tier 1 — evidence in hand
 
-### 1. Typed extraction for core `extraction.py`
+### 1. Typed extraction — built, measured, NOT adopted
 
-Core asks for `response_format={"type":"json_object"}` — valid JSON of *any
-shape*. The evidence for fixing that has grown three ways since this morning:
-
-- **Shape failures are common.** The probe found an empty string sitting in the
-  triples array in **3 of 37 notes**, and one note failed outright on Groq's own
-  `400 Failed to validate JSON`. The first of these used to delete the note's
-  triples.
-- **The measured gain.** `comprehend.py` records schema enforcement buying
-  **15 points (43% → 58%)** in ingestion.
-- **It is the root cause of the domain problem.** The model cannot obey a
-  domain it is never told. A schema can carry it.
-
-**How to build it — from cocoindex's meeting-notes example.** Their schema
-carries the rules in field descriptions (*"participants: people who attended
-other than the organizer. Do not include the organizer here."*), so the schema
-is half the prompt. Two further ideas from their conversation example: give
-each entity type **example names** ("Python (programming language)", "Lex
-Fridman"), and ask for **the fullest unambiguous name** at extraction time.
-Fewer variants born is less resolution needed afterwards.
-
-**Budget it.** Unlike the domain widening, this changes `SYSTEM_PROMPT`, so it
-invalidates every memoised extraction: 92 calls for a full re-extraction. A test
-(`test_the_widening_did_not_touch_the_prompt`) guards the distinction.
-
-`llm.py` already carries `json_schema` through every provider. Must degrade to
-`json_object` for a model that rejects schema mode.
+A/B on 17 real notes: more triples, no fewer degraded ones, no lower related_to
+share, and the enum pushes the model into wrong relations. Stays behind
+`EXTRACTION_SCHEMA=1`. See "Deliberately not doing".
 
 ### 2. Finish the domain evidence
 
@@ -126,27 +95,15 @@ the reset.
 
 ## Tier 2 — the brain
 
-### 3. Meeting artifacts as graph nodes (replaces "promote `decided`/`assigned_to`")
+### 3. Meeting artifacts as graph nodes — DONE
 
-**Why the old item was wrong.** It waited for coercion evidence that `decided`
-and `assigned_to` were needed. That evidence can never arrive: meetings do not
-go through the extraction vocabulary at all. Decisions, action items, risks and
-questions go into the `meeting_artifacts` table — typed, owned, quoted — where
-GraphRAG cannot traverse them.
-
-**What cocoindex does instead.** Their meeting-notes example uses exactly
-`ATTENDED`, `DECIDED` and `ASSIGNED_TO` — between **Meeting**, **Task** and
-**Person nodes**. Their conversation example generalises it: a **Statement** is
-a node, with `Person → made → Statement`, `Session → contains → Statement` and
-`Statement → mentions → Entity`. Provenance lives in the graph structure rather
-than in a side table.
-
-**Why it matters.** "What did Sarah decide about the Acme contract?" becomes a
-traversal. Today it is a SQL query nobody using `/ask` knows to make.
-
-**What is already done.** Artifacts have stable derived ids, owners, quotes and
-chunk provenance, and ownership reconciles them. The missing part is declaring
-them as nodes and edges.
+Measured first: through the prose bridge 5 of 13 owners were tied to their item and
+0 of 16 items kept their kind. `ingest/graph_record.py` now declares them directly —
+`decided_by`, `assigned_to`, `raised_by`, `asked_by`, `discussed_in`, `attended` —
+13 of 13 and 16 of 16, the speaker's own words as evidence, no model. System
+vocabulary, kept out of the extraction prompt so nothing cached was invalidated.
+A meeting node never merges with its topic (`Q3 release` ≠ `Q3 release planning`);
+action items still merge with the extracted tasks they came from, which is right.
 
 ### 4. A second owner kind: code files
 
@@ -190,6 +147,12 @@ Off because four runs showed it break-even and unstable at temperature 0 — on
 **two** model settings, `LLM_MODEL` for extraction and `RESOLUTION_LLM_MODEL`
 for resolution. Split ours the same way first, so the judge can be measured on a
 stronger model without changing extraction.
+
+### 7b. An activity merged with the thing it is about (new, unmeasured)
+
+Seen once on the meeting graph: `legal review of Acme contract` ≡ `Acme contract`.
+An activity and its object are two things. One example is not evidence — survey the
+default workspace for the pattern before writing a rule.
 
 ### 8. An ANN index for the embedding stage
 
