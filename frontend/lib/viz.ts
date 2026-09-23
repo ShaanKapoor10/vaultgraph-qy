@@ -39,6 +39,13 @@ export const RELATION_LABEL: Record<RelationType, string> = {
   member_of: "member of",
   blocks: "blocks",
   related_to: "related to",
+  // Meeting records, written by code (backend/brahmastra/ingest/graph_record.py).
+  decided_by: "decided by",
+  assigned_to: "assigned to",
+  raised_by: "raised by",
+  asked_by: "asked by",
+  discussed_in: "discussed in",
+  attended: "attended",
 }
 
 export function noteTitleMap(notes: { id: string; title: string }[]): Record<string, string> {

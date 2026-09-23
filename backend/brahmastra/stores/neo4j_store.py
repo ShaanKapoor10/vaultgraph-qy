@@ -55,9 +55,11 @@ load_env()
 # The closed set of relation names is the injection boundary: relationship
 # types cannot be parameterised in Cypher, so every type we interpolate must
 # come from the ontology and nothing else.
-from brahmastra.ontology import RELATION_NAMES
+from brahmastra.ontology import ALL_RELATION_NAMES
 
-_VALID_RELATIONS = {r.lower() for r in RELATION_NAMES}
+# Every relation a stored triple may carry -- including the system vocabulary
+# (decided_by, assigned_to, ...) that code writes and no model is asked for.
+_VALID_RELATIONS = {r.lower() for r in ALL_RELATION_NAMES}
 
 
 def relation_to_type(relation: str) -> str:

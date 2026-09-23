@@ -20,6 +20,14 @@ export type RelationType =
   | "employed_by"
   | "member_of"
   | "related_to"
+  // System vocabulary: written by code from verified meeting artifacts
+  // (backend/brahmastra/ingest/graph_record.py), never asked of a model.
+  | "decided_by"
+  | "assigned_to"
+  | "raised_by"
+  | "asked_by"
+  | "discussed_in"
+  | "attended"
 
 export interface RelationDef {
   functional: boolean
@@ -45,6 +53,12 @@ export const ONTOLOGY: Record<RelationType, RelationDef> = {
   employed_by:     { functional: true,  description: "person works at / is employed by an organisation" },
   member_of:       { functional: false, description: "X belongs to a group, team or body (non-employment)" },
   related_to:      { functional: false, description: "general topical link — only when no specific relation fits" },
+  decided_by:      { functional: false, description: "the decision was made by this person" },
+  assigned_to:     { functional: false, description: "this person is accountable for the action" },
+  raised_by:       { functional: false, description: "this person named the risk — not its owner" },
+  asked_by:        { functional: false, description: "this person asked the question" },
+  discussed_in:    { functional: false, description: "the item came up in this meeting" },
+  attended:        { functional: false, description: "the person took part in the meeting" },
 }
 
 export const RELATION_TYPES = Object.keys(ONTOLOGY) as RelationType[]

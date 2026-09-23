@@ -878,14 +878,28 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Notes whose triples are WRITTEN BY CODE, never read by a model. A meeting
+# record is declared straight from verified artifacts (ingest/graph_record.py);
+# extracting it would replace every deterministic, owner-tied edge with a
+# model's guess at the same prose -- the lossy path the record exists to avoid.
+CODE_WRITTEN_SOURCES: frozenset[str] = frozenset({"meeting-record"})
+
+
+def _model_extracted(note: dict[str, Any]) -> bool:
+    return (note.get("source") or "") not in CODE_WRITTEN_SOURCES
+
+
 def run_extraction(full: bool = False) -> dict[str, Any]:
     """
     Extract all pending notes (or all notes if full=True).
     Called by the pipeline router and the full pipeline orchestrator.
+
+    Code-written notes (CODE_WRITTEN_SOURCES) are never queued, including by a
+    full re-extraction -- see the constant for why.
     """
     if full:
         # Re-mark all notes as pending so they get re-extracted
-        notes = db.get_notes()
+        notes = [n for n in db.get_notes() if _model_extracted(n)]
         for n in notes:
             db.upsert_note(
                 n["id"], n["title"], n["content"],
@@ -906,7 +920,7 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
     if os.environ.get("EXTRACT_RETRY_ERRORS", "1") != "0":
         retried = db.get_notes(status="error")
 
-    queue = pending + retried
+    queue = [n for n in pending + retried if _model_extracted(n)]
     if not queue:
         return {
             "extracted": 0, "total_pending": 0, "retried": 0,

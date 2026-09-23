@@ -187,3 +187,43 @@ validation:
   confidence_threshold: 0.4
   allow_custom_relations: false
   entity_type_enforcement: "soft"
+
+# ---------------------------------------------------------------------------
+# System vocabulary -- WRITTEN BY CODE, never listed in the extraction prompt.
+# Declared from verified meeting artifacts by backend/brahmastra/ingest/graph_record.py.
+# Kept out of the prompt so no cached extraction is invalidated and no model is
+# invited to invent a decision. See ontology.py for the measurement behind it.
+# ---------------------------------------------------------------------------
+system_entity_types: ["meeting", "decision", "action_item", "risk", "question"]
+
+system_relations:
+  - name: "decided_by"
+    domain: ["decision"]
+    range: ["person"]
+    functional: false
+    description: "the decision was made by this person"
+  - name: "assigned_to"
+    domain: ["action_item"]
+    range: ["person"]
+    functional: false
+    description: "this person is accountable for the action"
+  - name: "raised_by"
+    domain: ["risk"]
+    range: ["person"]
+    functional: false
+    description: "this person named the risk -- not its owner"
+  - name: "asked_by"
+    domain: ["question"]
+    range: ["person"]
+    functional: false
+    description: "this person asked the question"
+  - name: "discussed_in"
+    domain: ["decision", "action_item", "risk", "question"]
+    range: ["meeting"]
+    functional: false
+    description: "the item came up in this meeting"
+  - name: "attended"
+    domain: ["person"]
+    range: ["meeting"]
+    functional: false
+    description: "the person took part in the meeting"

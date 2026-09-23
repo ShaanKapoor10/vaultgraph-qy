@@ -277,7 +277,67 @@ INVERSE_ALIASES: frozenset[str] = frozenset({
 
 RELATION_NAMES: list[str] = [r.name for r in RELATIONS]
 
-_RELATION_MAP: dict[str, RelationDef] = {r.name: r for r in RELATIONS}
+
+# ---------------------------------------------------------------------------
+# System vocabulary -- written by code, never asked of a model
+# ---------------------------------------------------------------------------
+#
+# Meetings reach the graph two ways. Their chunks become prose notes that
+# extraction reads, which carries the CONTENT well: on the one ingested meeting,
+# 15 of 16 decisions, risks, actions and questions shared their key words with
+# a triple. It carries the STRUCTURE badly:
+#
+#     owner tied to their item          5 of 13
+#     decision / risk / question kept   0 of 16
+#     evidence                          a quote of generated prose
+#
+# "Mei will update the roadmap" arrived as `Mei --related_to--> roadmap update`.
+# And a decision to "revisit in planning for Q4" arrived as a FUNCTIONAL
+# `scheduled_for Q4`, a date nobody set, which would read as a contradiction
+# the day a real one is.
+#
+# The artifacts already hold all of it -- kind, owner, verbatim quote -- as
+# typed rows. So `ingest/graph_record.py` declares them straight into the graph
+# with this vocabulary: deterministic, no model, every owner tied. cocoindex's
+# meeting example uses the same shape (Meeting, Task and Person nodes;
+# ATTENDED, DECIDED, ASSIGNED_TO), adopted here because it measured better,
+# not because it was theirs.
+#
+# NOT in the extraction prompt, deliberately. The prompt lists ENTITY_TYPES and
+# RELATIONS, and is part of every memoised extraction's cache key; putting these
+# there would invalidate every cached reply and invite the model to invent
+# decisions. Code writes them. Validation accepts them.
+
+SYSTEM_ENTITY_TYPES: list[str] = [
+    "meeting", "decision", "action_item", "risk", "question",
+]
+
+_ITEMS = ["decision", "action_item", "risk", "question"]
+
+SYSTEM_RELATIONS: list[RelationDef] = [
+    RelationDef("decided_by", domain=["decision"], range_=["person"],
+                description="the decision was made by this person"),
+    RelationDef("assigned_to", domain=["action_item"], range_=["person"],
+                description="this person is accountable for the action"),
+    RelationDef("raised_by", domain=["risk"], range_=["person"],
+                description="this person named the risk -- not its owner"),
+    RelationDef("asked_by", domain=["question"], range_=["person"],
+                description="this person asked the question"),
+    RelationDef("discussed_in", domain=_ITEMS, range_=["meeting"],
+                description="the item came up in this meeting"),
+    RelationDef("attended", domain=["person"], range_=["meeting"],
+                description="the person took part in the meeting"),
+]
+
+SYSTEM_RELATION_NAMES: list[str] = [r.name for r in SYSTEM_RELATIONS]
+
+# Every name a stored triple may carry, extractable or not. What storage
+# validates against -- Neo4j refuses to build Cypher for anything else.
+ALL_ENTITY_TYPES: list[str] = ENTITY_TYPES + SYSTEM_ENTITY_TYPES
+ALL_RELATION_NAMES: list[str] = RELATION_NAMES + SYSTEM_RELATION_NAMES
+
+_RELATION_MAP: dict[str, RelationDef] = {
+    r.name: r for r in RELATIONS + SYSTEM_RELATIONS}
 
 
 def normalise_relation(raw: str) -> tuple[str | None, bool]:

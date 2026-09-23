@@ -79,8 +79,11 @@ def _rewrite(store, transcript_id, content):
 
 
 def _notes_for(transcript_id):
+    """The transcript's CHUNK notes. Its meeting record (`<tid>-record`) is a
+    different kind of note with its own lifecycle, tested on its own below."""
     return sorted(n["id"] for n in db.get_notes()
-                  if n["id"].startswith(transcript_id))
+                  if n["id"].startswith(transcript_id)
+                  and not n["id"].endswith("-record"))
 
 
 # -- the bug -----------------------------------------------------------------
@@ -132,8 +135,11 @@ def test_emptying_a_transcript_removes_every_note(store, understood):
     second = assemble.process_transcript(tid, store=store)
 
     assert second["chunks"] == 0
-    assert second["notes_removed"] == first["notes"]
+    # Every chunk note AND the meeting record: an emptied transcript records
+    # no meeting, so the record goes with the rest.
+    assert second["notes_removed"] == first["notes"] + 1
     assert _notes_for(tid) == []
+    assert db.get_note(f"{tid}-record") is None
 
 
 # -- and the other direction -------------------------------------------------
@@ -356,7 +362,9 @@ def test_purging_a_transcript_takes_its_notes_with_it(store, understood):
 
     out = assemble.drop_transcript(tid, store=store, purge_notes=True)
 
-    assert out["notes_removed"] == report["notes"]
+    # Its chunk notes and its meeting record: destroy means everything it owned.
+    assert out["notes_removed"] == report["notes"] + 1
+    assert db.get_note(f"{tid}-record") is None
     assert _notes_for(tid) == []
     ledger = ownership.Ledger(workspace="default")
     assert ledger.target_kinds(assemble.OWNER_KIND, tid) == []
@@ -381,8 +389,9 @@ def test_the_ledger_records_what_the_transcript_owns(store, understood):
 
     ledger = ownership.Ledger(workspace="default")
     owned = ledger.read(assemble.OWNER_KIND, tid, "note")
-    assert sorted(owned) == _notes_for(tid)
-    assert len(owned) == report["notes"]
+    # The chunk notes, and the meeting record -- owned like the rest.
+    assert sorted(owned) == sorted(_notes_for(tid) + [f"{tid}-record"])
+    assert len(owned) == report["notes"] + 1
     # Every key settled: nothing left saying "an update was in flight".
     assert all(record.pending is None for record in owned.values())
 

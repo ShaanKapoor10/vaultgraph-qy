@@ -173,7 +173,9 @@ def test_re_ingesting_replaces_rather_than_duplicates(store, understood):
 
     assert len(store.get_artifacts(kind="decision")) == 1
     assert len(store.get_chunks(tid)) == 1
-    assert len(db.get_notes()) == 1
+    # One chunk note and one meeting record -- and still one of each after a
+    # second run, which is the property under test.
+    assert sorted(n["id"] for n in db.get_notes()) == [f"{tid}-c0", f"{tid}-record"]
 
 
 # ---------------------------------------------------------------------------

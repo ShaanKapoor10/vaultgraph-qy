@@ -181,6 +181,58 @@ def comprehension_strategy():
     return comprehend_chunk_focused
 
 
+def _write_graph_record(notes: ownership.Streaming, transcript_id: str,
+                        record: dict[str, Any], chunks: list[Chunk],
+                        artifacts: list[Any], report: dict[str, Any]) -> int:
+    """
+    Write the meeting record note and its triples. Returns how many triples.
+
+    Owned through the same `notes` stream as the chunk notes, so a transcript
+    that stops producing a record -- emptied, or left with no artifacts --
+    loses it at settle time, and an unchanged record costs nothing.
+
+    Reported, never raised: the chunks are comprehended by now, and one failed
+    write must not discard them. The intent is already in the ledger, so the
+    next run redoes it.
+    """
+    import json
+
+    from brahmastra import db
+    from brahmastra.ingest import graph_record as gr
+
+    try:
+        meeting = gr.meeting_name(record["title"], record.get("occurred_at"))
+        # Speakers come from segmentation, not from a model, so the attendance
+        # edges are as deterministic as everything else in the record.
+        participants = sorted({s for c in chunks for s in (c.speakers or [])})
+        triples = gr.record_triples(meeting, participants, artifacts)
+        if not triples:
+            return 0
+        body = gr.record_body(meeting, participants, artifacts)
+        note_id = gr.record_note_id(transcript_id)
+        fp = ownership.fingerprint(meeting, body,
+                                   json.dumps(triples, sort_keys=True))
+        if notes.begin(note_id, fp):
+            db.upsert_note(note_id, meeting, body, mark_pending=False,
+                           source=gr.SOURCE)
+            db.delete_triples_for_note(note_id)
+            for t in triples:
+                t["source_note_id"] = note_id
+            db.insert_triples(triples)
+            db.mark_note_done(note_id)
+            try:
+                from brahmastra.pipeline import mark_dirty
+                mark_dirty(f"meeting record {note_id}")
+            except Exception:                          # noqa: BLE001
+                pass
+            notes.commit(note_id)
+        return len(triples)
+    except Exception as exc:                           # noqa: BLE001
+        report["errors"].append(
+            {"stage": "graph_record", "error": f"{type(exc).__name__}: {exc}"[:300]})
+        return 0
+
+
 def _settle_chunks(owned: ownership.Streaming, store: IngestStore,
                    transcript_id: str, report: dict[str, Any]) -> int:
     """Delete the chunk rows a re-segmentation stopped producing."""
@@ -463,6 +515,7 @@ def _process(
         # unreportable before anything recorded ownership.
         "notes_written": 0,
         "notes_removed": 0,
+        "graph_record": 0,
         "chunks_removed": 0,
         "artifacts_written": 0,
         "artifacts_removed": 0,
@@ -637,11 +690,20 @@ def _process(
     # After the loop, because until the last chunk is comprehended the run does
     # not yet know what it declares -- and before the status is decided, so a
     # `partial` run still reports what it removed.
+    reduced = consolidate(pending_artifacts)
+
+    # The meeting record, declared straight into the graph from the verified
+    # artifacts -- see ingest/graph_record.py for what the prose bridge lost.
+    # BEFORE `_settle`, which is not optional: the record note is owned like
+    # every other note this transcript writes, and settling first would find
+    # last run's record undeclared and delete it as an orphan.
+    report["graph_record"] = _write_graph_record(
+        notes, transcript_id, record, chunks, reduced["artifacts"], report)
+
     report["notes_removed"] = _settle(notes, report)
     report["chunks_removed"] = _settle_chunks(owned_chunks, store,
                                               transcript_id, report)
 
-    reduced = consolidate(pending_artifacts)
     report["artifacts"] = _settle_artifacts(
         ledger, store, transcript_id, reduced["artifacts"], report, force)
     report["merged"] = reduced["merged"]
