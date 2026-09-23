@@ -309,6 +309,39 @@ prevent it — do not weaken them:
 If you add a query and it raises `WorkspaceIsolationError`, the guard is right and the
 query is wrong. Add the filter.
 
+### ⚠️ Notion is a fourth layer, and it leaked (2026-09-24)
+The global `NOTION_DATABASE_ID` used to be a fallback for **every** workspace that named
+no Notion source. Harmless while only `default` was ever synced; the moment the scheduler
+learned to tick every workspace, one tick copied four personal pages into `office`,
+`work` and `transcripts-demo`, and each then **wrote its own insights onto those real
+pages**. Caught on the first tick; the copies were removed and `default`'s insights
+rewritten onto the pages. No pages were created.
+
+- The fallback is now for the **home workspace only** (`BRAHMASTRA_WORKSPACE`); anything
+  else reaches Notion through a `notion_database_id` it names, or not at all. Enforced in
+  `sync._notion_target_for_current_workspace`, so every caller gets it.
+- **A guard at one caller is not a guard.** The scheduler skipped its own pull, and
+  `run_pipeline`'s Sync stage pulled anyway through the resolver.
+
+### ⚠️ Deleting a note must reach BOTH halves
+`delete_note` is a SOURCE method, so `CompositeStore` sent it to Postgres alone — and
+Postgres holds nothing derived. In the deployed arrangement every deleted note left its
+triples in Neo4j (`DELETE /notes`, ownership's orphan cleanup, the leak cleanup). The
+suite runs single-store SQLite, where one delete does both, so no test could see it.
+`delete_note` and `delete_workspace` are now explicit on `CompositeStore`, derived rows
+first. They are the ONLY source methods routed to both halves.
+
+### The scheduler keeps every workspace current
+`live_sync` ticks every registered workspace, each bound for the whole tick. Before, it
+ran only `BRAHMASTRA_WORKSPACE`, and notes elsewhere — including a transcript's — sat at
+`pending` forever. `LIVE_SYNC_WORKSPACES` narrows the set.
+
+### Which code is running?
+`/health` and every pipeline result carry `code: {fingerprint, on_disk, stale}`.
+`python -m brahmastra.version --against http://localhost:8001` compares this checkout
+with the running server. Use it after every rebuild — twice in one day the answer was
+"older than you think" and nothing said so.
+
 ---
 
 ## LLM — pluggable, Groq by default
@@ -344,6 +377,11 @@ GraphRAG, cluster summaries), so they can never disagree about which provider is
   the fix. List current models with `Groq(...).models.list()`; the replacement must honour
   `response_format={"type":"json_object"}`, which extraction depends on — `qwen/qwen3.6-27b`
   does **not** (it emits reasoning tokens and fails JSON validation).
+- **Several keys: `GROQ_API_KEYS`** (comma-separated), falling back to `GROQ_API_KEY`.
+  `brahmastra/groq_pool.py` rotates them: a key out for the day rests as long as Groq
+  says and the next is tried at once; if every key is inside a per-minute window it waits
+  the stated seconds (at most twice per call); an invalid key is dropped. Limits are per
+  ORGANIZATION, so two keys on one account share one budget. Keys are masked in status.
 - Groq's free tier is rate limited: a `full=True` re-extraction of ~44 notes typically
   errors on a third of them. Those notes are **retried automatically on the next run**
   (`EXTRACT_RETRY_ERRORS=0` disables), so just run the pipeline again.
