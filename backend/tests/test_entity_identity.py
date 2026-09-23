@@ -124,16 +124,31 @@ def test_a_cluster_with_no_proper_noun_still_gets_a_name():
 #
 # Pinning changed the answer in 8 of 676 clusters, and kept the better name in
 # every one. The pairs below are those eight, verbatim.
+#
+# TWO OF THEM ARE NOW HANDLED BETTER ELSEWHERE, and that is worth saying rather
+# than quietly deleting. '2026-08-12'/'2026-08-18' and 'threshold 0.55'/'0.60'
+# are two different facts, not two names for one, and `_different_numbers`
+# refuses them outright -- so they never reach a cluster for pinning to name.
+# Pinning was stopping the RENAME; the number rule stops the MERGE, which is
+# the real defect. They stay in this list because _pick_canonical must still
+# behave correctly if a pair like them ever does arrive, and because a
+# measurement is a record of what was true when it was taken.
 
 MEASURED_WINS = [
     ("Shaan Kapoor", "ShaanKapoor10"),          # a person renamed to a handle
     ("CocoIndex", "Cocoindex"),                 # correct casing, lost
-    ("2026-08-12", "2026-08-18"),               # a DIFFERENT DATE
+    ("2026-08-12", "2026-08-18"),               # a DIFFERENT DATE -- now refused
     ("embedding model", "embeddings.get_model"),
     ("decision", "decisions"),
     ("action_item", "action items"),
     ("SQLite deployment", "SQLite deployments"),
     ("function run_pipeline", "run_pipeline function"),
+]
+
+# The two the number rule now takes off pinning's hands entirely.
+SUPERSEDED_BY_A_GUARD = [
+    ("2026-08-12", "2026-08-18"),
+    ("threshold 0.55", "threshold 0.60"),
 ]
 
 
@@ -198,3 +213,29 @@ def test_it_can_be_switched_off(monkeypatch):
     assert pinned_enabled() is False
     assert _pick_canonical(["Shaan Kapoor", "ShaanKapoor10"],
                            {"Shaan Kapoor"}) == "ShaanKapoor10"
+
+
+def test_the_pairs_pinning_no_longer_has_to_save():
+    """
+    A rename prevented is worth less than a merge prevented. Two of the eight
+    measured wins were two different FACTS -- a date and a threshold -- and
+    `_different_numbers` now refuses them, so they never form a cluster at all.
+    Pinned naming was treating the symptom.
+    """
+    from brahmastra.entity_resolution import is_distinct
+
+    for a, b in SUPERSEDED_BY_A_GUARD:
+        assert is_distinct(a, b), f"{a!r} and {b!r} should never merge"
+
+
+def test_the_other_six_still_need_pinning():
+    """...and the rest are genuinely one thing spelled two ways, so a guard
+    must NOT refuse them -- only the naming can be right there."""
+    from brahmastra.entity_resolution import is_distinct
+
+    superseded = {tuple(sorted(p)) for p in SUPERSEDED_BY_A_GUARD}
+    for a, b in MEASURED_WINS:
+        if tuple(sorted((a, b))) in superseded:
+            continue
+        assert not is_distinct(a, b), f"{a!r} and {b!r} are one thing"
+        assert _pick_canonical([a, b], {a}) == a

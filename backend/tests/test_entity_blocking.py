@@ -138,3 +138,115 @@ def test_an_empty_name_does_not_break_the_bound():
     """Division by a zero length. Reached through a mention that normalises away."""
     assert list(_candidate_pairs(["!!!", "???"])) is not None
     assert list(_candidate_pairs([])) == []
+
+
+# -- the embedding stage, which blocking does NOT help -----------------------
+#
+# Blocking cuts the heuristic path because it only needs CANDIDATES. The
+# embedding path needs every pair's score, and `embeddings @ embeddings.T`
+# builds an n x n matrix -- so the wall it hits first is memory, and it arrives
+# suddenly:
+#
+#        1,000 mentions       1M entries      4 MB
+#       10,000              100M            400 MB
+#       50,000              2.5B             10 GB
+#
+# Row blocks bound the peak without changing the answer. An ANN index is the
+# real fix above that, and is what cocoindex reaches for.
+
+import numpy as np
+
+
+class _FakeEmbedder:
+    """Deterministic vectors, so the comparison is exact and needs no model."""
+
+    def encode(self, texts, normalize_embeddings=True):
+        rng = np.random.default_rng(7)
+        v = rng.normal(size=(len(texts), 16)).astype(np.float32)
+        return v / np.linalg.norm(v, axis=1, keepdims=True)
+
+
+def _square_way(mentions, embeddings, threshold):
+    """The n x n version this replaced, kept as the thing to agree with."""
+    matrix = embeddings @ embeddings.T
+    out = {}
+    for i in range(len(mentions)):
+        for j in range(i + 1, len(mentions)):
+            score = float(matrix[i, j])
+            if score >= threshold:
+                out[(mentions[i], mentions[j])] = score
+    return out
+
+
+@pytest.fixture
+def fake_embedder(monkeypatch):
+    import brahmastra.entity_resolution as er
+
+    model = _FakeEmbedder()
+    monkeypatch.setattr(er, "_get_embedder", lambda: model)
+    return model
+
+
+@pytest.mark.parametrize("count,block", [(600, 512), (1300, 512), (1000, 7),
+                                         (1000, 1)])
+def test_row_blocks_find_exactly_the_same_pairs(monkeypatch, fake_embedder,
+                                                count, block):
+    """
+    The pair SET must match exactly, at any block size -- including one that
+    does not divide the corpus, and one of a single row.
+
+    The scores differ in the last bits (about 1e-7 on float32), because a
+    blocked matrix product sums in a different order. That is inherent to any
+    blocking and is why this compares which pairs came back, not their
+    floating-point values.
+    """
+    import brahmastra.entity_resolution as er
+
+    monkeypatch.setattr(er, "_EMBED_BLOCK", block)
+    mentions = [f"mention number {i}" for i in range(count)]
+
+    blocked = er._embedding_sim(mentions)
+    reference = _square_way(mentions, fake_embedder.encode(mentions),
+                            er.EMBEDDING_THRESHOLD)
+
+    assert set(blocked) == set(reference)
+    assert reference, "pick data that actually produces pairs"
+    assert max(abs(blocked[k] - reference[k]) for k in reference) < 1e-5
+
+
+def test_a_lost_embedder_says_so(monkeypatch):
+    """
+    Losing embeddings must DEGRADE the run, never fail it -- the heuristics
+    still work. But it must not degrade silently: without them the resolver
+    stops finding every merge that needs meaning rather than spelling, and the
+    only symptom is a graph with more nodes than it should have.
+    """
+    import brahmastra.entity_resolution as er
+
+    monkeypatch.setattr(er, "_get_embedder", lambda: None)
+    assert er._embedding_sim(["a", "b"]) == {}
+    assert "unavailable" in er._embedding_error
+
+
+def test_a_failure_mid_computation_says_why(monkeypatch):
+    """MemoryError is the one this will actually meet, and it used to come
+    back as 'no similar pairs'."""
+    import brahmastra.entity_resolution as er
+
+    class Broken:
+        def encode(self, texts, normalize_embeddings=True):
+            raise MemoryError("Unable to allocate 10.4 GiB")
+
+    monkeypatch.setattr(er, "_get_embedder", lambda: Broken())
+    assert er._embedding_sim(["a", "b"]) == {}
+    assert "MemoryError" in er._embedding_error
+
+
+def test_success_clears_the_last_failure(monkeypatch, fake_embedder):
+    """A stale reason is worse than none -- it would report a healthy run as
+    degraded forever."""
+    import brahmastra.entity_resolution as er
+
+    er._embedding_error = "something from before"
+    er._embedding_sim([f"mention {i}" for i in range(20)])
+    assert er._embedding_error == ""

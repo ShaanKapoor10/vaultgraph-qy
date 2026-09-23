@@ -44,6 +44,11 @@ JARO_THRESHOLD = 0.92          # jellyfish jaro_winkler_similarity
 EMBEDDING_THRESHOLD = 0.82     # cosine similarity of sentence-transformer embeddings
 MERGE_THRESHOLD = 0.85         # minimum sim to merge two mentions
 
+# How many mention rows are multiplied out at once. Caps the peak of the
+# similarity computation at block x n floats rather than n x n -- see
+# `_embedding_sim` for the numbers that make this matter.
+_EMBED_BLOCK = 512
+
 
 # ---------------------------------------------------------------------------
 # Text normalisation
@@ -348,32 +353,69 @@ def _get_embedder():
     return get_model()
 
 
+# Why the last call to `_embedding_sim` returned nothing, or "" if it did not.
+#
+# A module-level note rather than a raised exception, because losing embeddings
+# must DEGRADE the run rather than fail it -- the heuristics still work. But it
+# must not degrade silently: without embeddings the resolver stops finding
+# every merge that needs meaning rather than spelling, and the only symptom is
+# a graph with more nodes than it should have. `embedding_used: false` in the
+# report said THAT it happened and never why.
+_embedding_error: str = ""
+
+
 def _embedding_sim(mentions: list[str]) -> dict[tuple[str, str], float]:
     """
-    Compute pairwise cosine similarity for all mention pairs.
-    Returns a dict {(a, b): sim} for pairs whose sim ≥ EMBEDDING_THRESHOLD.
-    Returns {} if sentence-transformers unavailable.
+    Cosine similarity for every mention pair, above EMBEDDING_THRESHOLD.
+
+    Computed in ROW BLOCKS. The obvious `embeddings @ embeddings.T` builds an
+    n x n matrix, and that is the wall this stage hits first -- not time, but
+    memory, and it arrives suddenly:
+
+           1,000 mentions       1M entries      4 MB
+          10,000              100M            400 MB
+          50,000              2.5B             10 GB
+
+    Blocking the heuristic path does nothing about it, because this one needs
+    every pair's score rather than a candidate list. Row blocks keep the peak
+    at `_EMBED_BLOCK` rows regardless of corpus size and produce exactly the
+    same dict; an ANN index is the real answer above that, and is what
+    cocoindex reaches for.
+
+    Returns {} if sentence-transformers is unavailable or the work fails, and
+    records WHY in `_embedding_error`.
     """
+    global _embedding_error
+    _embedding_error = ""
+
     model = _get_embedder()
-    if model is None or len(mentions) < 2:
+    if model is None:
+        _embedding_error = "sentence-transformers unavailable"
+        return {}
+    if len(mentions) < 2:
         return {}
 
     try:
-        import numpy as np
-
         embeddings = model.encode(mentions, normalize_embeddings=True)
-        # Cosine similarity = dot product when embeddings are L2-normalised
-        sim_matrix = embeddings @ embeddings.T
 
         result: dict[tuple[str, str], float] = {}
         n = len(mentions)
-        for i in range(n):
-            for j in range(i + 1, n):
-                s = float(sim_matrix[i, j])
-                if s >= EMBEDDING_THRESHOLD:
-                    result[(mentions[i], mentions[j])] = s
+        for start in range(0, n, _EMBED_BLOCK):
+            stop = min(start + _EMBED_BLOCK, n)
+            # Only the columns to the right of this block: the matrix is
+            # symmetric and the diagonal is a mention against itself.
+            block = embeddings[start:stop] @ embeddings[start:].T
+            for row in range(stop - start):
+                i = start + row
+                for offset in range(row + 1, n - start):
+                    score = float(block[row, offset])
+                    if score >= EMBEDDING_THRESHOLD:
+                        result[(mentions[i], mentions[start + offset])] = score
         return result
-    except Exception:
+    except Exception as exc:
+        # Including MemoryError, which is what the n x n version raised on a
+        # large corpus -- and which used to come back as "no similar pairs".
+        _embedding_error = f"{type(exc).__name__}: {exc}"[:200]
         return {}
 
 
@@ -851,7 +893,15 @@ def run_resolution() -> dict[str, Any]:
         if t["object_text"]:
             raw_mentions.add(t["object_text"].strip())
 
-    mentions = [m for m in raw_mentions if m]
+    # SORTED, and not for tidiness. `raw_mentions` is a set, so its iteration
+    # order depends on the hash seed and differs per process -- the same root
+    # cause that made cluster ids and canonical names flap between identical
+    # runs. Those two are fixed at the point of use, but leaving the list
+    # unordered keeps the uncertainty alive everywhere else: `_candidate_pairs`
+    # returns INDICES into it, `refused` records pairs in the order they were
+    # compared, and every measurement behind the guards in this file was taken
+    # over a sorted list. Production should run on what was measured.
+    mentions = sorted(m for m in raw_mentions if m)
     uf = _UnionFind(mentions)
     # Reported, not merely applied. A guard whose effect is invisible is one
     # nobody can audit, and this one is the difference between a graph that
@@ -860,7 +910,6 @@ def run_resolution() -> dict[str, Any]:
 
     # 2. Heuristic pairs
     heuristic_merged: list[tuple[str, str, float, str]] = []
-    n = len(mentions)
     # Every pair below BLOCKING_MIN_MENTIONS, a provably complete subset above
     # it. `test_entity_blocking.py` pins that the two agree.
     for i, j in _pairs_to_compare(mentions):
@@ -917,7 +966,7 @@ def run_resolution() -> dict[str, Any]:
                 judged["refused"] += 1
 
     embedding_used = bool(embedding_pairs)
-    for (a, b), sim in embedding_pairs.items():
+    for a, b in embedding_pairs:
         uf.union(a, b)
 
     # 4. Build cluster list
@@ -986,6 +1035,10 @@ def run_resolution() -> dict[str, Any]:
         # Clusters Union-Find fused through a bridge and that were taken apart
         # again. A number above zero is the transitivity hole being caught.
         "split_clusters": split_clusters,
+        # Present only when embeddings were meant to run and could not. The
+        # heuristics still merged, so the run is degraded rather than failed --
+        # but a stage that quietly stops contributing must say so.
+        **({"embedding_error": _embedding_error} if _embedding_error else {}),
         # Established names that absorbed another established name. Reported
         # because a merge of two things the graph already had names for is the
         # one event somebody should actually look at.
