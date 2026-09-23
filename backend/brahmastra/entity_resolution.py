@@ -194,6 +194,44 @@ def _different_files(a: str, b: str) -> bool:
     return not long.endswith("/" + short)
 
 
+def _file_and_not_file(a: str, b: str) -> bool:
+    """
+    True when exactly one of the two names is a file path.
+
+    A file is not the thing it contains, implements or is named after:
+
+        0.948  entity_resolution.py  ==  entity resolution    the concept it implements
+        0.947  sqlite_store.py       ==  SQLiteStore          the class it defines
+        0.923  CLAUDE.md             ==  Claude Code          a product it mentions
+        0.926  brahmastra.llm        ==  brahmastra-v3        a module and a branch
+
+    In a code knowledge graph these are different nodes by construction -- the
+    file IMPLEMENTS the concept -- and fusing them destroys exactly the edge
+    that says so. Measured on the live graph: 12 merges paired a path with a
+    non-path, and all 12 were wrong.
+
+    COCOINDEX'S IDEA, ADAPTED TO WHAT OUR DATA CAN BEAR. Their conversation
+    example resolves each entity type separately, so a person can never merge
+    with an org. Doing that here was measured and rejected: 29 of 73 merges
+    cross a type boundary, and about half of those are RIGHT -- 'Groq' is an
+    `organisation` in one triple and a `tool` in the next, because our types
+    are chosen by the model per triple across twelve fuzzy categories, while
+    theirs are structural (a name sits in a `mentioned_person` field). Gating
+    on our types would have broken the good merges along with the bad.
+
+    What IS reliable is syntax, which is the lesson every rule in this file has
+    taught: the model can mislabel a type, but it cannot make "sqlite_store.py"
+    not a path. So the separation is drawn on the one type boundary that
+    structure proves.
+
+    This also removes the `ingest/cases` bridge at its root. Half of the 12
+    were that one extensionless directory joining six different files -- which
+    `_split_incoherent` had been cleaning up after the fact. Now the edges are
+    never made.
+    """
+    return bool(_path_of(a)) != bool(_path_of(b))
+
+
 def _is_tail(short: str, long: str) -> bool:
     """One path naming the same file as another, written more fully."""
     return long.endswith("/" + short)
@@ -317,6 +355,7 @@ def _different_identifiers(a: str, b: str) -> bool:
 def is_distinct(a: str, b: str) -> bool:
     """Provably two things. See the three rules above."""
     return (_different_files(a, b)
+            or _file_and_not_file(a, b)
             or _different_numbers(a, b)
             or _different_identifiers(a, b))
 

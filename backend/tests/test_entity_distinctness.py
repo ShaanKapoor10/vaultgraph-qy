@@ -133,17 +133,25 @@ INGEST = [
 ]
 
 
-def test_the_bridge_really_does_bridge():
+def test_the_bridge_no_longer_bridges():
     """
-    The premise. `_path_of` returns None for an extensionless path, so the file
-    rule ABSTAINS on every pair involving it -- and six abstentions were enough
-    to hold seven distinct files in one node.
+    THIS TEST USED TO PIN THE OPPOSITE, and the history is the point.
+
+    `_path_of` returns None for an extensionless path, so the file rule
+    abstained on every pair involving "ingest/cases" -- and six abstentions held
+    seven distinct files in one node. `_split_incoherent` was written to clean
+    that up after the fact.
+
+    `_file_and_not_file` now refuses those six edges directly: a path merging
+    with a name that is not one is a file merging with something that is not a
+    file. The cluster is never formed, so there is nothing to split. The split
+    stays, because the next bridge will not look like this one.
     """
     bridge = "backend/brahmastra/ingest/cases"
-    assert not any(is_distinct(bridge, m) for m in INGEST if m != bridge)
+    assert all(is_distinct(bridge, m) for m in INGEST if m != bridge)
     refused = [(a, b) for i, a in enumerate(INGEST) for b in INGEST[i + 1:]
                if is_distinct(a, b)]
-    assert len(refused) == 15
+    assert len(refused) == 21            # every pair, where it used to be 15
 
 
 def test_a_cluster_never_keeps_a_pair_the_guards_refuse():
@@ -298,3 +306,61 @@ def test_a_group_never_contains_a_pair_the_guards_refuse():
 
 def test_a_mention_with_no_path_is_ignored():
     assert _grouped(sorted(["Sarah", "the release", "a decision"])) == []
+
+
+# -- a file is not the thing it implements -----------------------------------
+#
+# cocoindex's conversation example resolves each entity TYPE separately, so a
+# person can never merge with an org. Measured here and rejected as-is: 29 of 73
+# merges cross a type boundary and about half are RIGHT, because our types are
+# assigned by the model per triple ('Groq' is an organisation in one triple and
+# a tool in the next). What IS reliable is syntax -- so the separation is drawn
+# on the one type boundary structure proves. 12 merges paired a path with a
+# non-path on the live graph; all 12 were wrong.
+
+from brahmastra.entity_resolution import _file_and_not_file
+
+MEASURED_FILE_VS_NAME = [
+    ("entity_resolution.py", "entity resolution", 0.948),   # the concept it implements
+    ("sqlite_store.py", "SQLiteStore", 0.947),              # the class it defines
+    ("neo4j_store.py", "Neo4jStore", 0.943),
+    ("entity_resolution.py", "entity_resolution stage", 0.937),
+    ("brahmastra.llm", "brahmastra-v3", 0.926),             # a module and a branch
+    ("CLAUDE.md", "Claude Code", 0.923),                    # a file and a product
+]
+
+
+@pytest.mark.parametrize("path,name,score", MEASURED_FILE_VS_NAME)
+def test_a_file_is_not_the_thing_it_is_about(path, name, score):
+    assert _file_and_not_file(path, name), f"{path!r} == {name!r} merged at {score}"
+    assert is_distinct(path, name)
+
+
+def test_the_rule_is_symmetric():
+    assert _file_and_not_file("SQLiteStore", "sqlite_store.py")
+
+
+def test_two_paths_are_left_to_the_path_rules():
+    """Path against path is `_different_files` and `_same_file_groups` --
+    this rule must not second-guess either of them."""
+    assert not _file_and_not_file("app/page.tsx", "page.tsx")
+    assert not _file_and_not_file("llm.py", "memo.py")
+
+
+def test_two_names_are_left_alone():
+    """No path on either side: nothing structural to say."""
+    assert not _file_and_not_file("Groq", "groq")
+    assert not _file_and_not_file("Sarah", "Sarah Chen")
+
+
+def test_the_right_cross_type_merges_still_happen():
+    """
+    The reason per-type resolution was rejected. These pairs carry DIFFERENT
+    model-assigned types on the live graph and are the same thing all the
+    same -- a syntactic rule must leave them alone.
+    """
+    for a, b in [("Groq", "groq"),                              # organisation / tool
+                 ("_ask function", "function _ask"),            # concept / tool
+                 ("Multi-hop GraphRAG", "multi-hop GraphRAG"),  # concept / feature
+                 ("SQLite deployment", "SQLite deployments")]:  # concept / project
+        assert not is_distinct(a, b), f"{a!r} and {b!r} are one thing"
