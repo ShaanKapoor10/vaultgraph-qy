@@ -125,3 +125,65 @@ def test_a_renumbered_cluster_still_reuses_its_summary(temp_db):
     carried = _previous_summaries_by_membership()
     # Same members, new id 88 -- the lookup must still hit.
     assert carried.get(_membership_key(["y", "x"])) == "About X and Y."
+
+
+# ---------------------------------------------------------------------------
+# Running out of model must not cost a summary that needs no model
+# ---------------------------------------------------------------------------
+#
+# summarise_clusters returned {} when no provider was usable, and the caller
+# blanks every cluster it is not handed back -- so a run without quota ERASED
+# every carried summary. The quota path's `break` did the same to every
+# carried summary ranked below the cluster that hit the cap.
+
+def _two_clusters(db):
+    _cache(db, [
+        {"id": 1, "members": ["a", "b", "c"], "size": 3, "summary": ""},
+        {"id": 2, "members": ["d", "e"], "size": 2, "summary": "About D and E."},
+    ])
+
+
+def test_no_provider_keeps_carried_summaries(temp_db, monkeypatch):
+    import brahmastra.cluster_summary as cs
+    monkeypatch.setattr(cs, "llm_available", lambda: False)
+    _two_clusters(temp_db)
+
+    report = cs.run_cluster_summaries()
+
+    by_id = {c["id"]: c["summary"] for c in temp_db.get_cached_graph()["stats"]["concept_clusters"]}
+    assert by_id == {1: "", 2: "About D and E."}
+    assert report["generated"] == 0 and report["reused"] == 1
+
+
+def test_quota_running_out_keeps_the_carried_summaries_ranked_below(temp_db, monkeypatch):
+    import brahmastra.cluster_summary as cs
+    from brahmastra.llm import LLMQuotaExhausted
+
+    def spent(*a, **k):
+        raise LLMQuotaExhausted("daily cap")
+
+    monkeypatch.setattr(cs, "llm_available", lambda: True)
+    monkeypatch.setattr(cs, "_summarise_one", spent)
+    _two_clusters(temp_db)              # the uncarried cluster ranks FIRST
+
+    cs.run_cluster_summaries()
+
+    by_id = {c["id"]: c["summary"] for c in temp_db.get_cached_graph()["stats"]["concept_clusters"]}
+    assert by_id[2] == "About D and E."
+
+
+def test_quota_stops_generation_after_the_first_refusal(temp_db, monkeypatch):
+    import brahmastra.cluster_summary as cs
+    from brahmastra.llm import LLMQuotaExhausted
+    calls = []
+
+    def spent(*a, **k):
+        calls.append(1)
+        raise LLMQuotaExhausted("daily cap")
+
+    monkeypatch.setattr(cs, "llm_available", lambda: True)
+    monkeypatch.setattr(cs, "_summarise_one", spent)
+    _cache(temp_db, [{"id": i, "members": [f"x{i}", f"y{i}"], "size": 2, "summary": ""}
+                     for i in range(5)])
+    cs.run_cluster_summaries()
+    assert len(calls) == 1

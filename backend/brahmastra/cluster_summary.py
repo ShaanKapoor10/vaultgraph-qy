@@ -74,8 +74,13 @@ def summarise_clusters(
     Clusters that error out individually are skipped (left without a summary)
     rather than failing the whole batch.
     """
-    if not llm_available():
-        return {}
+    # No model is no reason to lose a summary that needs none. This used to
+    # return {} here, and the caller blanks every cluster it is not handed
+    # back -- so a run without a provider, or out of quota, ERASED every
+    # carried-forward summary, costing the next run a call per cluster to
+    # write the same descriptions again. Carried ones are always kept now;
+    # only generating stops.
+    can_generate = llm_available()
 
     # Index edges by endpoint membership once.
     summaries: dict[int, str] = {}
@@ -95,6 +100,8 @@ def summarise_clusters(
         if carried:
             summaries[cluster["id"]] = carried
             continue
+        if not can_generate:
+            continue
         member_set = set(members)
         internal_edges = [
             e for e in edges
@@ -104,9 +111,10 @@ def summarise_clusters(
             summaries[cluster["id"]] = _summarise_one(members, internal_edges)
         except LLMQuotaExhausted:
             # The provider is out of quota until it resets, so every remaining
-            # cluster would fail the same way. Keep what we have and stop
-            # rather than spending minutes to add nothing.
-            break
+            # cluster would fail the same way. Stop GENERATING -- but not the
+            # loop: a `break` here dropped every carried summary ranked below
+            # this cluster, and the caller then blanked them.
+            can_generate = False
         except Exception:
             # Fail soft per-cluster: one bad/empty response shouldn't drop the rest.
             continue
@@ -132,17 +140,20 @@ def run_cluster_summaries() -> dict[str, Any]:
     # Counted BEFORE summarising, because summarise_clusters fills the gaps in.
     # Reporting only a total would hide the thing worth knowing: whether this
     # run spent 25 LLM calls or none.
-    carried_in = sum(1 for c in clusters if c.get("summary"))
+    carried_ids = {c["id"] for c in clusters if c.get("summary")}
+    carried_in = len(carried_ids)
 
     summaries = summarise_clusters(clusters, edges)
 
     # Merge: every cluster gets a `summary` key (empty string if not generated)
     # so the frontend can rely on the field always existing.
+    # A carried summary outside the top MAX_CLUSTERS is still correct -- its
+    # membership is unchanged by construction -- so it is kept, not blanked.
     for c in clusters:
-        c["summary"] = summaries.get(c["id"], "")
+        c["summary"] = summaries.get(c["id"], c.get("summary") or "")
 
     db.cache_graph(cached["graph"], stats)
-    generated = max(len(summaries) - carried_in, 0)
+    generated = sum(1 for cid in summaries if cid not in carried_ids)
     return {
         "summarised": len(summaries),
         "clusters_total": len(clusters),
