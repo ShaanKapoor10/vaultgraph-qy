@@ -611,6 +611,13 @@ def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None
     which is defined over any types, so the connection survives even when its
     precise meaning does not.
     """
+    # Not every element of the array is a triple. JSON mode guarantees valid
+    # JSON, not the right SHAPE, and gpt-oss-120b has been caught emitting
+    # {"triples": [{...}, {...}, "", {...}]} -- an empty string sitting in the
+    # array. This used to raise AttributeError on `t.keys()`, and see
+    # extract_note for why that cost the note every triple it had.
+    if not isinstance(t, dict):
+        return None, "malformed"
     required = {"subject_text", "subject_type", "relation", "object_text", "object_type"}
     if not required.issubset(t.keys()):
         return None, "missing_fields"
@@ -688,9 +695,21 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
         db.mark_note_error(note_id, str(e))
         return {"triples_added": 0, "triples_skipped": 0, "error": str(e)}
 
-    # Delete previous triples for this note before re-inserting
-    db.delete_triples_for_note(note_id)
-
+    # BUILD THE REPLACEMENT FIRST. DELETE SECOND.
+    #
+    # This used to delete the note's triples here, BEFORE coercing the reply.
+    # So the day the model returned {"triples": [{...}, "", {...}]} -- which
+    # gpt-oss-120b does -- coercion raised on the empty string, and the note:
+    #
+    #     lost every triple it had            2 -> 0
+    #     stayed marked `done`                so nothing would ever retry it
+    #     took the rest of the stage with it the exception escaped run_extraction
+    #
+    # A note that silently holds nothing while reporting itself healthy. The
+    # element is now handled (see _coerce_triple), but the ORDER is the real
+    # fix, and it is the same lesson ownership.py was built on: never remove
+    # the old rows until the new ones exist. A failure anywhere in the loop
+    # below now leaves the previous extraction exactly where it was.
     valid: list[dict[str, Any]] = []
     coercions: list[str] = []
     # The same coercions, as rows -- for `brahmastra.coercions`, which is where
@@ -699,23 +718,37 @@ def extract_note(note: dict[str, Any]) -> dict[str, Any]:
     # returned; the rows carry the raw relation and both endpoints, which is
     # what deciding whether to add a relation actually needs.
     coercion_rows: list[dict[str, Any]] = []
-    for t in raw:
-        triple, reason = _coerce_triple(t)
-        if triple is None:
-            # Only genuinely unusable facts are dropped now.
-            coercions.append(reason or "dropped")
-            coercion_rows.append(_describe_coercion(t, None, reason or "dropped"))
-            continue
-        if reason:
-            coercions.append(reason)
-            coercion_rows.append(_describe_coercion(t, triple, reason))
-        valid.append(triple)
+    try:
+        if not isinstance(raw, list):
+            raise ValueError(f"extraction returned {type(raw).__name__}, not a list")
+        for t in raw:
+            triple, reason = _coerce_triple(t)
+            if triple is None:
+                # Only genuinely unusable facts are dropped now.
+                coercions.append(reason or "dropped")
+                coercion_rows.append(_describe_coercion(t, None, reason or "dropped"))
+                continue
+            if reason:
+                coercions.append(reason)
+                coercion_rows.append(_describe_coercion(t, triple, reason))
+            valid.append(triple)
+    except Exception as e:
+        # Something about this reply nothing above anticipated. Record it as
+        # an ERROR, which the next run retries, rather than letting it escape
+        # -- escaping is what took the rest of the stage down, and it skipped
+        # the status update, so the note stayed `done` with nothing in it.
+        # The previous triples are untouched, because nothing was deleted yet.
+        message = f"could not read the extraction reply: {type(e).__name__}: {e}"
+        db.mark_note_error(note_id, message[:400])
+        return {"triples_added": 0, "triples_skipped": 0, "error": message}
     skipped = len(raw) - len(valid)
 
     # Tag each triple with the source note id
     for t in valid:
         t["source_note_id"] = note_id
 
+    # Only now, with the replacement complete, does the old extraction go.
+    db.delete_triples_for_note(note_id)
     if valid:
         db.insert_triples(valid)
         # New triples mean resolve, build-graph and the cache are now behind.

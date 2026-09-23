@@ -219,3 +219,107 @@ def test_the_extract_stage_reports_the_count(store, monkeypatch):
     out = extraction.run_extraction()
     assert out["unmapped"] == 1
     assert out["coercions"] == 1
+
+
+# -- the data-loss bug the coercion probe found ------------------------------
+#
+# Found by running extraction over the real corpus to gather coercion evidence.
+# gpt-oss-120b returned, verbatim:
+#
+#     {"triples":[{...Sarah owns the Apollo project...},"",{...}]}
+#
+# JSON mode guarantees valid JSON, not the right SHAPE. `_coerce_triple` called
+# `.keys()` on the empty string -- and extract_note had ALREADY deleted the
+# note's triples by then. Reproduced on a scratch database:
+#
+#     triples           2 -> 0
+#     status            stayed `done`, so nothing would ever retry it
+#     the exception     escaped, taking the rest of the stage with it
+
+def _triple(s, o):
+    return {"subject_text": s, "subject_type": "person", "relation": "reports_to",
+            "object_text": o, "object_type": "person", "confidence": 0.9}
+
+
+def _count(note_id):
+    return len([t for t in db.get_all_triples() if t["source_note_id"] == note_id])
+
+
+def test_a_junk_element_no_longer_costs_the_note_its_triples(store, monkeypatch):
+    import brahmastra.extraction as extraction
+
+    db.upsert_note("n1", "Team", "Sarah and Raj report to Mei.", mark_pending=True)
+    monkeypatch.setattr(extraction, "_extract_with_llm",
+                        lambda t, c: [_triple("Sarah", "Mei"), "",
+                                      _triple("Raj", "Mei")])
+
+    result = extraction.extract_note(db.get_note("n1"))
+
+    assert result["error"] is None
+    assert _count("n1") == 2                       # both real triples landed
+    assert result["coercions"] == ["malformed"]    # and the junk is visible
+
+
+def test_a_junk_element_is_evidence_too(store, monkeypatch):
+    """Kept with what it actually was: a model emitting junk elements is worth
+    knowing about, even though it says nothing about the vocabulary."""
+    import brahmastra.extraction as extraction
+
+    db.upsert_note("n1", "Team", "Sarah reports to Mei.", mark_pending=True)
+    monkeypatch.setattr(extraction, "_extract_with_llm",
+                        lambda t, c: [_triple("Sarah", "Mei"), ""])
+    extraction.extract_note(db.get_note("n1"))
+
+    rows = co.CoercionStore(workspace="default").all(["malformed"])
+    assert len(rows) == 1 and rows[0]["subject_text"] == "''"
+
+
+def test_an_unreadable_reply_leaves_the_previous_extraction_alone(store, monkeypatch):
+    """
+    THE ORDER IS THE REAL FIX. Whatever goes wrong while reading a reply, the
+    old triples are still there afterwards, because nothing is deleted until
+    the replacement is complete -- the lesson ownership.py was built on.
+    """
+    import brahmastra.extraction as extraction
+
+    db.upsert_note("n1", "Team", "Sarah reports to Mei.", mark_pending=True)
+    monkeypatch.setattr(extraction, "_extract_with_llm",
+                        lambda t, c: [_triple("Sarah", "Mei"), _triple("Raj", "Mei")])
+    extraction.extract_note(db.get_note("n1"))
+    assert _count("n1") == 2
+
+    monkeypatch.setattr(extraction, "_extract_with_llm",
+                        lambda t, c: {"not": "a list"})
+    result = extraction.extract_note(db.get_note("n1"))
+
+    assert _count("n1") == 2
+    assert result["error"]
+
+
+def test_an_unreadable_reply_is_retried_not_marked_done(store, monkeypatch):
+    """`done` with nothing in it was the silent half of this bug: a note that
+    looks healthy and holds nothing, which no future run would ever revisit."""
+    import brahmastra.extraction as extraction
+
+    db.upsert_note("n1", "Team", "Sarah reports to Mei.", mark_pending=True)
+    monkeypatch.setattr(extraction, "_extract_with_llm",
+                        lambda t, c: {"not": "a list"})
+    extraction.extract_note(db.get_note("n1"))
+
+    assert db.get_note("n1")["extraction_status"] == "error"
+
+
+def test_one_bad_note_does_not_stop_the_stage(store, monkeypatch):
+    import brahmastra.extraction as extraction
+
+    db.upsert_note("bad", "Bad", "x", mark_pending=True)
+    db.upsert_note("good", "Good", "Sarah reports to Mei.", mark_pending=True)
+
+    def reply(title, content):
+        return {"not": "a list"} if title == "Bad" else [_triple("Sarah", "Mei")]
+
+    monkeypatch.setattr(extraction, "_extract_with_llm", reply)
+    out = extraction.run_extraction()
+
+    assert _count("good") == 1
+    assert [e["note_id"] for e in out["errors"]] == ["bad"]

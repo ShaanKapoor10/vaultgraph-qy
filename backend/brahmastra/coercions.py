@@ -56,6 +56,7 @@ KINDS = {
     "empty_endpoint": "dropped: a subject or object was blank",
     "placeholder_entity": "dropped: 'Unknown', 'N/A' and similar",
     "low_confidence": "dropped: the model was not sure",
+    "malformed": "dropped: an array element that was not a triple at all",
 }
 
 # The kinds that are evidence about the VOCABULARY. The drops are evidence
@@ -142,6 +143,14 @@ def describe(raw: dict[str, Any], stored: dict[str, Any] | None,
     colon, which `_coerce_triple` uses as the kind.
     """
     kind = reason.split(":", 1)[0]
+    if not isinstance(raw, dict):
+        # Not a triple at all -- an empty string in the array, a bare number.
+        # Kept, with what it actually was, because "the model is emitting
+        # junk elements" is itself evidence, about the prompt if not the
+        # vocabulary.
+        return {"kind": kind, "raw_relation": None, "stored_relation": None,
+                "subject_type": None, "object_type": None,
+                "subject_text": repr(raw)[:200], "object_text": None}
     source = stored if stored is not None else raw
 
     def text(key: str) -> str | None:
