@@ -84,10 +84,52 @@ If none of those apply, the distinction is decoration — the extra relation add
 prompt length and a chance for the model to pick wrongly, for no query benefit.
 
 **Growth should be driven by evidence, not anticipation.** Do not add relations
-speculatively. Run extraction, read the `coercions` output, and promote a
-relation when it keeps appearing as `unmapped_relation:` — that is data telling
-you the vocabulary is short. `employed_by` and `member_of` were added on
-exactly that basis: a real note lost a real fact.
+speculatively. `employed_by` and `member_of` were added on evidence: a real note
+lost a real fact.
+
+### Where the evidence actually shows up — measured, 2026-09-23
+
+This section used to say: read the coercions and promote a relation when it
+keeps appearing as `unmapped_relation:`. Coercions are now persisted
+(`python -m brahmastra.coercions`), and the first corpus-wide read overturned
+that expectation.
+
+| coercion kind | what it means | seen on 41 real notes |
+|---|---|---|
+| `unmapped_relation` | a verb the vocabulary lacks | **0** |
+| `domain_range` | a known verb between types the ontology refuses | **108** |
+| `malformed` | an array element that is not a triple at all | 7 |
+
+**With a closed vocabulary listed in the prompt, the model never leaves the
+list**, so the new verbs this rule waited for do not come. The pressure
+arrives as **domain/range**: a relation used correctly between types its
+definition never admitted. All of it traced to one cause. `file` and
+`feature` joined `ENTITY_TYPES` on 2026-06-25, ten days after the relation
+domains were written, and nobody went back. The prompt describes each
+relation but never states its domain, so the model obeyed the description and
+a check it could not see degraded the triple to `related_to`. CLAUDE.md's own
+recommended note, *"The file extraction.py implements retry logic"*, was one.
+
+Widening `has_component`, `provides` and `implements` took the `related_to`
+share on those notes from **31.3% to 16.7%**.
+
+So the rule, as it now reads:
+
+1. **Look at `domain_range` first.** Group by relation and by the type that was
+   refused; rank by how many *notes* produced it, not how many times.
+2. **Read the sentences, not the counts.** Three relations cleared the same bar
+   for `concept` and were refused, because the examples were junk
+   ("len(chunks) provides call count"). `concept` is where the model puts what it
+   cannot type; admitting it admits that.
+3. **When you add an entity type, revisit every relation's domain and range.**
+   That omission is the whole of the finding above.
+4. `unmapped_relation` still matters — for a model that does not respect the
+   list, or a prompt that stops listing it. It just was not where the signal
+   was.
+
+Widening a domain does **not** change the extraction prompt (domains are not in
+it), so memoised replies stay valid and re-coercion is free. Adding a relation
+or an entity type *does* change it, and invalidates every cached extraction.
 
 ---
 
@@ -107,7 +149,9 @@ Defined in three files that must stay in sync:
 ## Changing the ontology
 
 1. Add the relation to all three files, with the narrowest domain/range that
-   is still true.
+   is still true. **Adding an entity type?** Walk every relation's domain and
+   range and decide whether the new type belongs — see above for what skipping
+   this cost.
 2. Set `functional` only if a subject may hold **one** value at a time —
    this directly drives contradiction detection.
 3. Add surface forms to `RELATION_ALIASES`; if any states the inverse, add it
@@ -115,4 +159,6 @@ Defined in three files that must stay in sync:
 4. Give the extraction prompt a concrete good/bad example. The model follows
    examples more reliably than descriptions.
 5. Re-extract with `run_pipeline(full=True)`. Existing triples are not
-   retro-fitted — they were extracted under the old vocabulary.
+   retro-fitted — they were extracted under the old vocabulary. Budget it: a
+   change to the prompt misses every memoised reply, and the free tier cannot
+   re-read the whole corpus in one day.
