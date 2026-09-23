@@ -216,3 +216,50 @@ def test_an_unchanged_meeting_does_not_rewrite_its_record(store, understood):
     again = [t["extracted_at"] for t in db.get_all_triples()
              if t["source_note_id"] == gr.record_note_id(tid)]
     assert again == first
+
+
+# -- resolution: a meeting is not the thing it discussed ---------------------
+#
+# Seen on the first meeting record written: `Q3 release` merged into the
+# meeting `Q3 release planning`. A meeting is named after its transcript, and
+# transcripts are titled by their topic, so this collision is systematic. The
+# same run merged extracted tasks with the action items they came from, and
+# those merges are right -- so the guard is for meetings only.
+
+import brahmastra.entity_resolution as er
+
+
+def test_a_meeting_never_merges_with_its_topic(monkeypatch):
+    monkeypatch.setattr(er, "_MEETINGS", frozenset({"Q3 release planning"}))
+    assert er.is_distinct("Q3 release", "Q3 release planning")
+
+
+def test_action_items_may_still_merge_with_the_tasks_they_came_from(monkeypatch):
+    monkeypatch.setattr(er, "_MEETINGS", frozenset({"Q3 release planning"}))
+    assert not er.is_distinct("roadmap update",
+                              "Update the roadmap to reflect the new release date")
+
+
+def test_two_dated_meetings_stay_apart(monkeypatch):
+    a, b = "Standup (2026-09-01)", "Standup (2026-09-08)"
+    monkeypatch.setattr(er, "_MEETINGS", frozenset({a, b}))
+    assert er.is_distinct(a, b)          # by their dates, not by the meeting rule
+
+
+def test_the_meeting_set_is_only_live_during_a_run(monkeypatch):
+    """Built from the run's own triples and emptied after, so `is_distinct`
+    is unchanged for every other caller."""
+    monkeypatch.setattr(er.db, "get_all_triples", lambda: [
+        {"subject_text": "Sarah", "subject_type": "person", "relation": "attended",
+         "object_text": "Q3 release planning", "object_type": "meeting"},
+    ])
+    seen = {}
+
+    def spy(triples):
+        seen["meetings"] = er._MEETINGS
+        return {"clusters": 0}
+
+    monkeypatch.setattr(er, "_resolve", spy)
+    er.run_resolution()
+    assert seen["meetings"] == frozenset({"Q3 release planning"})
+    assert er._MEETINGS == frozenset()

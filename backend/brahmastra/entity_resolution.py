@@ -352,12 +352,42 @@ def _different_identifiers(a: str, b: str) -> bool:
     return not (ia & ib)
 
 
+# Mentions that name a MEETING in the current run. Filled by run_resolution
+# from the triples' own types and emptied afterwards; empty everywhere else, so
+# `is_distinct` is unchanged for any caller that is not resolving a corpus.
+#
+# Types are trustworthy HERE for a reason worth stating, because model-assigned
+# types were measured and rejected as a merge rule: `meeting` is never assigned
+# by a model. Only ingest/graph_record.py writes it, from the transcript.
+_MEETINGS: frozenset[str] = frozenset()
+
+
+def _meeting_and_not_meeting(a: str, b: str) -> bool:
+    """
+    A meeting is not the thing it discussed.
+
+    A meeting node is named after its transcript, and a transcript is usually
+    titled by its TOPIC -- so meetings collide with their subjects by
+    construction. Seen on the first meeting record written: `Q3 release` merged
+    into the meeting `Q3 release planning`, fusing the release's schedule with
+    the meeting that planned it.
+
+    Deliberately narrow. The same run merged two extracted tasks with the
+    action items they came from -- "roadmap update" with "Update the roadmap to
+    reflect the new release date" -- and those merges are RIGHT: they tie the
+    extracted facts to the owned action. A rule keeping every system node apart
+    would have cost two good merges to stop one bad one.
+    """
+    return (a in _MEETINGS) != (b in _MEETINGS)
+
+
 def is_distinct(a: str, b: str) -> bool:
-    """Provably two things. See the three rules above."""
+    """Provably two things. See the rules above."""
     return (_different_files(a, b)
             or _file_and_not_file(a, b)
             or _different_numbers(a, b)
-            or _different_identifiers(a, b))
+            or _different_identifiers(a, b)
+            or _meeting_and_not_meeting(a, b))
 
 
 def _is_contrasting(a: str, b: str) -> bool:
@@ -1015,6 +1045,20 @@ def run_resolution() -> dict[str, Any]:
     triples = db.get_all_triples()
     if not triples:
         return {"clusters": 0, "mentions": 0, "merge_edges": 0, "embedding_used": False}
+
+    global _MEETINGS
+    _MEETINGS = frozenset(
+        text.strip() for t in triples
+        for text, kind in ((t["subject_text"], t.get("subject_type")),
+                           (t["object_text"], t.get("object_type")))
+        if kind == "meeting" and text)
+    try:
+        return _resolve(triples)
+    finally:
+        _MEETINGS = frozenset()
+
+
+def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
 
     # 1. Collect unique mentions
     raw_mentions: set[str] = set()
