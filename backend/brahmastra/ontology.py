@@ -90,9 +90,38 @@ RELATIONS: list[RelationDef] = [
         range_=["*"],
         description="X is a sub-component or member of Y",
     ),
+    # `file` and `feature` in three domains below were added 2026-09-23, from
+    # the FIRST evidence brahmastra.coercions ever collected -- and it did not
+    # say what ONTOLOGY_DESIGN.md expected it to.
+    #
+    # The design doc waits for `unmapped_relation`: new verbs the vocabulary
+    # lacks. Across 39 notes of the real corpus there were ZERO. The prompt
+    # lists all eighteen relations and the model never leaves that list. The
+    # signal was `domain_range` -- a KNOWN relation between types the ontology
+    # refuses -- and it came from one place:
+    #
+    #     has_component   + file     10 notes   "live_sync.py has_component live sync watcher"
+    #     provides        + file      7 notes   "evaluate.py provides fabrication detection"
+    #     provides        + feature   6 notes   "NetworkX MultiDiGraph provides PageRank computation"
+    #     has_component   + feature   4 notes   "Brahmastra extraction has_component extraction.py"
+    #     implements      + file      4 notes   "extraction.py implements entity extraction"
+    #
+    # These relations were defined on 2026-06-15; `file` and `feature` joined
+    # ENTITY_TYPES on 2026-06-25 and the domains were never revisited. The
+    # prompt describes each relation but does not state its domain, so the
+    # model followed the description correctly and a check it could not see
+    # degraded the result to `related_to` -- 34% of the live graph is that
+    # catch-all. CLAUDE.md's own recommended note, "The file extraction.py
+    # implements retry logic", was one of them, and so was ontology.yaml's own
+    # example for `implements`.
+    #
+    # NOT widened to `concept`, though three relations cleared the same bar for
+    # it. Reading the sentences rather than the counts: "len(chunks) provides
+    # call count", "groq=True provides live Groq key". `concept` is where the
+    # model puts what it cannot type, and admitting it would admit that.
     RelationDef(
         "has_component",
-        domain=["project", "concept", "tool", "organisation"],
+        domain=["project", "concept", "tool", "organisation", "file", "feature"],
         range_=["*"],
         description="X contains or is composed of Y (use instead of part_of when X is the whole)",
     ),
@@ -106,7 +135,7 @@ RELATIONS: list[RelationDef] = [
     ),
     RelationDef(
         "implements",
-        domain=["project", "person", "tool"],
+        domain=["project", "person", "tool", "file"],
         range_=["concept", "tool", "feature", "unknown"],
         description="X implements a concept, standard, algorithm, or pattern",
     ),
@@ -118,7 +147,7 @@ RELATIONS: list[RelationDef] = [
     ),
     RelationDef(
         "provides",
-        domain=["project", "tool", "person", "organisation"],
+        domain=["project", "tool", "person", "organisation", "file", "feature"],
         range_=["feature", "concept", "tool", "unknown"],
         description="X exposes or offers Y as a capability or service",
     ),

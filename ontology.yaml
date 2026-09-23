@@ -73,7 +73,7 @@ relations:
       - "Louvain algorithm is part of the graph build stage"
 
   - name: "has_component"
-    domain: ["project", "concept", "tool", "organisation"]
+    domain: ["project", "concept", "tool", "organisation", "file", "feature"]
     range: ["*"]
     functional: false
     description: "X contains or is composed of Y (use when X is the whole)"
@@ -91,7 +91,7 @@ relations:
       - "extraction depends_on GROQ_API_KEY"
 
   - name: "implements"
-    domain: ["project", "person", "tool"]
+    domain: ["project", "person", "tool", "file"]
     range: ["concept", "tool", "feature", "unknown"]
     functional: false
     description: "X implements a concept, standard, algorithm, or pattern"
@@ -108,7 +108,7 @@ relations:
       - "Brahmastra uses NetworkX"
 
   - name: "provides"
-    domain: ["project", "tool", "person", "organisation"]
+    domain: ["project", "tool", "person", "organisation", "file", "feature"]
     range: ["feature", "concept", "tool", "unknown"]
     functional: false
     description: "X exposes or offers Y as a capability or service"

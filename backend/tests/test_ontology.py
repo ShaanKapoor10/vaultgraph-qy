@@ -62,3 +62,65 @@ def test_related_to_universal():
     # "related_to" has domain=["*"] range=["*"]
     for etype in ENTITY_TYPES:
         assert is_valid_triple(etype, "related_to", etype)
+
+
+# -- domains, widened from evidence rather than anticipation -----------------
+#
+# The first evidence brahmastra.coercions collected did not say what
+# ONTOLOGY_DESIGN.md expected. Zero `unmapped_relation` across 39 notes of the
+# real corpus -- the model never leaves the listed vocabulary. The signal was
+# `domain_range`: known relations refused because `file` and `feature` joined
+# ENTITY_TYPES ten days after the domains were written, and nobody went back.
+# Widening them took the related_to catch-all on those notes from 31.3% to
+# 16.7%, and handed 59 triples their real relation back.
+
+from brahmastra.ontology import is_valid_triple
+
+
+def test_the_sentence_claude_md_tells_you_to_write_is_now_legal():
+    """
+    CLAUDE.md's own recommended note style: "The file extraction.py implements
+    retry logic." It extracted as file -> concept, which `implements` refused,
+    so the protocol's own example was degraded to `related_to`.
+    """
+    assert is_valid_triple("file", "implements", "concept")
+
+
+def test_ontology_yaml_s_own_example_is_now_legal():
+    """'entity_resolution.py implements Union-Find' -- the documented example
+    for `implements`, which its own domain forbade."""
+    assert is_valid_triple("file", "implements", "concept")
+
+
+def test_a_file_contains_and_provides_things():
+    assert is_valid_triple("file", "has_component", "feature")     # 10 notes
+    assert is_valid_triple("file", "provides", "concept")          # 7 notes
+
+
+def test_a_feature_contains_and_provides_things():
+    assert is_valid_triple("feature", "provides", "feature")       # 6 notes
+    assert is_valid_triple("feature", "has_component", "file")     # 4 notes
+
+
+def test_concept_was_deliberately_not_admitted():
+    """
+    Three relations cleared the same evidence bar for `concept`, and it was
+    refused on reading the sentences: "len(chunks) provides call count",
+    "groq=True provides live Groq key". `concept` is where the model puts what
+    it cannot type. Pinned so a later widening is a decision, not a drift.
+    """
+    assert not is_valid_triple("concept", "provides", "feature")
+    assert not is_valid_triple("concept", "integrates_with", "tool")
+
+
+def test_the_widening_did_not_touch_the_prompt():
+    """
+    The domains are not in SYSTEM_PROMPT, which is why widening them cost no
+    model calls: the memo key holds, and coercion re-runs on cached replies.
+    If this ever fails, an ontology change has started invalidating every
+    cached extraction and the re-extraction bill needs budgeting.
+    """
+    from brahmastra.extraction import SYSTEM_PROMPT
+
+    assert "domain" not in SYSTEM_PROMPT.lower()
+    assert "project, concept, tool, organisation, file" not in SYSTEM_PROMPT
