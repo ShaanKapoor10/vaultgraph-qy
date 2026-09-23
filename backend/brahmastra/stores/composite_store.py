@@ -141,6 +141,34 @@ class CompositeStore(GraphStore):
         self._notes.init_schema()
         self._graph.init_schema()
 
+    # -- deletion, which is genuinely both ----------------------------------
+    #
+    # `delete_note` is classified SOURCE, so the generated delegate sent it to
+    # the note half ALONE -- and the contract says it deletes "a note and
+    # everything derived from it". Postgres holds nothing derived, so its
+    # delete removed the row and nothing else; the note's triples, mentions and
+    # provenance stub stayed in Neo4j for good. Every note deleted in the
+    # deployed arrangement orphaned its facts: through DELETE /notes, through
+    # ownership's cleanup of a shortened transcript, and through the cleanup of
+    # the 2026-09-24 Notion leak, which is where it was finally seen -- 34
+    # triples per workspace outliving the notes they came from. The tests ran
+    # single-store SQLite, where one delete does both, so none of them could.
+    #
+    # Derived rows go FIRST. If the graph half fails nothing is lost and the
+    # caller sees the error; if the note half then fails, the note survives
+    # without triples, which re-extraction repairs. The other order's failure
+    # is the bug itself: facts with no source, invisible.
+
+    def delete_note(self, id: str) -> None:
+        self._graph.delete_note(id)
+        self._notes.delete_note(id)
+
+    def delete_workspace(self, workspace_id: str) -> None:
+        """Same shape as delete_note: the graph half held the workspace's whole
+        graph, and the note half's delete never reached it."""
+        self._graph.delete_workspace(workspace_id)
+        self._notes.delete_workspace(workspace_id)
+
     def describe(self) -> str:
         return f"composite(notes={self._notes.describe()}, graph={self._graph.describe()})"
 

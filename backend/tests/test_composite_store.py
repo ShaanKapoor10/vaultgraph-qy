@@ -137,8 +137,20 @@ def test_the_split_follows_the_declared_classification():
         notes.calls.clear()
         graph.calls.clear()
         getattr(c, name)(*args.get(name, ()))
-        assert notes.calls == [name], f"{name} is source data but reached the graph store"
-        assert graph.calls == []
+        assert notes.calls == [name], f"{name} is source data but missed the note store"
+        if name in DELETES_EVERYWHERE:
+            # The one deliberate exception: deleting a note or a workspace must
+            # also remove what was derived from it, and that lives in the graph
+            # half. Routing these to the note store alone orphaned every
+            # deleted note's triples in Neo4j.
+            assert graph.calls == [name], f"{name} must also clear the graph half"
+        else:
+            assert graph.calls == [], f"{name} is source data but reached the graph store"
+
+
+# Source methods whose job is to REMOVE something along with everything derived
+# from it -- so they are routed to both halves, and only these.
+DELETES_EVERYWHERE = frozenset({"delete_note", "delete_workspace"})
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +247,67 @@ def test_describe_names_both_halves():
     notes, graph, c = _pair()
     d = c.describe()
     assert "notes-store" in d and "graph-store" in d
+
+
+# -- deleting is genuinely both halves ---------------------------------------
+#
+# `delete_note` is classified SOURCE, so the generated delegate sent it to the
+# note half alone -- while the contract says it deletes "a note and everything
+# derived from it". In the deployed arrangement (Postgres notes, Neo4j graph)
+# every deleted note left its triples in Neo4j. Seen only on 2026-09-24, when
+# cleaning up a leak left 34 triples per workspace behind their deleted notes;
+# single-store SQLite, which the suite uses, does both in one call.
+
+class _DeleteRecorder:
+    def __init__(self, name, log):
+        self.name, self.log = name, log
+
+    def delete_note(self, id):
+        self.log.append((self.name, "delete_note", id))
+
+    def delete_workspace(self, wid):
+        self.log.append((self.name, "delete_workspace", wid))
+
+
+def _deleting_pair():
+    from brahmastra.stores.composite_store import CompositeStore
+
+    log: list = []
+    store = CompositeStore.__new__(CompositeStore)
+    store._notes = _DeleteRecorder("notes", log)
+    store._graph = _DeleteRecorder("graph", log)
+    return store, log
+
+
+def test_deleting_a_note_reaches_the_graph_half_too():
+    store, log = _deleting_pair()
+    store.delete_note("n1")
+    assert ("graph", "delete_note", "n1") in log
+    assert ("notes", "delete_note", "n1") in log
+
+
+def test_the_derived_rows_go_first():
+    """A failure part-way must never leave facts with no source."""
+    store, log = _deleting_pair()
+    store.delete_note("n1")
+    assert [side for side, _, _ in log] == ["graph", "notes"]
+
+
+def test_a_graph_failure_leaves_the_note_in_place():
+    store, log = _deleting_pair()
+
+    def broken(id):
+        raise RuntimeError("neo4j unreachable")
+
+    store._graph.delete_note = broken
+    import pytest
+    with pytest.raises(RuntimeError):
+        store.delete_note("n1")
+    assert log == []          # the source row was never touched
+
+
+def test_deleting_a_workspace_reaches_both_halves():
+    store, log = _deleting_pair()
+    store.delete_workspace("office")
+    assert log == [("graph", "delete_workspace", "office"),
+                   ("notes", "delete_workspace", "office")]
