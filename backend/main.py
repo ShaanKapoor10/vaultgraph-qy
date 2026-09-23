@@ -197,7 +197,7 @@ app.include_router(ingest_router)
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
+async def health() -> dict[str, Any]:
     """
     Liveness. Answers "is this process running?" and nothing more.
 
@@ -206,7 +206,12 @@ async def health() -> dict[str, str]:
     fix a dependency. Restarting a healthy process because Neo4j is asleep just
     turns a degraded system into an unavailable one.
     """
-    return {"status": "ok", "service": "brahmastra"}
+    from brahmastra import version
+
+    # Which code is answering. Cheap -- a hash of the package's source, no
+    # database -- so it stays inside the liveness probe. See version.py for the
+    # two ways this system has run stale code without anything noticing.
+    return {"status": "ok", "service": "brahmastra", "code": version.status()}
 
 
 @app.get("/health/ready")

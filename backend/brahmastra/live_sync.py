@@ -35,8 +35,14 @@ def _stamp() -> str:
     return datetime.now().strftime("%H:%M:%S")
 
 
-def tick() -> dict:
-    """One watch iteration: sync Notion, run pipeline if anything is new."""
+def tick(pull_notion: bool = True) -> dict:
+    """
+    One watch iteration for the BOUND workspace: sync Notion, run the pipeline
+    if anything is new. `tick_all` binds each workspace in turn.
+
+    `pull_notion=False` skips the pull for a workspace with no Notion source of
+    its own -- see `tick_all` for why that is not optional.
+    """
     from brahmastra.sync import run_sync
     from brahmastra.pipeline import run_pipeline
 
@@ -46,12 +52,13 @@ def tick() -> dict:
     # writes from sessions -- all of which leave notes needing extraction whether
     # or not Notion is connected. Skipping the pull when it is not configured
     # keeps the rest of the loop working, exactly as run_pipeline already does.
-    if os.environ.get("NOTION_TOKEN"):
+    if os.environ.get("NOTION_TOKEN") and pull_notion:
         sync_res = run_sync()
         summary["synced"] = sync_res.get("synced", 0)
     else:
         summary["synced"] = 0
-        summary["notion"] = "not configured"
+        summary["notion"] = ("not configured" if pull_notion
+                             else "no Notion source of its own")
 
     pending = db.get_notes(status="pending")
 
@@ -117,6 +124,84 @@ def tick() -> dict:
     return summary
 
 
+def home_workspace() -> str:
+    """The workspace this process was started for -- the only one allowed to
+    fall back to the global NOTION_DATABASE_ID."""
+    return (os.environ.get("BRAHMASTRA_WORKSPACE") or "default").strip() or "default"
+
+
+def workspaces() -> list[str]:
+    """
+    Which workspaces this watcher keeps current.
+
+    ALL registered workspaces by default. It used to be exactly one -- the
+    process's BRAHMASTRA_WORKSPACE, which compose pins to `default` -- and
+    nothing else ran extraction anywhere. Found by measurement, not by reading:
+    `office`, `work` and `transcripts-demo` each held a note sitting at
+    `pending` with zero triples and no error, and would have held it forever.
+    That included the one note a transcript had produced, so a meeting ingested
+    into its own workspace never reached any graph at all.
+
+    LIVE_SYNC_WORKSPACES narrows it: a comma-separated list, or `all`.
+    """
+    choice = (os.environ.get("LIVE_SYNC_WORKSPACES") or "all").strip()
+    if choice.lower() != "all":
+        return [w.strip() for w in choice.split(",") if w.strip()]
+    found: list[str] = []
+    try:
+        for w in db.list_workspaces():
+            wid = w.get("id") if isinstance(w, dict) else w
+            if wid and wid not in found:
+                found.append(wid)
+    except Exception:
+        pass
+    home = home_workspace()
+    if home not in found:
+        found.insert(0, home)
+    return found
+
+
+def _has_own_notion_source(workspace_id: str) -> bool:
+    try:
+        ws = db.get_workspace(workspace_id) or {}
+        return bool(ws.get("notion_database_id"))
+    except Exception:
+        return False
+
+
+def tick_all() -> dict[str, dict]:
+    """
+    One tick per workspace, each with the workspace BOUND for the whole of it.
+
+    THE NOTION RULE IS THE DANGEROUS PART. `sync.run_sync` resolves its source
+    per workspace and falls back to the global NOTION_DATABASE_ID when a
+    workspace names none. Correct for the one workspace the process was started
+    for; for any other it would pull THAT workspace's pages into this one --
+    the office graph silently filling with the personal graph's notes. So only
+    the home workspace may use the fallback; every other one pulls only from a
+    source it names itself, and otherwise just extracts what it already has.
+
+    One workspace failing must not starve the rest, so each is caught alone.
+    """
+    from brahmastra.stores import reset_store
+    from brahmastra.workspace import reset_request_workspace, set_request_workspace
+
+    home = home_workspace()
+    results: dict[str, dict] = {}
+    for workspace_id in workspaces():
+        token = set_request_workspace(workspace_id)
+        try:
+            reset_store()
+            pull = workspace_id == home or _has_own_notion_source(workspace_id)
+            results[workspace_id] = tick(pull_notion=pull)
+        except Exception as exc:                      # noqa: BLE001
+            results[workspace_id] = {"did_work": False, "error": f"{type(exc).__name__}: {exc}"[:300]}
+        finally:
+            reset_request_workspace(token)
+            reset_store()
+    return results
+
+
 def watch(interval: int | None = None) -> None:
     """Poll forever with health logging. interval secs (default POLL_INTERVAL or 120)."""
     if interval is None:
@@ -139,8 +224,16 @@ def watch(interval: int | None = None) -> None:
         print(f"[{_stamp()}] tick #{n} starting…", flush=True)
         t0 = time.monotonic()
         try:
-            s = tick()
+            every = tick_all()
             dt = time.monotonic() - t0
+            for workspace_id, result in every.items():
+                if workspace_id != home_workspace() and (result.get("did_work")
+                                                         or result.get("error")):
+                    detail = (f"ERROR {result['error']}" if result.get("error")
+                              else f"extracted={result.get('extracted')} "
+                                   f"nodes={result.get('nodes')} status={result.get('status')}")
+                    print(f"[{_stamp()}] tick #{n} [{workspace_id}] {detail}", flush=True)
+            s = every.get(home_workspace()) or {"did_work": False, "synced": 0}
             if s["did_work"]:
                 wb = s.get("wrote_back", {})
                 # Say when a run finished `partial`. The verdict existed but
@@ -157,6 +250,11 @@ def watch(interval: int | None = None) -> None:
                     f"{verdict}",
                     flush=True,
                 )
+            elif s.get("error"):
+                # A tick_all failure for the home workspace. Caught there so the
+                # other workspaces still ran -- and must not then be reported
+                # here as "no changes", which is how a broken loop hides.
+                print(f"[{_stamp()}] ERROR in tick #{n}: {s['error']}", flush=True)
             elif s.get("skipped"):
                 # Not idleness. Saying "no changes" here would claim there was
                 # nothing to do while a backlog sat behind a held lock.

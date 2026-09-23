@@ -569,3 +569,78 @@ def test_an_error_without_numbers_teaches_nothing(monkeypatch):
     monkeypatch.setattr(ex, "_LEARNED_TPM", None)
     assert ex._learn_tpm(Exception("Connection reset by peer")) is False
     assert ex._LEARNED_TPM is None
+
+
+# -- typed extraction: built, switched OFF until it is measured to win -------
+
+def test_the_schema_is_built_from_the_ontology():
+    """Built from ontology.py, so adding a relation cannot leave the schema behind."""
+    from brahmastra import extraction
+    from brahmastra.ontology import ENTITY_TYPES, RELATION_NAMES
+
+    item = extraction.extraction_schema()["properties"]["triples"]["items"]
+    assert item["properties"]["relation"]["enum"] == list(RELATION_NAMES)
+    assert item["properties"]["subject_type"]["enum"] == list(ENTITY_TYPES)
+    assert item["additionalProperties"] is False
+    assert set(item["required"]) == set(item["properties"])
+
+
+def test_typed_extraction_is_off_unless_asked_for(monkeypatch):
+    from brahmastra import extraction
+
+    monkeypatch.delenv("EXTRACTION_SCHEMA", raising=False)
+    assert extraction.typed_extraction() is False
+    monkeypatch.setenv("EXTRACTION_SCHEMA", "1")
+    assert extraction.typed_extraction() is True
+
+
+def test_a_typed_reply_never_shares_a_cache_slot_with_a_json_mode_one():
+    """
+    Otherwise an A/B between the two would quietly compare a reply with
+    itself -- the second mode would be served the first mode's cached answer.
+    """
+    from brahmastra import extraction
+
+    assert (extraction._memo_key("note", "m", True)
+            != extraction._memo_key("note", "m", False))
+
+
+def test_json_mode_keys_did_not_move():
+    """Turning the switch on must not invalidate a single cached extraction."""
+    from brahmastra import extraction, memo
+
+    assert (extraction._memo_key("note", "m", False)
+            == memo.key_for("note", "extract", "m", extraction.SYSTEM_PROMPT))
+
+
+def test_the_switch_changes_what_is_asked_for(monkeypatch):
+    import sys
+    import types
+    from unittest.mock import MagicMock
+
+    sent = {}
+
+    def create(**kwargs):
+        sent.update(kwargs)
+        msg = MagicMock(); msg.content = '{"triples": []}'
+        choice = MagicMock(); choice.message = msg
+        resp = MagicMock(); resp.choices = [choice]
+        return resp
+
+    client = MagicMock()
+    client.chat.completions.create = create
+    fake = types.ModuleType("groq")
+    fake.Groq = lambda **_: client
+    monkeypatch.setitem(sys.modules, "groq", fake)
+
+    from brahmastra import extraction
+    importlib.reload(extraction)
+
+    monkeypatch.setenv("EXTRACTION_SCHEMA", "")
+    extraction._extract_with_groq("T", "C", "key")
+    assert sent["response_format"] == {"type": "json_object"}
+
+    monkeypatch.setenv("EXTRACTION_SCHEMA", "1")
+    extraction._extract_with_groq("T", "C2", "key")
+    assert sent["response_format"]["type"] == "json_schema"
+    assert sent["response_format"]["json_schema"]["strict"] is True

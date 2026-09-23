@@ -168,22 +168,90 @@ def _ollama_available() -> bool:
 # had extracted yet.
 
 
-def _memo_key(user_message: str, model: str) -> str:
+def typed_extraction() -> bool:
+    """
+    EXTRACTION_SCHEMA=1 asks the provider to ENFORCE the reply shape.
+
+    OFF by default, and it stays off until it is measured to beat what already
+    works -- the rule for anything borrowed. The case for it was strong this
+    morning and is weaker now: the domain problem it would have fixed was fixed
+    by widening the domains, and a malformed array element no longer costs a
+    note anything. What is left to win is Groq's occasional `400 Failed to
+    validate JSON` and whatever a schema does to the triples themselves --
+    which is exactly what the A/B has to say.
+    """
+    return os.environ.get("EXTRACTION_SCHEMA", "").strip() == "1"
+
+
+def extraction_schema() -> dict[str, Any]:
+    """
+    The reply shape as a strict JSON schema, built FROM the ontology so the two
+    cannot drift. Relation and entity type are enums: the model cannot invent
+    a relation or a type, and cannot put an empty string in the array.
+
+    Deliberately NOT carrying per-field descriptions yet (cocoindex's meeting
+    example does). That would be a second change measured as one; if the
+    shape alone earns its place, descriptions are the next A/B.
+    """
+    triple_props: dict[str, Any] = {
+        "subject_text": {"type": "string"},
+        "subject_type": {"type": "string", "enum": list(ENTITY_TYPES)},
+        "relation": {"type": "string", "enum": list(RELATION_NAMES)},
+        "object_text": {"type": "string"},
+        "object_type": {"type": "string", "enum": list(ENTITY_TYPES)},
+        "confidence": {"type": "number"},
+        "source_quote": {"type": "string"},
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "triples": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": triple_props,
+                    "required": list(triple_props),
+                    "additionalProperties": False,
+                },
+            }
+        },
+        "required": ["triples"],
+        "additionalProperties": False,
+    }
+
+
+def _memo_key(user_message: str, model: str, typed: bool | None = None) -> str:
+    """
+    The schema is part of the question when it is in use.
+
+    Without this, a schema-enforced reply and a JSON-mode reply to the same
+    note would share one cache slot -- and an A/B between the two would quietly
+    compare a reply with itself. JSON mode's key is left exactly as it was, so
+    turning the switch on does not invalidate a single cached extraction.
+    """
     from brahmastra import memo
 
-    return memo.key_for(user_message, "extract", model, SYSTEM_PROMPT)
+    if typed is None:
+        typed = typed_extraction()
+    prompts = SYSTEM_PROMPT
+    if typed:
+        prompts = SYSTEM_PROMPT + "\n\n" + json.dumps(extraction_schema(),
+                                                     sort_keys=True)
+    return memo.key_for(user_message, "extract", model, prompts)
 
 
-def _memo_load(user_message: str, model: str) -> str | None:
+def _memo_load(user_message: str, model: str,
+               typed: bool | None = None) -> str | None:
     from brahmastra import memo
 
-    return memo.load(_memo_key(user_message, model))
+    return memo.load(_memo_key(user_message, model, typed))
 
 
-def _memo_save(user_message: str, model: str, reply: str) -> None:
+def _memo_save(user_message: str, model: str, reply: str,
+               typed: bool | None = None) -> None:
     from brahmastra import memo
 
-    memo.save(_memo_key(user_message, model), reply, "extract")
+    memo.save(_memo_key(user_message, model, typed), reply, "extract")
 
 
 def _extract_with_llm(title: str, content: str) -> list[dict[str, Any]]:
@@ -465,8 +533,11 @@ def _extract_with_groq(title: str, content: str,
     keys = (groq_pool.GroqKeyPool([api_key]) if api_key else groq_pool.pool())
     user_message = _build_user_message(title, content)
     model = groq_model()
+    # Read once, so the cache lookup, the request and the cache write can never
+    # disagree about which mode this reply was produced in.
+    typed = typed_extraction()
 
-    cached = _memo_load(user_message, model)
+    cached = _memo_load(user_message, model, typed)
     if cached is not None:
         return _parse_llm_response(cached)
 
@@ -483,7 +554,11 @@ def _extract_with_groq(title: str, content: str,
         # Ollama has always asked for JSON; this path never did, and relied on
         # the model volunteering it. Reasoning-style models answer with prose
         # first and leave `content` empty, which parses as "no triples".
-        response_format={"type": "json_object"},
+        response_format=(
+            {"type": "json_schema",
+             "json_schema": {"name": "triples", "schema": extraction_schema(),
+                             "strict": True}}
+            if typed else {"type": "json_object"}),
         temperature=0.0,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -525,7 +600,7 @@ def _extract_with_groq(title: str, content: str,
                     continue
             raise
         reply = response.choices[0].message.content or ""
-        _memo_save(user_message, model, reply)
+        _memo_save(user_message, model, reply, typed)
         return _parse_llm_response(reply)
 
     raise RuntimeError("Groq extraction did not settle after re-budgeting a 413")

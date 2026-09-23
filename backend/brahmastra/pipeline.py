@@ -311,9 +311,15 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
     If another run holds the lock, returns immediately with {"skipped": ...}.
     """
     started_at = datetime.now(timezone.utc).isoformat()
+    from brahmastra import version
+
     result: dict[str, Any] = {
         "started_at": started_at,
         "mode": "full" if full else "incremental",
+        # Which code produced this result. A run from a process holding stale
+        # modules -- the MCP server, most often -- reports numbers that look as
+        # authoritative as any other; `stale: true` is how they stop looking so.
+        "code": version.status(),
         "stages": {},
     }
 
