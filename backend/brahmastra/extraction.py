@@ -179,6 +179,27 @@ def typed_extraction() -> bool:
     note anything. What is left to win is Groq's occasional `400 Failed to
     validate JSON` and whatever a schema does to the triples themselves --
     which is exactly what the A/B has to say.
+
+    MEASURED 2026-09-24, AND NOT ADOPTED. Same 17 notes, same prompt, same
+    model, JSON mode against schema mode:
+
+                         json mode   schema
+        malformed             1          0
+        degraded             19         24
+        kept                169        195
+        related_to share   14.8%      15.4%
+
+    More triples, and nothing better about them: no drop in domain_range
+    degradation or in the catch-all share. Read rather than counted, the
+    enum forces awkward choices -- "_different_numbers BLOCKS merge",
+    "blocking_min_mentions HAS_STATUS 2000 mentions". Its one clean win, no
+    malformed elements, stopped mattering once a malformed element stopped
+    costing the note its triples. Only 53 of ~300 triples appeared in both
+    runs, so most of the difference is the model's own variance; nothing here
+    is a win large enough to see through that.
+
+    What might change it: field descriptions in the schema (cocoindex's
+    meeting example), or a larger model. Each is a separate A/B.
     """
     return os.environ.get("EXTRACTION_SCHEMA", "").strip() == "1"
 

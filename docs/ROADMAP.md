@@ -224,6 +224,13 @@ names; audio will not.
 
 Recorded so they are not re-proposed. Each was measured.
 
+- **Typed (schema-enforced) extraction as it stands.** Built, behind
+  `EXTRACTION_SCHEMA=1`, and A/B'd on 17 real notes: more triples (195 vs 169)
+  but no drop in domain_range degradation (24 vs 19) or the related_to share
+  (15.4% vs 14.8%), and the enum pushes the model into wrong relations. Its one
+  win, no malformed elements, no longer matters. Revisit only with field
+  descriptions in the schema or a larger model -- each its own A/B.
+
 - **Per-type entity resolution, as cocoindex does it.** 29 of 73 heuristic
   merges cross a type boundary, and about half of those are *right* — `Groq` is
   an `organisation` in one triple and a `tool` in the next. Their types are
