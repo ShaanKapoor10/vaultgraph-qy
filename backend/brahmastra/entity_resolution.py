@@ -865,6 +865,27 @@ def _more_specific(existing: str, candidate: str) -> bool:
     return _words(existing) < _words(candidate)
 
 
+_CONSTANT = re.compile(r"^[A-Z0-9]+(?:_[A-Z0-9]+)+$")
+_HANDLE = re.compile(r"^[A-Za-z]+[0-9]+$")
+
+
+def _machine_shaped(name: str) -> bool:
+    """
+    A handle or a code constant: something a machine made, not a name a person
+    would say.
+
+        ShaanKapoor10    a username          (letters run together, then digits)
+        SYSTEM_PROMPT    a constant          (SCREAMING_SNAKE_CASE)
+
+    Never chosen as a cluster's name while a natural one is available. Both
+    kinds win the old contest by being long and starting with a capital, and
+    both were winning it on the live graph -- a person's node was titled with
+    their GitHub handle, and 'system prompt' was titled with the variable
+    that holds one.
+    """
+    return bool(_CONSTANT.match(name) or _HANDLE.match(name))
+
+
 def pinned_enabled() -> bool:
     """
     ON unless switched off. ENTITY_PINNED=0 goes back to naming by heuristic
@@ -930,6 +951,15 @@ def _pick_canonical(mentions: list[str],
     not occur once during that growth, so it falls back to the heuristic among
     them rather than to a rule nothing has tested.
     """
+    # A handle or a constant is never the name while a natural one exists --
+    # and that includes one PINNED would otherwise protect. Pinning keeps
+    # whatever was canonical when it was switched on, and on the live graph
+    # that meant 'ShaanKapoor10': chosen by the old heuristic, then frozen.
+    # The second, narrow escape hatch, beside `_more_specific`.
+    natural = [m for m in mentions if not _machine_shaped(m)]
+    if natural and len(natural) < len(mentions):
+        mentions = natural
+
     if existing and pinned_enabled():
         kept = [m for m in mentions if m in existing]
         if kept:

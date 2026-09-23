@@ -152,10 +152,20 @@ SUPERSEDED_BY_A_GUARD = [
 ]
 
 
-def test_the_heuristic_alone_renames_all_eight():
-    """The premise. Without pinning every one of these flips on corpus growth."""
+def test_the_heuristic_alone_renames_seven_of_the_eight():
+    """
+    The premise -- which USED to be "all eight", and the change is the point.
+
+    'ShaanKapoor10' is a handle, and a handle never names a cluster that has a
+    natural name in it (`_machine_shaped`). So the heuristic stopped making
+    that mistake on its own. Pinning still matters for the other seven, which
+    are all natural names competing on length.
+    """
     for established, newcomer in MEASURED_WINS:
-        assert _pick_canonical([established, newcomer]) == newcomer
+        if newcomer == "ShaanKapoor10":
+            assert _pick_canonical([established, newcomer]) == established
+        else:
+            assert _pick_canonical([established, newcomer]) == newcomer
 
 
 def test_pinning_keeps_every_one_of_them():
@@ -211,8 +221,10 @@ def test_it_can_be_switched_off(monkeypatch):
 
     monkeypatch.setenv("ENTITY_PINNED", "0")
     assert pinned_enabled() is False
-    assert _pick_canonical(["Shaan Kapoor", "ShaanKapoor10"],
-                           {"Shaan Kapoor"}) == "ShaanKapoor10"
+    # Two natural spellings of equal length: the tie-break decides, and
+    # pinning, once off, no longer holds the established one.
+    assert _pick_canonical(["CocoIndex", "Cocoindex"],
+                           {"CocoIndex"}) == "Cocoindex"
 
 
 def test_the_pairs_pinning_no_longer_has_to_save():
@@ -239,3 +251,51 @@ def test_the_other_six_still_need_pinning():
             continue
         assert not is_distinct(a, b), f"{a!r} and {b!r} are one thing"
         assert _pick_canonical([a, b], {a}) == a
+
+
+
+# -- a handle or a constant never names a cluster that has a real name -------
+#
+# Found on the live graph, where it was worse than a bad name: the node for a
+# person was titled with their GitHub handle, and PINNED then protected it,
+# because pinning keeps whatever was canonical when it was switched on and the
+# old heuristic had already chosen 'ShaanKapoor10'.
+
+from brahmastra.entity_resolution import _machine_shaped
+
+
+def test_what_counts_as_machine_shaped():
+    assert _machine_shaped("ShaanKapoor10")          # a handle
+    assert _machine_shaped("SYSTEM_PROMPT")          # a constant
+    assert _machine_shaped("BRAHMASTRA_API_KEY")
+    assert not _machine_shaped("Shaan Kapoor")
+    assert not _machine_shaped("Neo4j")               # digit, then more letters
+    assert not _machine_shaped("run_pipeline")        # an identifier, not a constant
+    assert not _machine_shaped("LLM_PROVIDER environment variable")
+
+
+def test_a_natural_name_beats_a_handle():
+    assert _pick_canonical(["Shaan Kapoor", "ShaanKapoor10"]) == "Shaan Kapoor"
+
+
+def test_a_natural_name_beats_a_constant():
+    assert _pick_canonical(["SYSTEM_PROMPT", "system prompt"]) == "system prompt"
+
+
+def test_pinning_does_not_protect_a_handle():
+    """
+    The live-graph case. 'ShaanKapoor10' was ESTABLISHED -- the old heuristic
+    had picked it -- and pinning keeps established names. It must not keep
+    this one while 'Shaan Kapoor' is sitting in the same cluster.
+    """
+    assert _pick_canonical(["Shaan Kapoor", "ShaanKapoor10"],
+                           {"ShaanKapoor10"}) == "Shaan Kapoor"
+
+
+def test_a_constant_on_its_own_is_still_named():
+    """Demoted, never excluded -- a cluster that is only a constant needs a name."""
+    assert _pick_canonical(["LLM_PROVIDER"]) == "LLM_PROVIDER"
+
+
+def test_a_fuller_natural_form_of_a_constant_is_fine():
+    assert _pick_canonical(["LLM_PROVIDER", "LLM_PROVIDER environment variable"])         == "LLM_PROVIDER environment variable"
