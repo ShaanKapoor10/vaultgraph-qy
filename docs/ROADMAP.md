@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24, on branch `brahmastra-v3`, at 783 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 811 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -44,6 +44,9 @@ server, or restart Claude Code) to pick up the fixes.
 | **A file is not the thing it implements** | 12 of 12 path-vs-name merges wrong | the `ingest/cases` bridge gone (was item 8) |
 | **Handles and constants never name a cluster** | `ShaanKapoor10`, `SYSTEM_PROMPT` | natural names win, pinning included |
 | **One sidecar-table base** | three copies of 40 lines | memo, ownership, coercions share it |
+| **Code symbols have a type** (from the typed-extraction post-mortem) | 38 of 129 degradations had a function/constant/class endpoint | replayed over all 95 notes: degraded 129 → 109, related_to 18.3% → 16.2%, 20 rescued, 0 regressed |
+| **Domain evidence finished** (was item 2) | all 95 notes now extracted and memoised | the analysis above ran corpus-wide; nothing else clears the bar |
+| **Stale code visible** (was item 10) | the Docker stack three days behind | `version.py` fingerprint in `/health` and every pipeline result |
 
 ### What the coercions actually said — read this before touching the ontology
 
@@ -67,29 +70,41 @@ ONTOLOGY_DESIGN.md should say so.
 
 ## Tier 1 — evidence in hand
 
-### 1. Typed extraction — built, measured, NOT adopted
+### 1. Typed extraction — NOT adopted, and a post-mortem of why
 
-A/B on 17 real notes: more triples, no fewer degraded ones, no lower related_to
-share, and the enum pushes the model into wrong relations. Stays behind
-`EXTRACTION_SCHEMA=1`. See "Deliberately not doing".
+The first verdict was right and its reasons were not. Re-read from the cached
+replies, no new calls:
 
-### 2. Finish the domain evidence
+| claim in the first verdict | what the replies say |
+|---|---|
+| "the enum forces awkward choices" | the cited triple (`_different_numbers blocks merge`) is in the **JSON-mode** reply too, degraded there as well |
+| "degraded 24 vs 19" | five of the schema's are one list in one note fanned out; without it, 19 each |
+| "nothing better" | quotes are verbatim more often under the schema (92% vs 84%), but per note it is 7 wins, 4 losses, 6 ties — noise at n=17 |
+| (unstated) | **no noise floor**: JSON mode was never run against itself, and only 63 of ~180 endpoint pairs recur between runs |
 
-Widened on **41 of 92 notes**. The read-only probe that gathered the evidence
-spent Groq's **entire daily token budget** (200,000 tokens/day on this tier) at
-note 41; the other 51 returned 429. Those 41 are now memoised and free forever.
-The remaining 51 need one call each — about a day's quota, so run them on a day
-when nothing else needs the model, or on a paid tier.
+**What it actually found:** a hole in the vocabulary that both modes fall into.
+The model steps outside the type list in JSON mode to write `function`,
+`module`, `hook`, `environment variable`; the schema forbids that and forces
+`feature`/`tool`/`concept`; the domain check then degrades the triple either
+way. Fixed without a model — `code_symbol`, assigned by spelling (see Done).
+The schema constrained the decoding; the constraint that mattered was the
+ontology's.
 
-When they are in: repeat the analysis (per relation and rejected type, ranked by
-notes, with example sentences read by hand). Anything else clearing the bar is a
-candidate; `concept` stays out unless the sentences say otherwise. Then update
-ONTOLOGY_DESIGN.md with what the evidence turned out to look like.
+**Is ours better than cocoindex's here?** On this corpus, yes, on cost. Schema
+enforcement (their typed LLM output) buys a shape guarantee we already get from
+`_coerce_triple`, which keeps a note when one array element is malformed, and it
+costs ~15% more output tokens against a daily token cap that is our binding
+constraint.
 
-**Budget note for any future corpus-wide probe:** the free tier cannot read the
-whole corpus in one day. Throttle, or stop well short of the cap — a probe that
-exhausts it takes extraction, cluster summaries and `/ask` down with it until
-the reset.
+**Still owed:** the noise floor — JSON mode against itself on the same 17 notes,
+~70k tokens. Attempted today; the cap was spent. Only if the grounding gain
+survives it is a second A/B worth running.
+
+**Budget note for any corpus-wide probe:** the free tier cannot read the whole
+corpus in one day (200,000 tokens/day per account). Throttle, or stop well short
+of the cap — a probe that exhausts it takes extraction, cluster summaries and
+`/ask` down with it. Groq's day is a ROLLING window: a 1-token probe can pass
+while a full-size request is still refused.
 
 ---
 
@@ -164,14 +179,6 @@ Row blocks cap memory at any size; the work is still quadratic. Revisit near
 Per-kind (4 calls) vs focused (2 calls) is unresolved because the free tier's
 daily cap produced 0% runs. Needs a tier that will not run out mid-measurement.
 
-### 10. Make stale code visible — **proven urgent**
-
-Tier 0 is this, at full size. The morning version recorded one symptom (the MCP
-server running the old resolver); the real exposure was the whole Docker stack
-three days behind, silently reverting fixes. The pipeline should report a code
-fingerprint, and `/health` should expose it, so a stale process is obvious
-rather than discovered.
-
 ### 11. Identify speakers before extracting, for diarized audio (new)
 
 For the transcription path. cocoindex's conversation example runs extraction in
@@ -187,12 +194,15 @@ names; audio will not.
 
 Recorded so they are not re-proposed. Each was measured.
 
-- **Typed (schema-enforced) extraction as it stands.** Built, behind
-  `EXTRACTION_SCHEMA=1`, and A/B'd on 17 real notes: more triples (195 vs 169)
-  but no drop in domain_range degradation (24 vs 19) or the related_to share
-  (15.4% vs 14.8%), and the enum pushes the model into wrong relations. Its one
-  win, no malformed elements, no longer matters. Revisit only with field
-  descriptions in the schema or a larger model -- each its own A/B.
+- **Typed (schema-enforced) extraction as it stands.** Behind
+  `EXTRACTION_SCHEMA=1`. No better on 17 notes once the post-mortem (item 1)
+  corrected the first reading, and ~15% dearer in output tokens. Revisit after
+  the noise floor, then with field descriptions or a larger model -- each its
+  own A/B.
+- **Widening `located_in` or `works_on` to files.** Left over from the
+  code-symbol evidence. `located_in` is functional, so `NOTION_TOKEN located_in
+  backend/.env` would contradict the same token in the root `.env`; `sync.py
+  works_on brahmastra_add_note` is the wrong verb, not the wrong type.
 
 - **Per-type entity resolution, as cocoindex does it.** 29 of 73 heuristic
   merges cross a type boundary, and about half of those are *right* — `Groq` is

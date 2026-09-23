@@ -86,14 +86,12 @@ it there. Read it before starting anything new — several items are gated on ea
 other, and one section records what was tried, measured and deliberately dropped
 so it is not re-proposed.
 
-The two at the front, both with evidence already in hand:
-1. **Persist `coercions`** — `extract_note()` returns them and `run_extraction`
-   discards them, so ONTOLOGY_DESIGN.md's "grow the vocabulary from evidence"
-   rule has had no evidence since it was written.
-2. **Typed extraction for core `extraction.py`** — it asks for
-   `response_format={"type":"json_object"}` (any shape); ingestion asks for a real
-   `json_schema`, and that enforcement measured **+15 points (43% → 58%)**.
-   `llm.py` already carries `json_schema` through every provider.
+Both items that used to lead this list are settled. Coercions are persisted
+(`python -m brahmastra.coercions`). **Typed extraction was built and NOT adopted**:
+the +15 points it earned in ingestion did not carry over to core extraction, and
+the post-mortem in `typed_extraction()`'s docstring records why. The gap it seemed
+to point at was in the vocabulary, not the decoding, and it was fixed model-free
+(`code_symbol`, below). Do not re-propose it without the noise floor ROADMAP item 1 owes.
 
 ## Project: Brahmastra (repo: vaultgraph-qy)
 
@@ -449,6 +447,14 @@ argument types it does not admit, becomes `related_to` rather than being dropped
 silent dropping is why "Sapan works at Veraxion" once left no Veraxion entity at all.
 `RELATION_ALIASES` normalises model phrasings ("works at" → `employed_by`) and
 `INVERSE_ALIASES` swaps direction ("Mei manages Sarah" → `Sarah reports_to Mei`).
+
+**`code_symbol` is assigned by spelling, never by the model** (`ontology.code_symbol_type`):
+snake_case, CONSTANT_CASE and `call()` endpoints are retyped during coercion, as are the
+`function`/`module`/`hook` types the model invents when the list has none. CamelCase
+counts only when the model typed it `unknown`/`feature`, because it is also how
+products are spelled (`CocoIndex`, `TypeScript`). Kept OUT of the prompt, like the
+meeting vocabulary, because the prompt is part of every memo key. Replayed over all 95
+cached extractions: degraded 129 → 109, 20 rescued, 0 regressed.
 
 Every coercion is reported in `extract_note()["coercions"]`. **Grow the vocabulary from
 that evidence**, not in anticipation — see `docs/ONTOLOGY_DESIGN.md`.

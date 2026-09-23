@@ -8,6 +8,7 @@ Only triples whose (subject_type, relation, object_type) satisfy
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
 
@@ -121,7 +122,8 @@ RELATIONS: list[RelationDef] = [
     # model puts what it cannot type, and admitting it would admit that.
     RelationDef(
         "has_component",
-        domain=["project", "concept", "tool", "organisation", "file", "feature"],
+        domain=["project", "concept", "tool", "organisation", "file", "feature",
+                "code_symbol"],
         range_=["*"],
         description="X contains or is composed of Y (use instead of part_of when X is the whole)",
     ),
@@ -135,7 +137,7 @@ RELATIONS: list[RelationDef] = [
     ),
     RelationDef(
         "implements",
-        domain=["project", "person", "tool", "file"],
+        domain=["project", "person", "tool", "file", "code_symbol"],
         range_=["concept", "tool", "feature", "unknown"],
         description="X implements a concept, standard, algorithm, or pattern",
     ),
@@ -147,14 +149,15 @@ RELATIONS: list[RelationDef] = [
     ),
     RelationDef(
         "provides",
-        domain=["project", "tool", "person", "organisation", "file", "feature"],
-        range_=["feature", "concept", "tool", "unknown"],
+        domain=["project", "tool", "person", "organisation", "file", "feature",
+                "code_symbol"],
+        range_=["feature", "concept", "tool", "unknown", "code_symbol"],
         description="X exposes or offers Y as a capability or service",
     ),
     RelationDef(
         "integrates_with",
-        domain=["project", "tool"],
-        range_=["project", "tool", "unknown"],
+        domain=["project", "tool", "file", "code_symbol"],
+        range_=["project", "tool", "unknown", "file", "code_symbol"],
         description="X connects to or interfaces with Y",
     ),
 
@@ -186,7 +189,7 @@ RELATIONS: list[RelationDef] = [
     # Flow / blocking
     RelationDef(
         "blocks",
-        domain=["project", "event", "concept", "unknown"],
+        domain=["project", "event", "concept", "unknown", "code_symbol"],
         range_=["project", "event", "concept", "unknown"],
         description="X prevents Y from progressing",
     ),
@@ -331,9 +334,75 @@ SYSTEM_RELATIONS: list[RelationDef] = [
 
 SYSTEM_RELATION_NAMES: list[str] = [r.name for r in SYSTEM_RELATIONS]
 
+
+# ---------------------------------------------------------------------------
+# Assigned by SPELLING -- code symbols
+# ---------------------------------------------------------------------------
+#
+# The largest single cause of degradation in the corpus, found while working
+# out why schema-enforced extraction did not beat JSON mode (2026-09-24):
+#
+#     38 of 129 domain_range coercions have a code symbol as an endpoint --
+#     `_groq_chat integrates_with extraction.py`,
+#     `BLOCKING_MIN_MENTIONS located_in blocking configuration`,
+#     `entity_confirm provides entity type hints`.
+#
+# The ontology has no type for a function, constant, class or env var, and the
+# model KNOWS it: in JSON mode it steps outside the enum to write `function`,
+# `module`, `hook`, `variable`, `environment variable`. Coercion turned those
+# into `unknown`; the schema's enum forced them into `feature`/`tool`/`concept`.
+# Either way a domain check then degraded the triple. That is why neither mode
+# could win -- the gap is in the vocabulary, not in the decoding.
+#
+# Assigned by CODE, from the spelling, never offered to the model: this
+# system's standing lesson is that rules keyed on syntax hold and rules keyed
+# on a model's type do not, and keeping it out of the prompt keeps every
+# memoised extraction valid (the prompt is part of the cache key).
+
+CODE_SYMBOL = "code_symbol"
+SYNTAX_ENTITY_TYPES: list[str] = [CODE_SYMBOL]
+
+# What the model writes when it wants this type and the list has none.
+ENTITY_TYPE_ALIASES: dict[str, str] = {
+    t: CODE_SYMBOL for t in (
+        "function", "method", "class", "module", "hook", "variable",
+        "environment variable", "environment_variable", "env var", "env_var",
+        "constant", "code", "code symbol", "identifier",
+    )
+}
+
+_CODE_SPELLING = re.compile(
+    r"^_?[a-z][a-z0-9]*(?:_[a-z0-9]+)+(?:\(\))?$"    # snake_case, run_state()
+    r"|^_?[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$"            # CONSTANT / ENV_VAR
+    r"|^[A-Za-z_][A-Za-z0-9_.]*\(\)$"                # chat(), db.get_notes()
+)
+_CAMEL_CASE = re.compile(r"^(?:[A-Z][a-z0-9]+){2,}$")   # CompositeStore
+
+# Types the spelling never overrides. A snake_case STATUS is a status value
+# ("in_progress"), and a person, project or organisation keeps what it is.
+_NEVER_RETYPED = frozenset({
+    "person", "organisation", "project", "status", "date", "location", "event",
+})
+# CamelCase is a class name only when the model had nothing better: it is also
+# how products are spelled -- CocoIndex, TypeScript, PageRank, MiniCheck.
+_CAMEL_ONLY_FROM = frozenset({"unknown", "feature"})
+
+
+def code_symbol_type(text: str, model_type: str) -> str | None:
+    """`code_symbol` when the SPELLING says this is an identifier, else None."""
+    if model_type in _NEVER_RETYPED:
+        return None
+    name = (text or "").strip()
+    if _CODE_SPELLING.match(name):
+        return CODE_SYMBOL
+    if model_type in _CAMEL_ONLY_FROM and _CAMEL_CASE.match(name):
+        return CODE_SYMBOL
+    return None
+
+
 # Every name a stored triple may carry, extractable or not. What storage
 # validates against -- Neo4j refuses to build Cypher for anything else.
-ALL_ENTITY_TYPES: list[str] = ENTITY_TYPES + SYSTEM_ENTITY_TYPES
+ALL_ENTITY_TYPES: list[str] = ENTITY_TYPES + SYSTEM_ENTITY_TYPES + SYNTAX_ENTITY_TYPES
 ALL_RELATION_NAMES: list[str] = RELATION_NAMES + SYSTEM_RELATION_NAMES
 
 _RELATION_MAP: dict[str, RelationDef] = {

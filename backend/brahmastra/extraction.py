@@ -32,7 +32,8 @@ load_env()
 
 from brahmastra import db
 from brahmastra.ontology import (
-    ENTITY_TYPES, RELATION_NAMES, RELATIONS, is_valid_triple, normalise_relation,
+    ENTITY_TYPE_ALIASES, ENTITY_TYPES, RELATION_NAMES, RELATIONS,
+    code_symbol_type, is_valid_triple, normalise_relation,
 )
 
 # ---------------------------------------------------------------------------
@@ -189,17 +190,41 @@ def typed_extraction() -> bool:
         kept                169        195
         related_to share   14.8%      15.4%
 
-    More triples, and nothing better about them: no drop in domain_range
-    degradation or in the catch-all share. Read rather than counted, the
-    enum forces awkward choices -- "_different_numbers BLOCKS merge",
-    "blocking_min_mentions HAS_STATUS 2000 mentions". Its one clean win, no
-    malformed elements, stopped mattering once a malformed element stopped
-    costing the note its triples. Only 53 of ~300 triples appeared in both
-    runs, so most of the difference is the model's own variance; nothing here
-    is a win large enough to see through that.
+    POST-MORTEM, same day, from the cached replies (no new calls). The
+    verdict stands; the reasons first given for it did not:
 
-    What might change it: field descriptions in the schema (cocoindex's
-    meeting example), or a larger model. Each is a separate A/B.
+    - "The enum forces awkward choices" was a MISREADING. The cited
+      `_different_numbers blocks merge` is in the JSON-mode reply too, and
+      was degraded there as well. Both modes produce these triples.
+    - "Degraded 24 vs 19" is one sentence, not a trend: a single list in one
+      note fanned into five `run_full_pipeline implements X`. Without it, 19
+      each.
+    - The one metric that does separate the modes, a verbatim source_quote,
+      favours the schema (92% vs 84%) -- but per note it wins 7, loses 4,
+      ties 6, which is noise at n=17. Most misses on both sides are quotes
+      elided with "...", not fabrications.
+    - The A/B had no noise floor: A came from the cache, B was fresh, and JSON
+      mode was never run against ITSELF. At 63 of ~180 shared endpoint pairs,
+      run-to-run variance could swamp any mode effect. (Attempted; the daily
+      cap was spent. Still owed -- see docs/ROADMAP.md.)
+
+    What the measurement actually found was a hole in the VOCABULARY that
+    both modes fall into. In JSON mode the model steps outside the type list
+    to write `function`, `module`, `hook`, `environment variable`; the enum
+    forbids that and forces `feature`/`tool`/`concept`; either way the domain
+    check degrades the triple. 38 of 129 degradations corpus-wide were code
+    symbols. Fixed without a model (ontology.code_symbol_type) -- which is
+    why the schema could not win: it constrained the decoding, and the
+    constraint that mattered was the ontology's.
+
+    So: not adopted, because it is no better and costs ~15% more output
+    tokens (2659 vs 2320 chars per reply) against a daily token cap that is
+    the binding constraint. The shape guarantee it offers is already had more
+    cheaply: `_coerce_triple` tolerates a malformed element instead of losing
+    the note.
+
+    What might change it: a noise floor showing the grounding gain is real,
+    field descriptions in the schema, or a larger model. Each a separate A/B.
     """
     return os.environ.get("EXTRACTION_SCHEMA", "").strip() == "1"
 
@@ -736,12 +761,16 @@ def _coerce_triple(t: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None
         return None, "low_confidence"
 
     out = dict(t)
-    # An unrecognised entity type becomes 'unknown' rather than voiding the
-    # fact; most relations admit 'unknown' on at least one side.
-    if out["subject_type"] not in ENTITY_TYPES:
-        out["subject_type"] = "unknown"
-    if out["object_type"] not in ENTITY_TYPES:
-        out["object_type"] = "unknown"
+    for side in ("subject", "object"):
+        written = str(out[f"{side}_type"] or "").strip().lower()
+        # An unrecognised entity type becomes 'unknown' rather than voiding
+        # the fact -- unless it is a name for a code symbol, which the model
+        # writes when the list has no such type.
+        typ = (written if written in ENTITY_TYPES
+               else ENTITY_TYPE_ALIASES.get(written, "unknown"))
+        # Then the spelling, which outranks the model's guess: see
+        # ontology.code_symbol_type for why this is keyed on syntax.
+        out[f"{side}_type"] = code_symbol_type(out[f"{side}_text"], typ) or typ
 
     reason: str | None = None
     canonical, inverted = normalise_relation(out["relation"])

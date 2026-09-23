@@ -73,7 +73,7 @@ relations:
       - "Louvain algorithm is part of the graph build stage"
 
   - name: "has_component"
-    domain: ["project", "concept", "tool", "organisation", "file", "feature"]
+    domain: ["project", "concept", "tool", "organisation", "file", "feature", "code_symbol"]
     range: ["*"]
     functional: false
     description: "X contains or is composed of Y (use when X is the whole)"
@@ -91,7 +91,7 @@ relations:
       - "extraction depends_on GROQ_API_KEY"
 
   - name: "implements"
-    domain: ["project", "person", "tool", "file"]
+    domain: ["project", "person", "tool", "file", "code_symbol"]
     range: ["concept", "tool", "feature", "unknown"]
     functional: false
     description: "X implements a concept, standard, algorithm, or pattern"
@@ -108,8 +108,8 @@ relations:
       - "Brahmastra uses NetworkX"
 
   - name: "provides"
-    domain: ["project", "tool", "person", "organisation", "file", "feature"]
-    range: ["feature", "concept", "tool", "unknown"]
+    domain: ["project", "tool", "person", "organisation", "file", "feature", "code_symbol"]
+    range: ["feature", "concept", "tool", "unknown", "code_symbol"]
     functional: false
     description: "X exposes or offers Y as a capability or service"
     examples:
@@ -117,8 +117,8 @@ relations:
       - "Brahmastra provides graph visualization"
 
   - name: "integrates_with"
-    domain: ["project", "tool"]
-    range: ["project", "tool", "unknown"]
+    domain: ["project", "tool", "file", "code_symbol"]
+    range: ["project", "tool", "unknown", "file", "code_symbol"]
     functional: false
     description: "X connects to or interfaces with Y"
     examples:
@@ -152,7 +152,7 @@ relations:
       - "team located_in San Francisco"
 
   - name: "blocks"
-    domain: ["project", "event", "concept", "unknown"]
+    domain: ["project", "event", "concept", "unknown", "code_symbol"]
     range: ["project", "event", "concept", "unknown"]
     functional: false
     description: "X prevents Y from progressing"
@@ -195,6 +195,11 @@ validation:
 # invited to invent a decision. See ontology.py for the measurement behind it.
 # ---------------------------------------------------------------------------
 system_entity_types: ["meeting", "decision", "action_item", "risk", "question"]
+
+# Assigned by SPELLING in extraction (ontology.code_symbol_type), also never in
+# the prompt: snake_case, CONSTANT_CASE and call() names become code_symbol.
+# 38 of 129 domain_range degradations had one as an endpoint; see ontology.py.
+syntax_entity_types: ["code_symbol"]
 
 system_relations:
   - name: "decided_by"
