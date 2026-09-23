@@ -272,21 +272,44 @@ def _iter_database_rows(client: Any, database_id: str) -> Any:
 # Main sync function — auto-detects database vs page mode
 # ---------------------------------------------------------------------------
 
+def _home_workspace() -> str:
+    """The workspace this deployment was configured for."""
+    return (os.environ.get("BRAHMASTRA_WORKSPACE") or "default").strip() or "default"
+
+
 def _notion_target_for_current_workspace() -> str | None:
     """
-    The Notion source the active workspace syncs from.
+    The Notion source the active workspace syncs from -- and writes back to.
 
-    Per-workspace value wins; the global NOTION_DATABASE_ID is the fallback.
-    Never raises: a workspace registry that cannot be read (an older backend,
-    or a store without workspace support) falls back to the global setting
-    rather than failing the sync.
+    A workspace's own `notion_database_id` wins. The global NOTION_DATABASE_ID
+    is a fallback for the HOME workspace ONLY.
+
+    IT USED TO BE A FALLBACK FOR EVERY WORKSPACE, and that was a leak waiting
+    for a caller. The first caller was the scheduler, once it learned to keep
+    every workspace current (2026-09-24): `office`, `work` and
+    `transcripts-demo` named no Notion source, so each fell back to the global
+    one, and one tick copied four of the personal graph's Notion pages into
+    all three -- then wrote each workspace's insights BACK onto those pages,
+    so the real pages showed a foreign graph's relationships. The same would
+    have happened to anyone running the pipeline for `office` through the API.
+
+    A workspace is an independent graph; CLAUDE.md says merging a work "Sarah"
+    with a personal one corrupts both, and inheriting another workspace's
+    source is exactly that merge. So anything other than the home workspace
+    reaches Notion only through a source it names itself.
+
+    Never raises. A registry that cannot be read fails CLOSED for a non-home
+    workspace -- no source -- because the old fail-open answer is the leak.
     """
+    current = db.workspace()
     try:
-        ws = db.get_workspace(db.workspace())
+        ws = db.get_workspace(current)
         if ws and ws.get("notion_database_id"):
             return ws["notion_database_id"]
     except Exception:
         pass
+    if current != _home_workspace():
+        return None
     return os.environ.get("NOTION_DATABASE_ID") or None
 
 

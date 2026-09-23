@@ -368,7 +368,12 @@ def _missing_notion_config(need_database: bool) -> list[str]:
     missing = []
     if not os.environ.get("NOTION_TOKEN"):
         missing.append("NOTION_TOKEN")
-    if need_database and not _notion_source():
+    # Write-back needs only the token in the HOME workspace, whose synced pages
+    # carry their own ids. Anywhere else, reaching Notion at all requires a
+    # source the workspace names itself: on 2026-09-24 three workspaces wrote
+    # their insights onto the personal graph's pages, which they held only
+    # because the global source had leaked into them.
+    if (need_database or not _is_home_workspace()) and not _notion_source():
         # Not just the env var: a workspace may carry its own Notion source,
         # and skipping sync because the GLOBAL one is unset would leave that
         # workspace never pulling anything.
@@ -376,13 +381,28 @@ def _missing_notion_config(need_database: bool) -> list[str]:
     return missing
 
 
+def _is_home_workspace() -> bool:
+    from brahmastra import db
+
+    home = (os.environ.get("BRAHMASTRA_WORKSPACE") or "default").strip() or "default"
+    return db.workspace() == home
+
+
 def _notion_source() -> str | None:
-    """This workspace's Notion source, falling back to the global setting."""
+    """
+    This workspace's Notion source. See sync._notion_target_for_current_workspace.
+
+    Fails CLOSED if that cannot be reached, except in the home workspace: this
+    used to hand back the global database to ANY workspace on an import
+    failure, which is the cross-workspace leak in miniature.
+    """
     try:
         from brahmastra.sync import _notion_target_for_current_workspace
         return _notion_target_for_current_workspace()
     except Exception:
-        return os.environ.get("NOTION_DATABASE_ID") or None
+        if _is_home_workspace():
+            return os.environ.get("NOTION_DATABASE_ID") or None
+        return None
 
 
 def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
