@@ -30,9 +30,9 @@ only makes the tools available; using them is on you, every time.
    INVISIBLE to `search_entities` and other sessions cannot recall it. Verify the note
    reached `extraction_status='done'` before considering it stored.
 
-### Available MCP tools (11)
+### Available MCP tools (12)
 Core: `brahmastra_add_note`, `brahmastra_search_entities`, `brahmastra_search_notes`,
-`brahmastra_search_sessions`,
+`brahmastra_search_sessions`, `brahmastra_search_code`,
 `brahmastra_get_entity_details`, `brahmastra_get_graph_stats`,
 `brahmastra_get_contradictions`, `brahmastra_run_pipeline`.
 
@@ -81,6 +81,19 @@ fused by the same RRF K=60 as note search.
 ```
 python -m brahmastra.sessions --backfill C:/Users/shaan/.claude/projects/c--Users-shaan-Desktop-ai
 python -m brahmastra.sessions --search "how did we fix the notion leak"
+```
+
+**The repository's code is indexed as well** (`brahmastra/code_index.py`, MCP
+`brahmastra_search_code`). It covers only git-TRACKED files, which is what keeps `.env` out,
+and still redacts. Chunks follow the language (Python via `ast`, TS by top-level
+declaration, Markdown by heading) and keep `start_line`/`end_line`. A chunk's key is its
+content hash, so code that only moved is re-lined, not re-embedded. Search defaults to
+`scope="source"`, which measured 13/13 top-3 against 11/13 when tests and docs were
+included: a test describes the code in the same words and outranks it.
+`get_entity_details` adds `defined_at` for a code symbol. The same hook re-indexes it.
+```
+python -m brahmastra.code_index --index
+python -m brahmastra.code_index --search "where are groq keys rotated"
 ```
 
 **The distiller fails closed.** A 7B model once fabricated an entire note — an invented

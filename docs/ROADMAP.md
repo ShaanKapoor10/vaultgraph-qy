@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 835 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 854 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -120,12 +120,32 @@ vocabulary, kept out of the extraction prompt so nothing cached was invalidated.
 A meeting node never merges with its topic (`Q3 release` ≠ `Q3 release planning`);
 action items still merge with the extracted tasks they came from, which is right.
 
-### 4. A second owner kind: code files
+### 4. Code files in the brain — DONE
 
-Unchanged in purpose — ownership is general and has one user. Two details from
-cocoindex's `code_embedding` example: chunk with a **language-aware** splitter
-(`detect_code_language` + recursive splitting), and keep each chunk's
-**`start_line`/`end_line`** so a hit points at lines, not just a file.
+`brahmastra/code_index.py` plus MCP `brahmastra_search_code`. Only git-tracked files,
+redacted. Chunks are cut by language (Python `ast` at def/class, TS at top-level
+declarations, Markdown at headings), neighbours merged up to 40 lines, and each keeps
+`start_line`/`end_line`. These two details are from cocoindex's `code_embedding`. The
+repo is 189 files and 1,616 chunks; a full embed takes 54 s, and a re-index after edits
+about 20 s.
+
+- **Identity is content, not position.** An edit re-embeds the chunk it touched and
+  only re-lines the ones below it. Measured on the first re-index: 8 embedded,
+  28 re-lined, 7 removed.
+- **Measured on 13 questions with a known answer file:** top-1 7/13 and top-3 11/13
+  searching everything; **10/13 and 13/13 searching source only**, which is now the
+  default. Tests and docs outrank the code they describe because they use the
+  same words.
+- **Bridge to the graph:** `get_entity_details` on a code symbol adds `defined_at`
+  (`_groq_chat` → `backend/brahmastra/llm.py:633-693`), joined on the exact identifier.
+
+**Not via `ownership.py`**, though this item was first written as its second
+"owner kind". Each file owns its chunks, but chunks and owner live in one table
+and are written in one place, so the table is its own ledger: write new, re-line
+moved, delete gone, in that order. The ledger exists for derived rows that
+cross stores, where a crash between the two writes leaves an orphan; nothing
+here crosses one. Measured better by the only criterion that applies: less code
+for the same guarantee.
 
 ### 5. Search raw session transcripts alongside the distilled notes — DONE
 

@@ -29,6 +29,7 @@ EXPECTED = {
     "brahmastra_search_entities",
     "brahmastra_search_notes",
     "brahmastra_search_sessions",
+    "brahmastra_search_code",
     "brahmastra_get_entity_details",
     "brahmastra_get_contradictions",
     "brahmastra_add_note",

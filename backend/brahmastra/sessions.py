@@ -49,23 +49,20 @@ roadmap item 8's problem at hundreds of thousands.
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
-import math
 import re
 import sys
-from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from brahmastra import hybrid
 from brahmastra.sidecar import SidecarStore
 
 PIECE_CHARS = 1000        # the embedding model's window, roughly
 REQUEST_PREFIX_CHARS = 200
-RRF_K = 60
 
 
 # -- redaction --------------------------------------------------------------
@@ -204,22 +201,6 @@ def pieces(exchange: Exchange) -> list[Piece]:
 
 # -- the index ---------------------------------------------------------------
 
-def _pack(vector: list[float] | None) -> str | None:
-    if vector is None:
-        return None
-    import numpy as np
-
-    return base64.b64encode(np.asarray(vector, dtype="float32").tobytes()).decode("ascii")
-
-
-def _unpack(blob: str | None):
-    if not blob:
-        return None
-    import numpy as np
-
-    return np.frombuffer(base64.b64decode(blob), dtype="float32")
-
-
 class SessionIndex(SidecarStore):
     """
     One row per piece. The session is the owner of its rows, and the rows live
@@ -315,7 +296,7 @@ def index_transcript(path: str | Path, store: SessionIndex | None = None) -> dic
     vectors = embeddings.embed([p.text for p in changed]) if changed else []
     if vectors is None:                         # no model: lexical half only
         vectors = [None] * len(changed)
-    store.upsert(session, [(p, _pack(v)) for p, v in zip(changed, vectors)])
+    store.upsert(session, [(p, hybrid.pack(v)) for p, v in zip(changed, vectors)])
 
     gone = set(have) - {p.key for p in wanted}
     store.delete(session, gone)
@@ -327,62 +308,13 @@ def index_transcript(path: str | Path, store: SessionIndex | None = None) -> dic
 
 # -- search ------------------------------------------------------------------
 
-_TOKEN = re.compile(r"[a-z0-9_]+")
-
-
-def _tokens(text: str) -> list[str]:
-    return _TOKEN.findall(text.lower())
-
-
-def _bm25_order(query: str, docs: list[str], k1: float = 1.5, b: float = 0.75) -> list[int]:
-    terms = set(_tokens(query))
-    if not terms or not docs:
-        return []
-    toks = [_tokens(d) for d in docs]
-    avg = sum(map(len, toks)) / len(toks) or 1.0
-    df = Counter(t for ts in toks for t in set(ts) if t in terms)
-    n = len(docs)
-    scores = []
-    for i, ts in enumerate(toks):
-        tf = Counter(t for t in ts if t in terms)
-        s = 0.0
-        for t, f in tf.items():
-            idf = math.log(1 + (n - df[t] + 0.5) / (df[t] + 0.5))
-            s += idf * f * (k1 + 1) / (f + k1 * (1 - b + b * len(ts) / avg))
-        if s > 0:
-            scores.append((s, i))
-    return [i for _, i in sorted(scores, reverse=True)]
-
-
-def _vector_order(query: str, rows: list[dict[str, Any]]) -> list[int]:
-    from brahmastra import embeddings
-    import numpy as np
-
-    q = embeddings.embed_one(query)
-    if q is None:
-        return []
-    q = np.asarray(q, dtype="float32")
-    scored = []
-    for i, r in enumerate(rows):
-        v = _unpack(r.get("embedding"))
-        if v is not None:
-            denom = float(np.linalg.norm(q) * np.linalg.norm(v)) or 1.0
-            scored.append((float(q @ v) / denom, i))
-    return [i for _, i in sorted(scored, reverse=True)]
-
-
 def search(query: str, limit: int = 8, store: SessionIndex | None = None) -> list[dict[str, Any]]:
     """Hybrid: BM25 and cosine, fused by RRF (K=60) -- note search's arithmetic."""
     store = store or SessionIndex()
     rows = store.all()
     if not rows:
         return []
-    fused: dict[int, float] = {}
-    for order in (_bm25_order(query, [r["text"] for r in rows]),
-                  _vector_order(query, rows)):
-        for rank, i in enumerate(order):
-            fused[i] = fused.get(i, 0.0) + 1.0 / (RRF_K + rank + 1)
-    best = sorted(fused.items(), key=lambda x: -x[1])
+    best = hybrid.rank(query, rows, text=lambda r: r["text"])
     out, seen = [], set()
     for i, score in best:
         r = rows[i]

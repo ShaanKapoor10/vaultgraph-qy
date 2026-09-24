@@ -80,7 +80,15 @@ WHICH TOOL
                          called and want its connections. Thin results mean the
                          NAME is absent, never that the knowledge is - fall back
                          to search_notes before concluding nothing is stored.
+  search_sessions        The raw conversations of past coding sessions,
+                         verbatim. Use when a note is thin or you need the exact
+                         words, command or error - notes are distilled and keep
+                         only the end of a long session.
+  search_code            Where something is implemented in this repository:
+                         file and line range. Notes say what was decided about
+                         the code; this says where it is.
   get_entity_details     One entity with its relations, aliases and centrality.
+                         For a code symbol it also says where it is defined.
   get_graph_stats        What this memory contains. Good first orientation: the
                          top entities summarise what it is actually about.
   get_contradictions     Facts recorded once and contradicted later. Worth a
@@ -256,6 +264,29 @@ def brahmastra_search_sessions(query: str, limit: int = 8) -> str:
 
 
 @mcp.tool()
+def brahmastra_search_code(query: str, scope: str = "source", limit: int = 6) -> str:
+    """
+    FIND where something is implemented in this repository -- file and lines.
+
+    Searches the tracked source files, cut at function/class/heading
+    boundaries, by meaning and by words. Notes say what was decided about the
+    code; this says where it is. `scope`: source (default), tests, docs, all.
+    """
+    from brahmastra import code_index
+
+    if scope not in code_index.SCOPES:
+        return f"scope must be one of {', '.join(code_index.SCOPES)}"
+    hits = code_index.search(query, limit=limit, scope=scope)
+    if not hits:
+        return (f"No code matching '{query}'. If nothing is indexed yet: "
+                "python -m brahmastra.code_index --index")
+    for h in hits:
+        if len(h["text"]) > 900:
+            h["text"] = h["text"][:900] + "…"
+    return json.dumps(hits, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
 def brahmastra_get_entity_details(entity_name: str) -> str:
     """Return full details for a named entity: aliases, PageRank, cluster, and all relations."""
     db.init_db()
@@ -288,6 +319,21 @@ def brahmastra_get_entity_details(entity_name: str) -> str:
         "outgoing_relations": [e for e in edges if e["source"] == canonical],
         "incoming_relations": [e for e in edges if e["target"] == canonical],
     }
+    # The graph knows `_groq_chat` as a name; the code index knows where it
+    # lives. Joined on the exact identifier, so a hit is a definition, not a
+    # mention -- and only for names spelled like code, which is the same
+    # syntactic test that typed it code_symbol in the first place.
+    try:
+        from brahmastra import code_index
+        from brahmastra.ontology import code_symbol_type
+
+        names = [canonical] + aliases
+        if any(code_symbol_type(n, "unknown") for n in names):
+            defined = code_index.where_defined(names)
+            if defined:
+                detail["defined_at"] = defined
+    except Exception:                                   # noqa: BLE001
+        pass            # the code index is an extra; never fail the lookup on it
     return json.dumps(detail, indent=2)
 
 

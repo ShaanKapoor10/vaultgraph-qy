@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from brahmastra import sessions
+from brahmastra import hybrid, sessions
 
 
 def _row(kind, text, uuid, **extra):
@@ -48,7 +48,7 @@ def store(monkeypatch, tmp_path):
         out = []
         for t in texts:
             v = np.zeros(64, dtype="float32")
-            for w in sessions._tokens(t):
+            for w in hybrid.tokens(t):
                 v[hash(w) % 64] += 1
             out.append(v.tolist())
         return out
@@ -205,6 +205,7 @@ def test_a_boundary_hook_indexes_the_transcript(monkeypatch, tmp_path):
         "transcript_path": str(tmp_path / "t.jsonl")})))
     cp.main([])
     assert ["brahmastra.sessions", "--index", str(tmp_path / "t.jsonl")] in spawned
+    assert ["brahmastra.code_index", "--index"] in spawned
 
 
 def test_a_quiet_stop_hook_does_not_load_the_model(monkeypatch, tmp_path):

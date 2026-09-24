@@ -370,6 +370,10 @@ def _spawn_index(transcript: str | None) -> None:
     """
     if transcript:
         _spawn(["brahmastra.sessions", "--index", str(transcript)])
+    # The repository's code index (brahmastra/code_index.py), on the same
+    # beat: a session is when the code changes. Unchanged files cost a read
+    # and a hash; only a changed chunk loads the model.
+    _spawn(["brahmastra.code_index", "--index"])
 
 
 def _spawn(module_args: list[str]) -> None:
