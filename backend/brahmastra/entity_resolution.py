@@ -87,6 +87,10 @@ _CONTRAST_GROUPS: list[set[str]] = [
     {"min", "max"},
     {"upload", "download"},
     {"encode", "decode"},
+    # GraphRAG's two retrieval modes, merged twice on the live graph
+    # ("global retrieval mode" / "local retrieval mode", "Global search" /
+    # "local search") -- by embedding once the spelling path stopped it.
+    {"global", "local"},
 ]
 
 
@@ -381,13 +385,46 @@ def _meeting_and_not_meeting(a: str, b: str) -> bool:
     return (a in _MEETINGS) != (b in _MEETINGS)
 
 
+_VERSION = re.compile(r"^v\d+(?:\.\d+)*$|^\d+(?:\.\d+)+$")
+
+
+def _version_words(text: str) -> list[str]:
+    # Not split on dots: `3.1.0` is one version, not three numbers.
+    return [w for w in re.split(r"[\s_\-/]+", text.lower()) if w]
+
+
+def _version_and_product(a: str, b: str) -> bool:
+    """
+    `Brahmastra v3` is a version OF `Brahmastra`, not another name for it.
+
+    ROADMAP item 6's live instance: `Brahmastra`, `brahmastra-v3` and
+    `Brahmastra v3` in one node, joined by embedding at 0.82-0.83 -- the
+    product, one release of it and a git branch. `_different_numbers` could not
+    see it, because it needs BOTH names to carry a number. This is the one-sided
+    case, kept narrow: the names are the same words except that exactly one
+    side adds a version token (`v3`, `3.1.0`). A size (`7b`) or a count is not
+    a version and is left alone.
+    """
+    wa, wb = _version_words(a), _version_words(b)
+    if len(wa) == len(wb):
+        return False
+    short, long_ = (wa, wb) if len(wa) < len(wb) else (wb, wa)
+    extra = list(long_)
+    for w in short:
+        if w not in extra:
+            return False
+        extra.remove(w)
+    return len(extra) == 1 and bool(_VERSION.match(extra[0]))
+
+
 def is_distinct(a: str, b: str) -> bool:
     """Provably two things. See the rules above."""
     return (_different_files(a, b)
             or _file_and_not_file(a, b)
             or _different_numbers(a, b)
             or _different_identifiers(a, b)
-            or _meeting_and_not_meeting(a, b))
+            or _meeting_and_not_meeting(a, b)
+            or _version_and_product(a, b))
 
 
 def _is_contrasting(a: str, b: str) -> bool:
@@ -462,12 +499,64 @@ def _heuristic_sim(a: str, b: str) -> tuple[float, str]:
     try:
         import jellyfish
         jw = jellyfish.jaro_winkler_similarity(na, nb)
-        if jw >= JARO_THRESHOLD:
+        if jw >= JARO_THRESHOLD and _spelling_variant(a, b, jellyfish):
             return float(jw), "jaro_winkler"
     except ImportError:
         pass
 
     return 0.0, "none"
+
+
+_WORD_SPLIT = re.compile(r"[\s_.\-/]+")
+
+
+def _spelling_words(text: str) -> list[str]:
+    return [w for w in _WORD_SPLIT.split(text.lower()) if w]
+
+
+def _spelling_variant(a: str, b: str, jellyfish) -> bool:
+    """
+    Jaro-Winkler is a SPELLING metric; hold it to judging spelling.
+
+    Scored over the whole string it rewards a shared prefix across word
+    boundaries, and on the live graph (2026-09-24) about half of its 30 merges
+    were two different things sharing a first word:
+
+        Brahmastra engine     ~ Brahmastra pipeline      0.921
+        NOTION_DATABASE_ID    ~ Notion database          0.942
+        BRAHMASTRA_CACHE      ~ Brahmastra               0.925
+        global retrieval mode ~ local retrieval mode     0.952
+        ANLI dataset          ~ MNLI dataset             0.944
+
+    while every right one was the same words spelled differently --
+    `live_sync watcher` / `live sync watcher`, `decision` / `decisions`,
+    `PostgreSQL` / `Postgres`. So: split both into words (on spaces, `_`, `.`,
+    `-`), require the same number of words, and require each pair of words to
+    be a spelling variant in its own right -- equal, a plural, or scoring
+    JARO_THRESHOLD as words. An extra word, or a different word, is a
+    different thing, and if it is really the same one the embedding path is
+    still free to say so.
+
+    Not applied to the other methods: exact, token-subset and acronym matches
+    are about words already.
+    """
+    wa, wb = _spelling_words(a), _spelling_words(b)
+    if not wa or not wb:
+        return False
+    # The same words run together: `ShaanKapoor10` is `Shaan Kapoor` with the
+    # spaces taken out and a handle's digits added, `GraphStore` is
+    # `graph_store`. Still one spelling of the same words.
+    joined_a, joined_b = "".join(wa).rstrip("0123456789"), "".join(wb).rstrip("0123456789")
+    if (len(wa) == 1 or len(wb) == 1) and joined_a == joined_b:
+        return True
+    if len(wa) != len(wb):
+        return False
+    for x, y in zip(wa, wb):
+        if x == y or x + "s" == y or y + "s" == x or x + "es" == y or y + "es" == x:
+            continue
+        if jellyfish.jaro_winkler_similarity(x, y) < JARO_THRESHOLD:
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------

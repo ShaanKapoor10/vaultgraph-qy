@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 854 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 878 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -100,6 +100,12 @@ constraint.
 ~70k tokens. Attempted today; the cap was spent. Only if the grounding gain
 survives it is a second A/B worth running.
 
+One data point for that A/B: on 2026-09-24 JSON mode returned Groq's
+`400 Failed to validate JSON` three times on one note (the code-index note), and the next run
+extracted it cleanly. It is the one failure a schema could plausibly remove, and
+also one Groq's strict mode validates against too, so count it in both arms
+rather than assume.
+
 **Budget note for any corpus-wide probe:** the free tier cannot read the whole
 corpus in one day (200,000 tokens/day per account). Throttle, or stop well short
 of the cap — a probe that exhausts it takes extraction, cluster summaries and
@@ -174,19 +180,34 @@ other workspaces).
 
 ## Tier 3 — known limits
 
-### 6. Union-Find transitivity — **now has a live instance**
+### 6. Union-Find transitivity — live instance FIXED; the audit behind it
 
-The morning version said this had "no measured instance". It does now, on
-today's code: `brahmastra-v3 ~ Brahmastra ~ brahmastra_ask` — a branch, the
-product and an MCP tool in one node. No guard refuses any link, so
-`_split_incoherent` has nothing to split. cocoindex's entity→candidates shape
-has no equivalent hole; their resolver joins each entity to exactly one
-canonical.
+An audit of all 154 merge edges on the live graph (read-only; canonical-map write
+patched out) found the live instance and more besides. Both fixes are syntactic
+and measured edge by edge:
 
-A syntactic fix was measured and rejected (see below). What remains is a
-different resolution shape, or the judge (item 7).
+| fix | edges removed | wrong | arguable | added |
+|---|---|---|---|---|
+| **Jaro-Winkler judges words, not a shared prefix** | 12 of its 30 | 11 | 1 | 0 |
+| **A release is not the product** (`Brahmastra` vs `Brahmastra v3`) | 4 | 4 | 0 | 0 |
 
-### 7. Re-measure the LLM merge judge — with two model knobs
+- **Jaro-Winkler:** about half its merges were two things sharing a first word
+  (`Brahmastra engine` ≈ `Brahmastra pipeline`, `NOTION_DATABASE_ID` ≈ `Notion
+  database`, `ANLI` ≈ `MNLI`). It now needs the same number of words, each a spelling
+  variant, a plural, or the same words run together (`ShaanKapoor10`, `GraphStore`).
+- **`global`/`local`** joined the contrast pairs. GraphRAG's two modes merged twice.
+- **The release rule:** exactly one side adds a version token (`v3`, `3.1.0`). This was
+  the one-sided case `_different_numbers` could not see, and it takes `Brahmastra`
+  out of the `brahmastra-v3` node.
+- **Found by measuring:** the first version of the spelling rule was silently shadowed
+  by another `_words` further down the module and measured that way. A test now pins
+  the helper.
+
+The general hole remains: any chain the guards do not refuse still fuses. It is now
+narrower, since the two biggest bridge makers were JW prefixes and version
+suffixes.
+
+### 7. Re-measure the LLM merge judge — with two model knobs; the evidence is in
 
 Off because four runs showed it break-even and unstable at temperature 0 — on
 `gpt-oss-120b`, the free tier's small model. cocoindex's meeting example runs
@@ -194,11 +215,26 @@ Off because four runs showed it break-even and unstable at temperature 0 — on
 for resolution. Split ours the same way first, so the judge can be measured on a
 stronger model without changing extraction.
 
-### 7b. An activity merged with the thing it is about (new, unmeasured)
+**What the audit left for it.** Of 85 embedding merges, about 25 are wrong, and
+they are all the same shape: *a name plus words that change what it names.*
 
-Seen once on the meeting graph: `legal review of Acme contract` ≡ `Acme contract`.
-An activity and its object are two things. One example is not evidence — survey the
-default workspace for the pattern before writing a rule.
+    Obsidian ≈ Obsidian replacement        checkpoint ≈ checkpoint queue
+    Neo4j ≈ neo4j package                  Groq API ≈ Groq API key
+    pipeline ≈ pipeline stage              PageRank ≈ Personalized PageRank
+    old resolver ≈ resolver                Claude Code ≈ brain for Claude Code
+
+But the right ones have exactly the same shape (`SQLite ≈ SQLite database`,
+`Groq key ≈ live Groq key`, `run_extraction ≈ run_extraction function`). A list
+of "type words" (database, function, model...) would separate most of them, but
+not `live`, `per-cluster` or `persistent`. **No spelling rule separates these; it
+is a judgement of meaning, which is what the judge is for.** Use these ~25 wrong
+and ~60 right pairs as its labelled test set.
+
+### 7b. An activity merged with the thing it is about — confirmed, folded into 7
+
+The audit found more of the pattern: `coverage for session checkpointing` ≈
+`session checkpointing`, `solution to invisible MCP tools` ≈ `MCP tools`,
+`loading backend/.env` ≈ `backend/.env`. Same shape as item 7, same answer.
 
 ### 8. An ANN index for the embedding stage
 

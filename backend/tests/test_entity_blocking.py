@@ -73,7 +73,9 @@ def test_blocking_finds_exactly_what_all_pairs_finds():
     ("Brahmastra knowledge graph engine for notes",
      "the Brahmastra knowledge graph engine for notes", "token_subset"),
     ("MCP", "Model Context Protocol", "acronym"),
-    ("PROVIDERS", "provider_status", "jaro_winkler"),
+    # Was PROVIDERS / provider_status, which Jaro-Winkler no longer merges:
+    # an extra word is not a spelling variant (test_entity_spelling.py).
+    ("PostgreSQL", "Postgres", "jaro_winkler"),
 ])
 def test_every_match_method_survives_blocking(a, b, method):
     """
