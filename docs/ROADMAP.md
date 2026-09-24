@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 811 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 835 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -127,17 +127,28 @@ cocoindex's `code_embedding` example: chunk with a **language-aware** splitter
 (`detect_code_language` + recursive splitting), and keep each chunk's
 **`start_line`/`end_line`** so a hit points at lines, not just a file.
 
-### 5. Search raw session transcripts alongside the distilled notes (new)
+### 5. Search raw session transcripts alongside the distilled notes — DONE
 
-From cocoindex's `entire_session_search`, which does for AI coding sessions what
-`checkpoint.py` does here — with one difference that matters. They **index the
-raw per-turn transcript**, embedded, with no model in the loop; *"how did I fix
-the auth bug"* finds the session by meaning. We **distil** it into a note through
-an LLM, and CLAUDE.md records that distiller fabricating an entire note once,
-which is why it now fails closed.
+`brahmastra/sessions.py` plus the MCP tool `brahmastra_search_sessions`. It turned out to
+matter more than planned: the distiller **keeps only the last 20,000 characters** of
+a stretch and deletes the queue file once stored, so most of a long session never
+reached any note. This project's transcript holds ~1.2M characters.
 
-Keep the distilled note for the graph; index the raw turns for retrieval. The
-raw index cannot hallucinate, and it catches what the distiller chose to drop.
+- **Unit:** an exchange (a request plus the work that answered it), cut to the
+  embedding window, with each later piece prefixed by its request.
+- **Idempotent:** it re-reads the JSONL (0.33 s for 46 MB) and re-embeds only
+  changed pieces. It found Claude Code **re-logging 29 exchanges verbatim on
+  resume**, and counts each once.
+- **Secrets redacted before storage:** checked on the live index, 0 of 706 rows
+  hold a key fragment.
+- **Measured:** on 7 questions whose answers are known to be in the session, the
+  right exchange was in the top 3 for 6 of them. The miss surfaced a neighbouring
+  Neo4j bug. It complements note search rather than replacing it: notes win on
+  summaries, the raw index on exact words and on whatever the distiller dropped.
+
+Not built, not yet needed: offsets instead of re-reading (only if one transcript
+grows past ~500 MB), and indexing other projects' transcripts (they belong to
+other workspaces).
 
 ---
 

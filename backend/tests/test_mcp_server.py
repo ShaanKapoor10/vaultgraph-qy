@@ -28,6 +28,7 @@ EXPECTED = {
     "brahmastra_get_graph_stats",
     "brahmastra_search_entities",
     "brahmastra_search_notes",
+    "brahmastra_search_sessions",
     "brahmastra_get_entity_details",
     "brahmastra_get_contradictions",
     "brahmastra_add_note",

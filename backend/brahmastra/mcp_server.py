@@ -209,6 +209,8 @@ def brahmastra_search_notes(query: str, limit: int = 10) -> str:
 
     Prefer this over brahmastra_search_entities, which matches entity NAMES only
     and comes up thin whenever the name happens to differ from your wording.
+    For the verbatim conversation a note was distilled from, use
+    brahmastra_search_sessions.
     """
     db.init_db()
     notes = db.search_notes(query, limit=limit)
@@ -225,6 +227,32 @@ def brahmastra_search_notes(query: str, limit: int = 10) -> str:
             "snippet": snippet,
         })
     return json.dumps(out, indent=2, ensure_ascii=False)
+
+
+@mcp.tool()
+def brahmastra_search_sessions(query: str, limit: int = 8) -> str:
+    """
+    RECALL from the raw conversations of past coding sessions, verbatim.
+
+    Notes are distilled from sessions by a model, which keeps only the end of
+    a long stretch and can drop or misstate a detail. This searches the
+    conversation itself -- each request with the work that answered it -- so
+    "how did we fix the Notion leak" finds the exchange where it happened, in
+    the words used at the time. Secrets are redacted at indexing.
+
+    Use it when brahmastra_search_notes comes up thin, or when you need the
+    exact reasoning, command or error rather than a summary of it.
+    """
+    from brahmastra import sessions
+
+    hits = sessions.search(query, limit=limit)
+    if not hits:
+        return (f"No session exchanges matching '{query}'. If none are indexed "
+                "yet: python -m brahmastra.sessions --backfill <claude project dir>")
+    for h in hits:
+        if len(h["text"]) > 700:
+            h["text"] = h["text"][:700] + "…"
+    return json.dumps(hits, indent=2, ensure_ascii=False)
 
 
 @mcp.tool()

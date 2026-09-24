@@ -356,6 +356,23 @@ def _spawn_drain() -> None:
     Best effort by design: if the spawn fails the queue file is still on disk
     and the next drain — manual, or the one the pipeline runs — picks it up.
     """
+    _spawn(["brahmastra.checkpoint", "--drain"])
+
+
+def _spawn_index(transcript: str | None) -> None:
+    """
+    Index the raw transcript (brahmastra/sessions.py) in a detached process.
+
+    Spawned wherever the drain is, never on every Stop: indexing loads the
+    embedding model, which is seconds of CPU a turn for nothing, since a
+    re-index skips every piece that has not changed anyway. Best effort, and
+    idempotent -- a missed one is caught up in full by the next.
+    """
+    if transcript:
+        _spawn(["brahmastra.sessions", "--index", str(transcript)])
+
+
+def _spawn(module_args: list[str]) -> None:
     kwargs: dict[str, Any] = {
         "cwd": str(_BACKEND),
         "stdin": subprocess.DEVNULL,
@@ -368,9 +385,7 @@ def _spawn_drain() -> None:
     else:
         kwargs["start_new_session"] = True
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "brahmastra.checkpoint", "--drain"], **kwargs
-        )
+        subprocess.Popen([sys.executable, "-m", *module_args], **kwargs)
     except Exception:
         pass
 
@@ -714,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
                 # the note was never written, while the hook reported success.
                 if pending_count():
                     _spawn_drain()
+                _spawn_index(payload.get("transcript_path"))
             return 0
 
         # Stop fires after EVERY assistant turn, which is what closes the two
@@ -729,6 +745,7 @@ def main(argv: list[str] | None = None) -> int:
         if event == "Stop" and queued_chars() < DRAIN_THRESHOLD_CHARS:
             return 0
         _spawn_drain()
+        _spawn_index(payload.get("transcript_path"))
     except Exception as e:
         _log(f"capture failed: {type(e).__name__}: {e}")
     return 0

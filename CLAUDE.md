@@ -30,8 +30,9 @@ only makes the tools available; using them is on you, every time.
    INVISIBLE to `search_entities` and other sessions cannot recall it. Verify the note
    reached `extraction_status='done'` before considering it stored.
 
-### Available MCP tools (10)
+### Available MCP tools (11)
 Core: `brahmastra_add_note`, `brahmastra_search_entities`, `brahmastra_search_notes`,
+`brahmastra_search_sessions`,
 `brahmastra_get_entity_details`, `brahmastra_get_graph_stats`,
 `brahmastra_get_contradictions`, `brahmastra_run_pipeline`.
 
@@ -67,6 +68,20 @@ python -m brahmastra.checkpoint --drain    # store it now
 ```
 Failures go to `backend/data/checkpoints/checkpoint.log` — a hook must never raise, so
 that log is the only place a broken checkpoint is distinguishable from a quiet one.
+
+**The raw conversation is indexed too** (`brahmastra/sessions.py`, MCP
+`brahmastra_search_sessions`). The distilled note keeps only the last 20,000 characters
+of a stretch and can be wrong; the raw index keeps every exchange (a request plus the
+work that answered it) verbatim, with no model in the loop. The same hook spawns it
+wherever it spawns the drain, never on a quiet `Stop`. Re-indexing re-reads the whole
+JSONL (0.33 s for 46 MB) and re-embeds only changed pieces. **Secrets are redacted before
+storage**: known key formats and `*_PASSWORD=`/`*_TOKEN=`-style values. It lives in a
+sidecar table beside the notes (`session_pieces`) and is searched with BM25 plus cosine,
+fused by the same RRF K=60 as note search.
+```
+python -m brahmastra.sessions --backfill C:/Users/shaan/.claude/projects/c--Users-shaan-Desktop-ai
+python -m brahmastra.sessions --search "how did we fix the notion leak"
+```
 
 **The distiller fails closed.** A 7B model once fabricated an entire note — an invented
 commit, a push that never happened, a reply from Shaan — because the transcript was

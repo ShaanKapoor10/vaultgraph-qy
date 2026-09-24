@@ -201,3 +201,16 @@ def _isolate_checkpoint_queue(tmp_path_factory):
         os.environ.pop("BRAHMASTRA_CHECKPOINT_DIR", None)
     else:
         os.environ["BRAHMASTRA_CHECKPOINT_DIR"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _no_detached_processes(monkeypatch):
+    """
+    The checkpoint hook spawns detached processes (the drain, the session
+    indexer). A test that reaches one would start a real process that outlives
+    the test, reads the real .env, and writes to real storage. Tests that care
+    about WHETHER a spawn happens stub the specific function, as before.
+    """
+    from brahmastra import checkpoint
+
+    monkeypatch.setattr(checkpoint, "_spawn", lambda module_args: None)
