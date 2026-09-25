@@ -50,6 +50,7 @@ export interface BackendContradictionEvidence {
   source_quote: string
   note_id: string
   extracted_at: string
+  asserted_at?: string | null
 }
 
 export interface BackendContradiction {
@@ -57,6 +58,7 @@ export interface BackendContradiction {
   relation: string
   conflicting_values: string[]
   resolved_value: string
+  resolution?: string
   evidence: BackendContradictionEvidence[]
 }
 
@@ -170,9 +172,12 @@ export function adaptBackendGraph(
   const contradictions: Contradiction[] = stats.contradictions.map((c) => ({
     entity: c.subject,
     relation: c.relation as RelationType,
+    resolvedValue: c.resolved_value ?? "",
+    resolution: c.resolution,
     values: c.evidence.map((ev) => ({
       value: ev.object,
       extractedAt: ev.extracted_at ?? "",
+      assertedAt: ev.asserted_at ?? null,
       sourceNoteId: ev.note_id ?? "",
       sourceQuote: ev.source_quote ?? "",
     })),

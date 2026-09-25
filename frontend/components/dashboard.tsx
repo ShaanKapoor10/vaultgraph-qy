@@ -15,9 +15,13 @@ import { PredictedLinks } from "@/components/panels/predicted-links"
 import { EntityResolution } from "@/components/panels/entity-resolution"
 import { NotesPanel } from "@/components/panels/notes-panel"
 import { AskPanel } from "@/components/panels/ask-panel"
-import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText, Play, Loader2, MessageCircleQuestion } from "lucide-react"
+import { MeetingsPanel } from "@/components/panels/meetings-panel"
+import { DiagnosticsPanel } from "@/components/panels/diagnostics-panel"
+import { Workflow, Network, TrendingUp, Boxes, TriangleAlert, GitMerge, Sparkles, FileText, Play, Loader2, MessageCircleQuestion, CalendarDays, Stethoscope } from "lucide-react"
 
-type View = "graph" | "ask" | "central" | "clusters" | "contradictions" | "links" | "resolution" | "notes"
+type View =
+  | "graph" | "ask" | "central" | "clusters" | "contradictions" | "links" | "resolution" | "notes"
+  | "meetings" | "diagnostics"
 
 const TABS: { id: View; label: string; icon: React.ElementType }[] = [
   { id: "graph", label: "Graph", icon: Network },
@@ -28,6 +32,8 @@ const TABS: { id: View; label: string; icon: React.ElementType }[] = [
   { id: "links", label: "Predicted Links", icon: GitMerge },
   { id: "resolution", label: "Entity Resolution", icon: Sparkles },
   { id: "notes", label: "Notes", icon: FileText },
+  { id: "meetings", label: "Meetings", icon: CalendarDays },
+  { id: "diagnostics", label: "Diagnostics", icon: Stethoscope },
 ]
 
 interface Props {
@@ -329,7 +335,8 @@ export function Dashboard({
             />
           ) : (
             <div className="h-full overflow-y-auto px-4 py-5 sm:px-6">
-              <div className="mx-auto max-w-3xl">
+              {/* Meetings and Diagnostics lay out side by side; the rest read as one column. */}
+              <div className={`mx-auto ${view === "meetings" || view === "diagnostics" ? "max-w-6xl" : "max-w-3xl"}`}>
                 {view === "ask" && <AskPanel backendAvailable={backendAvailable} />}
                 {view === "central" && (
                   <CentralEntities central={result.central} onSelect={select} selected={selected} />
@@ -341,6 +348,8 @@ export function Dashboard({
                 {view === "links" && <PredictedLinks links={result.predictedLinks} onSelect={select} />}
                 {view === "resolution" && <EntityResolution resolution={result.resolution} onSelect={select} />}
                 {view === "notes" && <NotesPanel notes={notes} triples={triples} onAddNote={addNote} />}
+                {view === "meetings" && <MeetingsPanel workspace={workspace} backendAvailable={backendAvailable} />}
+                {view === "diagnostics" && <DiagnosticsPanel workspace={workspace} backendAvailable={backendAvailable} />}
               </div>
             </div>
           )}

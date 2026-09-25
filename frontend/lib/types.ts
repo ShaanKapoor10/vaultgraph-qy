@@ -74,9 +74,16 @@ export interface ConceptCluster {
 export interface Contradiction {
   entity: string
   relation: RelationType
+  /** The backend's verdict: the value asserted most recently, or "" when the
+   *  dates cannot settle it. Absent for contradictions computed locally. */
+  resolvedValue?: string
+  /** "newest", or "unresolved: <why>". */
+  resolution?: string
   values: {
     value: string
     extractedAt: string
+    /** When the NOTE asserted it -- the clock a contradiction is settled by. */
+    assertedAt?: string | null
     sourceNoteId: string
     sourceQuote: string
   }[]
