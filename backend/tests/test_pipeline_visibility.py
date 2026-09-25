@@ -339,3 +339,38 @@ def test_the_status_endpoint_reports_staleness(monkeypatch, tmp_path):
 
     assert body["stale"] is True, "the endpoint dropped the staleness field"
     assert body["dirty_since"]["reason"] == "extracted note-x"
+
+
+def test_a_run_that_extracts_does_not_report_its_own_graph_as_stale(monkeypatch):
+    """
+    Found on the Diagnostics page: the run's own extraction (and checkpoint
+    drain) stamps the graph dirty AFTER the run began, and clearing against
+    the run's start left every run that extracted anything reporting the graph
+    it had just built as stale. The cutoff is when the graph's inputs are read.
+    """
+    stages = []
+
+    def locked(full, result):
+        pipeline.mark_dirty("extracted during this run")        # extract stage
+        time.sleep(0.01)
+        result["_inputs_read_at"] = time.time()                 # resolve reads
+        stages.append("built")
+        return {**result, "failed_stages": []}
+
+    monkeypatch.setattr(pipeline, "_run_pipeline_locked", locked)
+    outcome = pipeline.run_pipeline()
+    assert stages == ["built"]
+    assert "_inputs_read_at" not in outcome
+    assert pipeline.run_state()["stale"] is False
+
+
+def test_a_note_stored_after_the_inputs_were_read_stays_stale(monkeypatch):
+    def locked(full, result):
+        result["_inputs_read_at"] = time.time()
+        time.sleep(0.01)
+        pipeline.mark_dirty("an MCP add_note while the graph was building")
+        return {**result, "failed_stages": []}
+
+    monkeypatch.setattr(pipeline, "_run_pipeline_locked", locked)
+    pipeline.run_pipeline()
+    assert pipeline.run_state()["stale"] is True

@@ -341,8 +341,15 @@ def run_pipeline(full: bool = False) -> dict[str, Any]:
         # Clearing on any completion would report a graph as fresh when the
         # stage that builds it had failed, which is worse than reporting
         # nothing: the caller stops looking.
+        #
+        # Cleared against the moment the graph's inputs were READ, not when the
+        # run began. The run's own extraction and checkpoint drain stamp the
+        # graph dirty as they write triples -- after `began` -- so clearing
+        # against `began` left every run that extracted anything reporting its
+        # own freshly built graph as stale (found on the Diagnostics page).
+        read_at = outcome.pop("_inputs_read_at", None)
         if "graph" not in (outcome.get("failed_stages") or []):
-            clear_dirty(began)
+            clear_dirty(read_at if read_at is not None else began)
         return outcome
     finally:
         _release_lock()
@@ -450,6 +457,11 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
     # ---------------------------------------------------------------
     from brahmastra.entity_resolution import run_resolution
 
+    # The moment the graph's inputs are read. Everything extracted before this
+    # -- this run's own extraction and checkpoint drain included -- is in the
+    # graph this run builds, so it is what staleness is cleared against. See
+    # run_pipeline for why the run's START was the wrong cutoff.
+    result["_inputs_read_at"] = time.time()
     resolve_result = run_resolution()
     # Don't embed the full cluster list in the pipeline response — too large.
     result["stages"]["resolve"] = {
