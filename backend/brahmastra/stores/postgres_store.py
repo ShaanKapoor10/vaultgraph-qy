@@ -109,6 +109,12 @@ CREATE TABLE IF NOT EXISTS notes (
 CREATE INDEX IF NOT EXISTS idx_notes_status
     ON notes (workspace_id, extraction_status);
 
+-- When a note was first written, and when its text last changed. Source data:
+-- a fact's age is how a contradiction between an old and a new statement is
+-- settled, and extraction time (which a re-extraction restamps) cannot say it.
+ALTER TABLE notes ADD COLUMN IF NOT EXISTS created_at TEXT;
+ALTER TABLE notes ADD COLUMN IF NOT EXISTS updated_at TEXT;
+
 -- The lexical half of hybrid search. Generated rather than maintained by
 -- trigger: a trigger can be missed by a bulk load, and a stale search index is
 -- the kind of failure that returns plausible results instead of an error.
@@ -353,9 +359,17 @@ class PostgresStore(GraphStore):
             cur.execute(
                 """
                 INSERT INTO notes (id, workspace_id, title, content, last_edited,
-                                   last_synced, extraction_status, publish, source)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                   last_synced, extraction_status, publish, source,
+                                   created_at, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (workspace_id, id) DO UPDATE SET
+                    -- created_at is never touched here: set once, on insert.
+                    updated_at = CASE
+                        WHEN notes.content IS DISTINCT FROM EXCLUDED.content
+                          OR notes.title IS DISTINCT FROM EXCLUDED.title
+                            THEN EXCLUDED.updated_at
+                        ELSE notes.updated_at
+                    END,
                     title = EXCLUDED.title,
                     content = EXCLUDED.content,
                     last_edited = EXCLUDED.last_edited,
@@ -380,11 +394,24 @@ class PostgresStore(GraphStore):
                     END
                 """,
                 (id, self.workspace, title, content, last_edited, _now(), status,
-                 bool(publish), source or "unknown",
+                 bool(publish), source or "unknown", _now(), _now(),
                  None if publish is None else bool(publish),
                  source),
             )
         self._embed_note(id, title, content)
+
+    def backfill_note_times(self, times: dict[str, str]) -> int:
+        """created_at for notes that have none; never overwrites one."""
+        done = 0
+        with self._connect().cursor() as cur:
+            for note_id, when in times.items():
+                cur.execute(
+                    "UPDATE notes SET created_at = %s, "
+                    "updated_at = COALESCE(updated_at, %s) "
+                    "WHERE workspace_id = %s AND id = %s AND created_at IS NULL",
+                    (when, when, self.workspace, note_id))
+                done += cur.rowcount or 0
+        return done
 
     def _embed_note(self, note_id: str, title: str, content: str) -> None:
         """
@@ -454,7 +481,8 @@ class PostgresStore(GraphStore):
     # serialisation of the vector fails.
     _NOTE_COLS = (
         "workspace_id, id, title, content, last_edited, last_synced, "
-        "extraction_status, extraction_error, publish, notion_page_id, source"
+        "extraction_status, extraction_error, publish, notion_page_id, source, "
+        "created_at, updated_at"
     )
 
     def set_note_status(self, id: str, status: str, error: str | None = None) -> None:

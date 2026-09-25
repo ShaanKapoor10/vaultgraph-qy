@@ -180,6 +180,11 @@ def _add_missing_columns(conn: sqlite3.Connection) -> None:
     if "notion_page_id" not in have:
         conn.execute("ALTER TABLE notes ADD COLUMN notion_page_id TEXT")
     _dedupe_and_constrain_triples(conn)
+    if "created_at" not in have:
+        # When a note was written -- see postgres_store for why it matters.
+        conn.execute("ALTER TABLE notes ADD COLUMN created_at TEXT")
+    if "updated_at" not in have:
+        conn.execute("ALTER TABLE notes ADD COLUMN updated_at TEXT")
     if "extraction_error" not in have:
         # Status alone said a note failed but never why. Diagnosing one meant
         # re-running extraction by hand to see the exception, by which point a
@@ -504,9 +509,17 @@ class SQLiteStore(GraphStore):
             conn.execute(
                 """
                 INSERT INTO notes (id, workspace_id, title, content, last_edited,
-                                   last_synced, extraction_status, publish, source)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   last_synced, extraction_status, publish, source,
+                                   created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(workspace_id, id) DO UPDATE SET
+                    -- created_at is never touched here: set once, on insert.
+                    updated_at = CASE
+                        WHEN notes.content IS NOT excluded.content
+                          OR notes.title IS NOT excluded.title
+                            THEN excluded.updated_at
+                        ELSE notes.updated_at
+                    END,
                     title = excluded.title,
                     content = excluded.content,
                     last_edited = excluded.last_edited,
@@ -531,10 +544,23 @@ class SQLiteStore(GraphStore):
                     END
                 """,
                 (id, self.workspace, title, content, last_edited, _now(), status,
-                 1 if publish else 0, source or "unknown",
+                 1 if publish else 0, source or "unknown", _now(), _now(),
                  None if publish is None else (1 if publish else 0),
                  source),
             )
+
+    def backfill_note_times(self, times: dict[str, str]) -> int:
+        """created_at for notes that have none; never overwrites one."""
+        done = 0
+        with self._connect() as conn:
+            for note_id, when in times.items():
+                cur = conn.execute(
+                    "UPDATE notes SET created_at = ?, "
+                    "updated_at = COALESCE(updated_at, ?) "
+                    "WHERE workspace_id = ? AND id = ? AND created_at IS NULL",
+                    (when, when, self.workspace, note_id))
+                done += (cur.rowcount if cur is not None and cur.rowcount else 0)
+        return done
 
     def get_notes(self, status: str | None = None) -> list[dict[str, Any]]:
         with self._connect() as conn:

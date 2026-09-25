@@ -501,7 +501,14 @@ class Neo4jStore(GraphStore):
         self._run(
             """
             MERGE (n:Note {id: $id, workspaceId: $ws})
-            ON CREATE SET n.extractionStatus = $status
+            ON CREATE SET n.extractionStatus = $status, n.createdAt = $now,
+                          n.updatedAt = $now
+            // Before title/content are overwritten, or the comparison is moot.
+            SET n.updatedAt = CASE
+                    WHEN n.content IS NOT NULL
+                     AND (n.content <> $content OR n.title <> $title) THEN $now
+                    ELSE n.updatedAt
+                END
             SET n.title = $title,
                 n.content = $content,
                 n.lastSynced = $now,
@@ -531,6 +538,22 @@ class Neo4jStore(GraphStore):
             source=source,
         )
         self._embed_note(id, title, content)
+
+    def backfill_note_times(self, times: dict[str, str]) -> int:
+        """createdAt for notes that have none; never overwrites one."""
+        if not times:
+            return 0
+        rows = self._run(
+            """
+            UNWIND $rows AS r
+            MATCH (n:Note {id: r.id, workspaceId: $ws})
+            WHERE n.createdAt IS NULL
+            SET n.createdAt = r.at, n.updatedAt = coalesce(n.updatedAt, r.at)
+            RETURN count(n) AS done
+            """,
+            rows=[{"id": k, "at": v} for k, v in times.items()], ws=self.workspace,
+        )
+        return int(rows[0]["done"]) if rows else 0
 
     def _embed_note(self, note_id: str, title: str, content: str) -> None:
         """
@@ -567,6 +590,8 @@ class Neo4jStore(GraphStore):
                 "content": n.get("content"),
                 "last_edited": n.get("lastEdited"),
                 "last_synced": n.get("lastSynced"),
+                "created_at": n.get("createdAt"),
+                "updated_at": n.get("updatedAt"),
                 "extraction_status": n.get("extractionStatus"),
                 "extraction_error": n.get("extractionError"),
                 "workspace_id": n.get("workspaceId"),

@@ -96,6 +96,7 @@ def _louvain_partition(G: nx.Graph) -> dict[str, int]:
 def _detect_contradictions(
     triples: list[dict[str, Any]],
     canonical_map: dict[str, str],
+    note_times: dict[str, str | None] | None = None,
 ) -> list[dict[str, Any]]:
     """
     Find contradictions: two triples with the same canonical subject and a
@@ -119,26 +120,47 @@ def _detect_contradictions(
         if len(canon_objects) < 2:
             continue
 
-        # Sort by extraction time (newest first)
+        # NEWEST FACT WINS -- by when the NOTE asserted it, not when extraction
+        # ran. It was `extracted_at`, and a full re-extraction on 2026-09-24
+        # restamped every triple with one day, so 6 of the 7 live
+        # contradictions ("84 passing tests" / "510") chose a winner by
+        # accident. See note_times.py.
+        times = note_times or {}
+
+        def when(e: dict[str, Any]) -> str:
+            return times.get(e.get("source_note_id", "")) or ""
+
         sorted_entries = sorted(
-            entries,
-            key=lambda e: e.get("extracted_at", ""),
-            reverse=True,
-        )
+            entries, key=lambda e: (when(e), e.get("extracted_at", "")), reverse=True)
+        top = sorted_entries[0]
+        top_value = canonical_map.get(top["object_text"], top["object_text"])
+        # The newest dated assertion of a DIFFERENT value decides whether the
+        # winner is really newer. Undated, or asserted at the same moment (both
+        # sides in one note: a before-and-after), is not a verdict.
+        rival = next((e for e in sorted_entries
+                      if canonical_map.get(e["object_text"], e["object_text"]) != top_value),
+                     None)
+        if not when(top):
+            resolution, resolved = "unresolved: the notes are undated", ""
+        elif rival is not None and when(rival) == when(top):
+            resolution, resolved = "unresolved: asserted at the same time", ""
+        else:
+            resolution, resolved = "newest", top_value
 
         contradictions.append({
             "subject": subj,
             "relation": rel,
             "conflicting_values": sorted(canon_objects),
-            "resolved_value": canonical_map.get(
-                sorted_entries[0]["object_text"], sorted_entries[0]["object_text"]
-            ),
+            # "" when unresolved -- never a guess dressed as an answer.
+            "resolved_value": resolved,
+            "resolution": resolution,
             "evidence": [
                 {
                     "object": canonical_map.get(e["object_text"], e["object_text"]),
                     "source_quote": e.get("source_quote", ""),
                     "note_id": e.get("source_note_id", ""),
                     "extracted_at": e.get("extracted_at", ""),
+                    "asserted_at": when(e) or None,
                 }
                 for e in sorted_entries[:4]  # show up to 4 pieces of evidence
             ],
@@ -305,7 +327,10 @@ def run_build_graph() -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 4. Contradiction detection
     # ------------------------------------------------------------------
-    contradictions = _detect_contradictions(triples, canonical_map)
+    from brahmastra.note_times import fact_time
+
+    note_times = {n["id"]: fact_time(n) for n in db.get_notes()}
+    contradictions = _detect_contradictions(triples, canonical_map, note_times)
 
     # ------------------------------------------------------------------
     # 5. Link prediction

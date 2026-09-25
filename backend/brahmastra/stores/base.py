@@ -49,6 +49,8 @@ SOURCE_METHODS = frozenset({
     "upsert_note", "get_note", "get_notes_by_ids", "get_notes", "search_notes",
     "search_notes_across",
     "set_note_status", "set_notion_page_id", "delete_note",
+    # When a note was written. Source data: nothing can recompute it.
+    "backfill_note_times",
     "list_workspaces", "create_workspace", "get_workspace", "delete_workspace",
 })
 
@@ -124,6 +126,21 @@ class GraphStore(ABC):
         Re-extraction is triggered (status -> 'pending') when the caller asks
         for it, or when last_edited changed. An unchanged note keeps its
         current status so a sync does not re-extract the whole vault.
+        """
+
+    @abstractmethod
+    def backfill_note_times(self, times: dict[str, str]) -> int:
+        """
+        Set `created_at` on notes that have none, from {note_id: iso time}.
+        Returns how many were set.
+
+        Every note gets `created_at` (once, on insert) and `updated_at` (when
+        its title or content changes) from `upsert_note`. Notes written before
+        that existed have neither, and a contradiction between an old and a
+        new statement can only be settled by knowing which is which. This
+        fills them from evidence found after the fact -- see note_times.py --
+        and NEVER overwrites a recorded time: a backfill is a best guess, a
+        recorded time is a fact.
         """
 
     @abstractmethod

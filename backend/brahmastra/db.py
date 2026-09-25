@@ -112,6 +112,10 @@ def init_db() -> None:
 # Notes
 # ---------------------------------------------------------------------------
 
+def backfill_note_times(times: dict[str, str]) -> int:
+    return get_store().backfill_note_times(times)
+
+
 def upsert_note(
     id: str,
     title: str,
