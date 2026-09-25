@@ -584,7 +584,8 @@ def _get_embedder():
 _embedding_error: str = ""
 
 
-def _embedding_sim(mentions: list[str]) -> dict[tuple[str, str], float]:
+def _embedding_sim(mentions: list[str],
+                   only: set[int] | None = None) -> dict[tuple[str, str], float]:
     """
     Cosine similarity for every mention pair, above EMBEDDING_THRESHOLD.
 
@@ -620,6 +621,23 @@ def _embedding_sim(mentions: list[str]) -> dict[tuple[str, str], float]:
 
         result: dict[tuple[str, str], float] = {}
         n = len(mentions)
+        if only is not None:
+            # INCREMENTAL: every pair with at least one NEW mention, and no
+            # other. Keyed (lower index, higher index) exactly as the full scan
+            # below keys it, so the two can be merged without a duplicate.
+            rows = sorted(only)
+            for start in range(0, len(rows), _EMBED_BLOCK):
+                chunk = rows[start:start + _EMBED_BLOCK]
+                block = embeddings[chunk] @ embeddings.T
+                for r, i in enumerate(chunk):
+                    for j in range(n):
+                        if j == i or (j in only and j < i):
+                            continue
+                        score = float(block[r, j])
+                        if score >= EMBEDDING_THRESHOLD:
+                            lo, hi = (i, j) if i < j else (j, i)
+                            result[(mentions[lo], mentions[hi])] = score
+            return result
         for start in range(0, n, _EMBED_BLOCK):
             stop = min(start + _EMBED_BLOCK, n)
             # Only the columns to the right of this block: the matrix is
@@ -821,11 +839,20 @@ def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
     return sorted(out)
 
 
-def _pairs_to_compare(mentions: list[str]) -> Iterable[tuple[int, int]]:
-    """Blocked candidates above the cut, every pair below it."""
-    if len(mentions) < BLOCKING_MIN_MENTIONS:
-        return ((i, j) for i in range(len(mentions))
-                for j in range(i + 1, len(mentions)))
+def _pairs_to_compare(mentions: list[str],
+                      only: set[int] | None = None) -> Iterable[tuple[int, int]]:
+    """
+    Blocked candidates above the cut, every pair below it -- and with `only`,
+    just the pairs that involve one of those (new) mentions.
+    """
+    n = len(mentions)
+    if only is not None:
+        if n < BLOCKING_MIN_MENTIONS:
+            return ((min(i, j), max(i, j)) for i in sorted(only) for j in range(n)
+                    if j != i and not (j in only and j < i))
+        return ((i, j) for i, j in _candidate_pairs(mentions) if i in only or j in only)
+    if n < BLOCKING_MIN_MENTIONS:
+        return ((i, j) for i in range(n) for j in range(i + 1, n))
     return _candidate_pairs(mentions)
 
 
@@ -1188,6 +1215,43 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
     # over a sorted list. Production should run on what was measured.
     mentions = sorted(m for m in raw_mentions if m)
     uf = _UnionFind(mentions)
+
+    # INCREMENTAL. What the last run decided about pairs of mentions that are
+    # all still here, when nothing a verdict depends on has changed -- see
+    # resolution_cache.py. `only` is then the NEW mentions, and both similarity
+    # stages compare nothing else. `test_incremental_resolution.py` pins that
+    # the result equals a full run's, cluster for cluster.
+    from brahmastra import resolution_cache
+    from brahmastra.llm import resolution_model_setting
+
+    judge_on = entity_confirm.enabled()
+    key = resolution_cache.cache_key(
+        _MEETINGS, judge_on, resolution_model_setting() if judge_on else "",
+        (JARO_THRESHOLD, EMBEDDING_THRESHOLD, MERGE_THRESHOLD))
+    cache = resolution_cache.ResolutionCache()
+    previous = None
+    if os.environ.get("RESOLUTION_INCREMENTAL", "1").strip() != "0":
+        try:
+            previous = cache.load(key)
+        except Exception:
+            previous = None
+    present = set(mentions)
+    only: set[int] | None = None
+    carried_heuristic: list[tuple[str, str, float, str]] = []
+    carried_refused: set[tuple[str, str]] = set()
+    carried_embedding: dict[tuple[str, str], float] = {}
+    carried_verdicts: dict[tuple[str, str], bool] = {}
+    if previous is not None:
+        known = set(previous.get("mentions", []))
+        only = {i for i, m in enumerate(mentions) if m not in known}
+        both = lambda a, b: a in present and b in present   # noqa: E731
+        carried_heuristic = [(a, b, sim, how) for a, b, sim, how in previous["heuristic"]
+                             if both(a, b)]
+        carried_refused = {(a, b) for a, b in previous["refused_heuristic"] if both(a, b)}
+        carried_embedding = {(a, b): sim for a, b, sim in previous["embedding_raw"]
+                             if both(a, b)}
+        carried_verdicts = {(a, b): v for a, b, v in previous.get("verdicts", [])
+                            if both(a, b)}
     # Reported, not merely applied. A guard whose effect is invisible is one
     # nobody can audit, and this one is the difference between a graph that
     # says two things and a graph that says one.
@@ -1195,9 +1259,13 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
 
     # 2. Heuristic pairs
     heuristic_merged: list[tuple[str, str, float, str]] = []
+    for a, b, sim, how in carried_heuristic:
+        uf.union(a, b)
+        heuristic_merged.append((a, b, sim, how))
+    refused |= carried_refused
     # Every pair below BLOCKING_MIN_MENTIONS, a provably complete subset above
     # it. `test_entity_blocking.py` pins that the two agree.
-    for i, j in _pairs_to_compare(mentions):
+    for i, j in _pairs_to_compare(mentions, only):
         a, b = mentions[i], mentions[j]
         sim, method = _heuristic_sim(a, b)
         # SIMILARITY FIRST, then the guard -- so a refusal means "this would
@@ -1236,7 +1304,10 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
             same_file += 1
 
     # 3. Embedding pairs (skip antonym/contrast pairs that embed deceptively high)
-    raw_embedding_pairs = _embedding_sim(mentions)
+    # Nothing new, nothing to embed: every raw pair is carried.
+    raw_embedding_pairs = dict(carried_embedding)
+    if only is None or only:
+        raw_embedding_pairs.update(_embedding_sim(mentions, only))
     embedding_pairs = {}
     for (a, b), sim in raw_embedding_pairs.items():
         if _is_contrasting(a, b) or is_distinct(a, b):
@@ -1255,13 +1326,20 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
     #
     # A pair nobody answered for keeps the behaviour it had before the judge
     # existed. An outage must not silently change the shape of the graph.
-    judged = {"asked": 0, "refused": 0, "unanswered": 0}
-    if embedding_pairs and entity_confirm.enabled():
-        candidates = list(embedding_pairs)
-        verdicts, unanswered = entity_confirm.confirm(
-            candidates, usage_context(triples, {n for p in candidates for n in p}))
-        judged["asked"] = len(candidates)
-        judged["unanswered"] = len(unanswered)
+    judged = {"asked": 0, "refused": 0, "unanswered": 0, "carried": 0}
+    verdicts: dict[tuple[str, str], bool] = {}
+    if embedding_pairs and judge_on:
+        # A verdict already given stands (resolution_cache.py says why); only
+        # pairs nobody has answered are asked.
+        verdicts = {p: v for p, v in carried_verdicts.items() if p in embedding_pairs}
+        judged["carried"] = len(verdicts)
+        candidates = [p for p in embedding_pairs if p not in verdicts]
+        if candidates:
+            fresh, unanswered = entity_confirm.confirm(
+                candidates, usage_context(triples, {n for p in candidates for n in p}))
+            verdicts.update(fresh)
+            judged["asked"] = len(candidates)
+            judged["unanswered"] = len(unanswered)
         for pair, same in verdicts.items():
             if not same:
                 embedding_pairs.pop(pair, None)
@@ -1348,6 +1426,21 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
 
     merge_edges = _build_merge_edges(mentions, heuristic_merged, embedding_pairs)
 
+    # What the next run may carry forward. Not after a run whose embeddings
+    # failed: its "no embedding pairs" is an outage, not a finding.
+    if not _embedding_error:
+        heuristic_refused = {p for p in refused if p not in raw_embedding_pairs}
+        try:
+            cache.save(key, {
+                "mentions": mentions,
+                "heuristic": [list(h) for h in heuristic_merged if h[3] != "same_file"],
+                "refused_heuristic": [list(p) for p in sorted(heuristic_refused)],
+                "embedding_raw": [[a, b, sim] for (a, b), sim in raw_embedding_pairs.items()],
+                "verdicts": [[a, b, v] for (a, b), v in verdicts.items()],
+            })
+        except Exception:
+            pass        # a cache that cannot be written costs a full run, nothing else
+
     return {
         "clusters": len(clusters),
         "mentions": len(mentions),
@@ -1373,6 +1466,10 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
         # one event somebody should actually look at.
         "absorbed_canonicals": renamed,
         "embedding_used": embedding_used,
+        # "full", or how much of the work was new. See resolution_cache.py.
+        "incremental": ("full" if only is None
+                        else {"new_mentions": len(only),
+                              "carried_pairs": len(carried_heuristic) + len(carried_embedding)}),
         "details": {
             "clusters": clusters,
             "merge_edges": merge_edges,
