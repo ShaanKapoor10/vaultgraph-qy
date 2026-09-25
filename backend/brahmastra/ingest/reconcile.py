@@ -30,6 +30,28 @@ PROPOSES; code decides what may change:
 
 It cannot invent a finding. The worst it can do is drop or relabel one, and the
 evaluation's TRAP and recall columns are what say whether it does.
+
+MEASURED (2026-09-25/26, qwen3.8-27b, paired: the same chunk findings scored
+without and with the pass, 3 runs x 3 labelled meetings):
+
+                                      recall   precision   traps   owners
+    small chunks, without             74%        52%         6     27/27
+    small chunks, first version       70%        54%         3     27/27
+    small chunks, grounded drops      74%        56%         3     27/27
+    whole meeting in one chunk        58% / 58%  70% / 70%   3 / 3  unchanged
+
+It removes a decision reversed in a LATER chunk -- "cut over Friday" after
+"Friday is off, Monday the 3rd" -- which chunk-by-chunk reading cannot see: 3
+of 3 runs, each naming the replacing decision. The first version also deleted
+true items: every wrong drop came with a refused cross-kind duplicate on the
+same finding, so drops now stand on their own (see _drop_refusal).
+
+Owners named later: never exercised. Chunk reading already got 27 of 27,
+because the sentence that assigns an owner restates the task. Status,
+priority, the overview and insights are new OUTPUT, not scored.
+
+Still owed before adoption: the same on gpt-oss-120b, the production model
+(its daily quota was spent when this ran).
 """
 
 from __future__ import annotations
@@ -64,11 +86,15 @@ For EVERY finding, return one entry:
   same thing, else null. Different wording of one commitment is a duplicate;
   two different commitments by the same person are not.
 - "drop": null, or a reason when the finding should not stand as it is:
-    "reversed"          a later finding shows it was undone or replaced
+    "reversed"          a LATER finding of the same kind replaced it - give
+                        that finding's id as "reversed_by"
     "declined"          the person explicitly refused it ("I'm not committing")
     "not_a_commitment"  a wish or suggestion nobody actually took on
-  Never drop a question or a risk for being answered or discussed - that is
-  a status, below. When unsure, null. A wrong drop loses something true.
+  Only decisions and action items can be dropped. Never drop a question or a
+  risk - answered or discussed is a status, below. A finding that restates
+  another in different words is a duplicate, not a reversal. When unsure,
+  null. A wrong drop loses something true.
+- "reversed_by": with "reversed", the id of the later finding; otherwise null.
 - "owner": for action items, who is accountable, if any finding shows a named
   participant taking it or being given it; else the current owner or null.
   Never assign someone who was only mentioned, and never guess.
@@ -100,12 +126,14 @@ _SCHEMA = {
                 "id": {"type": "string"},
                 "duplicate_of": {"type": ["string", "null"]},
                 "drop": {"type": ["string", "null"]},
+                "reversed_by": {"type": ["string", "null"]},
                 "owner": {"type": ["string", "null"]},
                 "due": {"type": "string"},
                 "status": {"type": "string"},
                 "priority": {"type": "string"},
             },
-            "required": ["id", "duplicate_of", "drop", "owner", "due", "status", "priority"],
+            "required": ["id", "duplicate_of", "drop", "reversed_by", "owner", "due",
+                         "status", "priority"],
             "additionalProperties": False,
         }},
         "overview": {"type": "object", "properties": {
@@ -126,6 +154,26 @@ _FIRST_PERSON = re.compile(r"\b(I|I'll|I will|I'm|I am|I can|me|my)\b", re.I)
 
 def _words(text: str) -> set[str]:
     return set(re.findall(r"[a-z0-9]+", (text or "").lower()))
+
+
+DROPPABLE = ("decision", "action_item")
+
+
+def _drop_refusal(drop: str, a: Any, i: int, reversed_by: Any, dup_refused: bool,
+                  ids: dict[str, int], kinds: list[str]) -> str | None:
+    """Why a proposed drop is refused, or None if it may stand."""
+    if drop not in DROP_REASONS:
+        return f"drop reason {drop!r}"
+    if a.kind not in DROPPABLE:
+        return f"drop of a {a.kind} (only decisions and action items can be dropped)"
+    if dup_refused:
+        return "drop alongside a refused duplicate (a restatement, not a reversal)"
+    if drop == "reversed":
+        j = ids.get(str(reversed_by or ""))
+        if j is None or j <= i or kinds[j] != a.kind:
+            return f"reversed_by {reversed_by!r} is not a later finding of the same kind"
+    return None
+
 
 
 def render(artifacts: list[Any], participants: list[str], title: str) -> str:
@@ -165,6 +213,7 @@ def reconcile(artifacts: list[Any], participants: list[str], title: str = "",
         return artifacts, report
 
     ids = {f"F{i}": i - 1 for i in range(1, len(artifacts) + 1)}
+    kinds = [a.kind for a in artifacts]
     people = {p.lower(): p for p in participants}
     quotes = " ".join(a.quote or "" for a in artifacts)
     quote_words = _words(quotes)
@@ -184,10 +233,12 @@ def reconcile(artifacts: list[Any], participants: list[str], title: str = "",
         a = out[i]
 
         dup = item.get("duplicate_of")
+        dup_refused = False
         if dup:
             j = ids.get(str(dup))
             if j is None or j >= i or artifacts[j].kind != a.kind:
                 reject(fid, f"duplicate_of {dup} (not an earlier finding of the same kind)")
+                dup_refused = True
             else:
                 removed.add(i)
                 out[j] = replace(out[j], mentions=(out[j].mentions or 1) + (a.mentions or 1))
@@ -196,11 +247,19 @@ def reconcile(artifacts: list[Any], participants: list[str], title: str = "",
 
         drop = item.get("drop")
         if drop:
-            if drop in DROP_REASONS:
+            # Measured (3 runs x 3 cases): every wrong drop came with a refused
+            # cross-kind duplicate on the SAME finding -- the model, told it
+            # could not call a decision a duplicate of an action item, deleted
+            # it as "reversed" instead. So a drop must stand on its own:
+            # decisions and action items only, and a reversal names the later
+            # finding of the same kind that replaced it.
+            why = _drop_refusal(drop, a, i, item.get("reversed_by"), dup_refused, ids, kinds)
+            if why is None:
                 removed.add(i)
-                report["dropped"].append(f"{fid} ({drop}): {a.statement}")
+                by = f" by {item.get('reversed_by')}" if drop == "reversed" else ""
+                report["dropped"].append(f"{fid} ({drop}{by}): {a.statement}")
                 continue
-            reject(fid, f"drop reason {drop!r}")
+            reject(fid, why)
 
         if a.kind == "action_item":
             owner = item.get("owner")

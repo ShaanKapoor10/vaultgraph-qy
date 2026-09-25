@@ -32,7 +32,7 @@ def _model(items, overview=None, insights=None):
 
 
 def _item(fid, **kw):
-    base = {"id": fid, "duplicate_of": None, "drop": None, "owner": None,
+    base = {"id": fid, "duplicate_of": None, "drop": None, "reversed_by": None, "owner": None,
             "due": "", "status": "open", "priority": "normal"}
     return {**base, **kw}
 
@@ -99,3 +99,42 @@ def test_a_failed_pass_changes_nothing():
         raise RuntimeError("quota")
     out, rep = reconcile(ARTS, PEOPLE, chat=down)
     assert out == ARTS and "quota" in rep["error"]
+
+
+# -- a drop has to stand on its own (measured: every wrong drop came with a
+#    refused cross-kind duplicate on the same finding) --------------------------
+
+DECS = [
+    Artifact("decision", "Cut over on Friday", quote="we cut over on Friday"),
+    Artifact("action_item", "Rebuild the invoice export", owner="Omar",
+             quote="I'll rebuild the invoice export by Wednesday"),
+    Artifact("decision", "Cut over Monday the 3rd instead", quote="We cut over Monday the 3rd instead"),
+    Artifact("risk", "Refunds untested", quote="nobody has tested refunds"),
+]
+
+
+def test_a_reversal_names_the_later_decision_that_replaced_it():
+    out, rep = reconcile(DECS, ["Omar"], chat=_model([_item("F1", drop="reversed", reversed_by="F3")]))
+    assert [a.statement for a in out][0] == "Rebuild the invoice export"
+    assert rep["dropped"] == ["F1 (reversed by F3): Cut over on Friday"]
+
+
+def test_a_reversal_by_nothing_later_is_refused():
+    out, _ = reconcile(DECS, ["Omar"], chat=_model([_item("F3", drop="reversed", reversed_by="F1")]))
+    assert len(out) == 4
+
+
+def test_a_reversal_by_a_different_kind_is_refused():
+    out, _ = reconcile(DECS, ["Omar"], chat=_model([_item("F2", drop="reversed", reversed_by="F3")]))
+    assert len(out) == 4
+
+
+def test_a_drop_riding_on_a_refused_duplicate_is_refused():
+    out, rep = reconcile(DECS, ["Omar"], chat=_model(
+        [_item("F2", duplicate_of="F1", drop="not_a_commitment")]))
+    assert len(out) == 4 and any("refused duplicate" in r for r in rep["rejected_proposals"])
+
+
+def test_risks_and_questions_are_never_dropped():
+    out, _ = reconcile(DECS, ["Omar"], chat=_model([_item("F4", drop="declined")]))
+    assert len(out) == 4
