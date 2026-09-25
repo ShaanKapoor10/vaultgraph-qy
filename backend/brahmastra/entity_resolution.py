@@ -723,7 +723,8 @@ def _jaro_floor() -> float:
     return (JARO_THRESHOLD - 0.4) / 0.6
 
 
-def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
+def _candidate_pairs(mentions: list[str],
+                     only: set[int] | None = None) -> Iterable[tuple[int, int]]:
     """
     Every pair `_heuristic_sim` could possibly score above the threshold.
 
@@ -785,14 +786,29 @@ def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
     def offer(i: int, j: int) -> None:
         out.add((i, j) if i < j else (j, i))
 
+    # INCREMENTAL (`only` = the new mentions): each section below offers only
+    # pairs with a new side, and does work in proportion to them. Filtering the
+    # full output instead measured 93s of 94 at 10,000 mentions -- the Jaro
+    # bound below is all-pairs, and it was all being computed to be discarded.
+    def pairs_in(group: list[int]):
+        if only is None:
+            for x in range(len(group)):
+                for y in range(x + 1, len(group)):
+                    yield group[x], group[y]
+            return
+        fresh = [g for g in group if g in only]
+        for a in fresh:
+            for b in group:
+                if b != a and not (b in only and b < a):
+                    yield a, b
+
     # exact
     by_form: dict[str, list[int]] = {}
     for i, form in enumerate(normalised):
         by_form.setdefault(form, []).append(i)
     for group in by_form.values():
-        for x in range(len(group)):
-            for y in range(x + 1, len(group)):
-                offer(group[x], group[y])
+        for i, j in pairs_in(group):
+            offer(i, j)
 
     # token_subset -- a subset that shares at least half its tokens shares at
     # least one, so an inverted index over tokens is complete for this method.
@@ -801,9 +817,8 @@ def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
         for token in ts:
             by_token.setdefault(token, []).append(i)
     for holders in by_token.values():
-        for x in range(len(holders)):
-            for y in range(x + 1, len(holders)):
-                offer(holders[x], holders[y])
+        for i, j in pairs_in(holders):
+            offer(i, j)
 
     # acronym -- the short side is the initials of the long side's words, so
     # both map to the same key.
@@ -816,17 +831,19 @@ def _candidate_pairs(mentions: list[str]) -> Iterable[tuple[int, int]]:
         if stripped.isupper() and len(stripped) >= 2:
             by_initials.setdefault(stripped.lower(), []).append(i)
     for holders in by_initials.values():
-        for x in range(len(holders)):
-            for y in range(x + 1, len(holders)):
-                offer(holders[x], holders[y])
+        for i, j in pairs_in(holders):
+            offer(i, j)
 
     # jaro_winkler
-    for i in range(n):
+    rows = range(n) if only is None else sorted(only)
+    for i in rows:
         la = lengths[i]
         if not la:
             continue
         ci = counts[i]
-        for j in range(i + 1, n):
+        cols = (range(i + 1, n) if only is None
+                else (j for j in range(n) if j != i and not (j in only and j < i)))
+        for j in cols:
             lb = lengths[j]
             if not lb:
                 continue
@@ -850,7 +867,7 @@ def _pairs_to_compare(mentions: list[str],
         if n < BLOCKING_MIN_MENTIONS:
             return ((min(i, j), max(i, j)) for i in sorted(only) for j in range(n)
                     if j != i and not (j in only and j < i))
-        return ((i, j) for i, j in _candidate_pairs(mentions) if i in only or j in only)
+        return iter(_candidate_pairs(mentions, only))
     if n < BLOCKING_MIN_MENTIONS:
         return ((i, j) for i in range(n) for j in range(i + 1, n))
     return _candidate_pairs(mentions)

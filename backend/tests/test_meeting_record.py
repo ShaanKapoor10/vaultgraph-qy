@@ -326,3 +326,43 @@ def test_reprocessing_removes_artifact_rows_the_ledger_never_knew(store, underst
     statements = [a["statement"] for a in store.get_artifacts(transcript_id=tid)]
     assert sorted(statements) == ["The release moves to April 15th", "Update the roadmap"]
     assert report["artifacts_removed"] >= 1
+
+
+# -- a person's rejection ------------------------------------------------------
+
+def _record_edges(tid):
+    return _edges(t for t in db.get_all_triples()
+                  if t["source_note_id"] == gr.record_note_id(tid))
+
+
+def test_a_rejected_finding_leaves_the_graph_and_stays_out(store, understood):
+    tid = store.create_transcript(Transcript("", "Release planning", TRANSCRIPT))
+    assemble.process_transcript(tid, store=store)
+    roadmap = next(a for a in store.get_artifacts(transcript_id=tid)
+                   if a["statement"] == "Update the roadmap")
+
+    store.reject_artifact(roadmap["id"], "not what was agreed")
+    assemble.rebuild_record(tid, store=store)
+    assert not any(s == "Update the roadmap" for s, _, _ in _record_edges(tid))
+    assert ("The release moves to April 15th", "decided_by", "Sarah") in _record_edges(tid)
+
+    # A full re-processing finds it again -- and still leaves it out.
+    assemble.process_transcript(tid, store=store, force=True)
+    assert not any(s == "Update the roadmap" for s, _, _ in _record_edges(tid))
+
+    store.unreject_artifact(roadmap["id"])
+    assemble.rebuild_record(tid, store=store)
+    assert ("Update the roadmap", "assigned_to", "Mei") in _record_edges(tid)
+
+
+def test_the_meeting_view_says_who_said_what(store, understood, monkeypatch):
+    import asyncio
+    from brahmastra.ingest import routes
+    monkeypatch.setattr(routes, "get_ingest_store", lambda workspace=None: store)
+    tid = store.create_transcript(Transcript("", "Release planning", TRANSCRIPT))
+    assemble.process_transcript(tid, store=store)
+    view = asyncio.run(routes.meeting_view(tid))
+    assert view["participants"] == ["Mei", "Sarah"]
+    decision = next(i for i in view["items"] if i["kind"] == "decision")
+    assert decision["said_by"] == "Sarah" and decision["rejected"] is False
+    assert [i["kind"] for i in view["items"]] == ["decision", "action_item"]

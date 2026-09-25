@@ -220,6 +220,35 @@ def _segment_with_speakers(record: dict[str, Any], report: dict[str, Any]) -> li
     return chunk_turns(speakers.apply(turns, mapping))
 
 
+def rebuild_record(transcript_id: str, store: IngestStore | None = None) -> dict[str, Any]:
+    """
+    Rewrite a meeting's graph record from its STORED findings, without reading
+    the meeting again -- what a rejection needs. No comprehension call is made;
+    naming diarized speakers is memoised.
+
+    Only the record is declared, and the stream is never finished, so nothing
+    else this transcript owns (its chunk notes) is touched.
+    """
+    from brahmastra.ingest.comprehend import Artifact
+
+    store = store or get_ingest_store()
+    record = store.get_transcript(transcript_id)
+    if record is None:
+        return {"status": "error", "error": f"no transcript {transcript_id!r}"}
+    report: dict[str, Any] = {"transcript_id": transcript_id, "errors": []}
+    chunks = _segment_with_speakers(record, report)
+    fields = ("kind", "statement", "owner", "due", "rationale", "quote",
+              "chunk_index", "start_time", "end_time", "mentions", "superseded_by")
+    artifacts = [Artifact(**{k: row.get(k) for k in fields if row.get(k) is not None})
+                 for row in store.get_artifacts(transcript_id=transcript_id,
+                                                limit=1_000_000)]
+    ledger = ownership.Ledger(workspace=store.workspace)
+    notes = ownership.Streaming(ledger, OWNER_KIND, transcript_id, "note", force=True)
+    written = _write_graph_record(notes, transcript_id, record, chunks, artifacts, report)
+    return {"status": "ok" if not report["errors"] else "partial",
+            "graph_record": written, "errors": report["errors"]}
+
+
 def _field_of(artifact: Any, name: str) -> Any:
     return artifact.get(name) if isinstance(artifact, dict) else getattr(artifact, name, None)
 
@@ -244,6 +273,17 @@ def _write_graph_record(notes: ownership.Streaming, transcript_id: str,
     from brahmastra.ingest import graph_record as gr
 
     from brahmastra.ingest.evidence import speaker_of
+    from brahmastra.ingest.store import get_ingest_store, identify_artifacts
+
+    # A finding a person rejected never reaches the graph. Checked by id, so a
+    # re-run that finds the same statement again still leaves it out.
+    try:
+        rejected = get_ingest_store().rejected_ids(transcript_id)
+    except Exception:
+        rejected = set()
+    if rejected:
+        artifacts = [a for aid, a in identify_artifacts(transcript_id, artifacts)
+                     if aid not in rejected]
 
     # Who actually said each item's quote -- see graph_record._person_for.
     by_index = {getattr(c, "index", i): c for i, c in enumerate(chunks)}

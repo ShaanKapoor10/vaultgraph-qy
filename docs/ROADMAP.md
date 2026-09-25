@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 890 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 950 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -241,25 +241,29 @@ The audit found more of the pattern: `coverage for session checkpointing` ≈
 `session checkpointing`, `solution to invisible MCP tools` ≈ `MCP tools`,
 `loading backend/.env` ≈ `backend/.env`. Same shape as item 7, same answer.
 
-### 8. Resolution at scale — MEASURED; not needed yet, and ANN is only half of it
+### 8. Resolution at scale — incremental resolution BUILT
 
-Timed on 2026-09-25 with synthetic mentions built from the live graph's own vocabulary (1,020 real
-mentions today):
+Timed with synthetic mentions built from the live vocabulary:
 
-| mentions | embedding stage | heuristic stage | peak memory |
-|---|---|---|---|
-| 1,000 | ~10 s (+ model load) | 6 s | 311 MB (the model) |
-| 5,000 | 34 s | 27 s | 27 MB |
-| 10,000 | 115 s | 121 s | 55 MB |
-| 20,000 | 395 s | 444 s | 112 MB |
+| mentions | full run | incremental, 1% new |
+|---|---|---|
+| 1,070 (live, 63 new) | 6.9 s | 2.4 s — identical 937 clusters, 148 edges |
+| 10,000 | ~2 min | encode 8.5 s + candidates 1.9 s (was 91.8 s) |
 
-Memory is not the wall; row blocks did their job. Time is, and the heuristic
-stage costs as much as the embedding stage, so an ANN index alone would halve
-the problem, not solve it. **The bigger lever is incremental resolution:** a
-pair of old mentions was already judged last run. Compare only pairs that
-involve a new mention, and carry the rest of the union forward. Revisit near
-**5,000 mentions** (about 500 notes at today's rate), and build incremental first,
-ANN second.
+`resolution_cache.py` keeps each run's pair decisions under a key of everything
+a verdict depends on: the code fingerprint, thresholds, meeting set and judge
+setting. The next run compares only pairs touching a new mention. Any key change
+means a full run, and `RESOLUTION_INCREMENTAL=0` forces one. Tests pin that the
+incremental result equals a full run, add and remove alike.
+
+**What profiling showed:** encoding 10k names takes 8.5 s. It was the Jaro
+candidate bound, all-pairs, that cost 94 s. The first incremental version
+generated every candidate and filtered afterwards, which saved nothing (107 s
+against 119 s). The generator now takes the new mentions itself.
+
+**Still quadratic:** a FULL run, taken after any code change. An ANN index
+remains the answer to that, and is not needed while full runs are rare and
+under 10k mentions.
 
 ### 9. Comprehension quality — SETTLED: focused stays
 

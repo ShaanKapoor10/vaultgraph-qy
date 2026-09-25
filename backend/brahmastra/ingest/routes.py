@@ -225,3 +225,79 @@ async def list_artifacts(
 async def ingest_stats() -> dict[str, Any]:
     store = get_ingest_store()
     return {"workspace": store.workspace, "target": store.describe(), **store.counts()}
+
+
+# -- the meeting view ------------------------------------------------------------
+
+class RejectIn(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
+
+
+@router.get("/transcripts/{transcript_id}/meeting")
+async def meeting_view(transcript_id: str) -> dict[str, Any]:
+    """
+    One meeting as a person reads it: every finding with its kind, owner, the
+    person who SAID it, the verbatim quote and when in the meeting it was said,
+    and whether someone has rejected it.
+
+    `said_by` is recomputed from the transcript (segmentation is deterministic
+    and naming diarized voices is memoised), so it is exactly what the graph
+    record used -- see graph_record._person_for.
+    """
+    from brahmastra.ingest.assemble import _segment_with_speakers
+    from brahmastra.ingest.evidence import speaker_of
+    from brahmastra.ingest.speakers import is_anonymous
+
+    store = get_ingest_store()
+    record = store.get_transcript(transcript_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"no transcript {transcript_id!r}")
+    report: dict[str, Any] = {"errors": []}
+    chunks = _segment_with_speakers(record, report)
+    by_index = {c.index: c for c in chunks}
+    rejected = store.rejected_ids(transcript_id)
+    items = []
+    for a in store.get_artifacts(transcript_id=transcript_id, limit=1_000_000):
+        said_by = speaker_of(a.get("quote") or "", by_index.get(a.get("chunk_index")))
+        items.append({**a, "said_by": said_by, "rejected": a["id"] in rejected})
+    order = {"decision": 0, "action_item": 1, "risk": 2, "open_question": 3}
+    items.sort(key=lambda a: (order.get(a["kind"], 9), a.get("start_time") or "", a["statement"]))
+    speakers = sorted({s for c in chunks for s in (c.speakers or [])})
+    return {
+        "id": transcript_id,
+        "title": record["title"],
+        "occurred_at": record.get("occurred_at"),
+        "status": record.get("status"),
+        "error": record.get("error"),
+        "participants": [s for s in speakers if not is_anonymous(s)],
+        "unnamed_voices": [s for s in speakers if is_anonymous(s)],
+        "speaker_identification": report.get("speakers"),
+        "chunks": len(chunks),
+        "items": items,
+    }
+
+
+@router.post("/artifacts/{artifact_id}/reject")
+async def reject_artifact(artifact_id: str, body: RejectIn | None = None) -> dict[str, Any]:
+    """
+    "This finding is wrong." It leaves the graph now, and stays out through every
+    re-processing -- the rejection is a person's judgement and is kept as source
+    data. Undo with DELETE on the same path.
+    """
+    store = get_ingest_store()
+    row = store.reject_artifact(artifact_id, (body.reason if body else None))
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no artifact {artifact_id!r}")
+    rebuilt = assemble.rebuild_record(row["transcript_id"], store=store)
+    return {"artifact_id": artifact_id, "rejected": True, "record": rebuilt}
+
+
+@router.delete("/artifacts/{artifact_id}/reject")
+async def unreject_artifact(artifact_id: str) -> dict[str, Any]:
+    store = get_ingest_store()
+    row = next((a for a in store.get_artifacts(limit=1_000_000) if a["id"] == artifact_id), None)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"no artifact {artifact_id!r}")
+    store.unreject_artifact(artifact_id)
+    rebuilt = assemble.rebuild_record(row["transcript_id"], store=store)
+    return {"artifact_id": artifact_id, "rejected": False, "record": rebuilt}

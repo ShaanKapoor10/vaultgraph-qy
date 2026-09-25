@@ -130,3 +130,13 @@ def test_a_run_whose_embeddings_failed_is_not_carried_forward(world, monkeypatch
     er.run_resolution()
     monkeypatch.setattr(er, "_get_embedder", lambda: FakeModel())
     assert er.run_resolution()["incremental"] == "full"
+
+
+def test_blocked_candidates_for_new_mentions_are_exactly_the_full_sets_new_pairs():
+    """Above the blocking cut the generator itself takes `only`; its output must
+    be precisely the full candidate set's pairs that touch a new mention."""
+    names = sorted(set(NAMES_A + NAMES_B + [f"{w} thing {i}" for i, w in
+                                            enumerate(["alpha", "beta", "gamma"] * 20)]))
+    only = {i for i, n in enumerate(names) if n in NAMES_B}
+    full = {p for p in er._candidate_pairs(names) if p[0] in only or p[1] in only}
+    assert set(er._candidate_pairs(names, only)) == full

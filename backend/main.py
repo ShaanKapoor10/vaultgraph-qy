@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse
 
 from brahmastra.auth import auth_status, require_api_key
 from brahmastra.db import init_db
-from brahmastra.routers import notes, pipeline, graph, ask, paths, workspaces, entities
+from brahmastra.routers import notes, pipeline, graph, ask, paths, workspaces, entities, diagnostics
 from brahmastra.ingest.routes import router as ingest_router
 
 
@@ -189,6 +189,7 @@ app.include_router(ask.router)
 app.include_router(paths.router)
 app.include_router(workspaces.router)
 app.include_router(entities.router)
+app.include_router(diagnostics.router)
 # Transcript ingestion. Mounted here rather than served separately so it
 # inherits the auth middleware and the per-request workspace binding: a
 # second door into the same data with its own idea of who may open it is

@@ -113,6 +113,20 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_transcript
     ON meeting_artifacts (workspace_id, transcript_id);
 CREATE INDEX IF NOT EXISTS idx_artifacts_owner
     ON meeting_artifacts (workspace_id, owner);
+
+-- A person's "this is wrong" about a finding. SOURCE data, like the transcript:
+-- nothing can recompute a human judgement, so re-processing never touches it.
+-- Keyed by the artifact's id, which is derived from its statement, so the same
+-- finding found again is still rejected -- and a reworded one is asked again.
+CREATE TABLE IF NOT EXISTS artifact_rejections (
+    workspace_id  TEXT NOT NULL DEFAULT 'default',
+    artifact_id   TEXT NOT NULL,
+    transcript_id TEXT NOT NULL,
+    statement     TEXT NOT NULL,
+    reason        TEXT,
+    rejected_at   TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, artifact_id)
+);
 """
 
 _POSTGRES_SCHEMA = _SQLITE_SCHEMA.replace("INTEGER", "INTEGER")
@@ -563,6 +577,43 @@ class IngestStore:
                 except ValueError:
                     r["speakers"] = []
         return rows
+
+    # -- rejections (a person's verdict; SOURCE data) ------------------------
+
+    def reject_artifact(self, artifact_id: str, reason: str | None = None) -> dict[str, Any] | None:
+        """Mark a finding wrong. Returns the artifact, or None if unknown."""
+        self.init_schema()
+        row = next((a for a in self.get_artifacts(limit=1_000_000) if a["id"] == artifact_id), None)
+        if row is None:
+            return None
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                "INSERT INTO artifact_rejections (workspace_id, artifact_id, transcript_id, "
+                "statement, reason, rejected_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (workspace_id, artifact_id) DO UPDATE SET "
+                "reason = excluded.reason, rejected_at = excluded.rejected_at"),
+                (self.workspace, artifact_id, row["transcript_id"], row["statement"],
+                 reason, _now()))
+        return row
+
+    def unreject_artifact(self, artifact_id: str) -> bool:
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                "DELETE FROM artifact_rejections WHERE workspace_id = ? AND artifact_id = ?"),
+                (self.workspace, artifact_id))
+            return bool(cur.rowcount)
+
+    def rejected_ids(self, transcript_id: str | None = None) -> set[str]:
+        self.init_schema()
+        sql = "SELECT artifact_id FROM artifact_rejections WHERE workspace_id = ?"
+        params: list[Any] = [self.workspace]
+        if transcript_id:
+            sql += " AND transcript_id = ?"
+            params.append(transcript_id)
+        with self._cursor() as cur:
+            cur.execute(self._ph(sql), tuple(params))
+            return {r["artifact_id"] for r in self._rows(cur)}
 
     def counts(self) -> dict[str, int]:
         self.init_schema()
