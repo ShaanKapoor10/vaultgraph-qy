@@ -241,10 +241,25 @@ The audit found more of the pattern: `coverage for session checkpointing` ≈
 `session checkpointing`, `solution to invisible MCP tools` ≈ `MCP tools`,
 `loading backend/.env` ≈ `backend/.env`. Same shape as item 7, same answer.
 
-### 8. An ANN index for the embedding stage
+### 8. Resolution at scale — MEASURED; not needed yet, and ANN is only half of it
 
-Row blocks cap memory at any size; the work is still quadratic. Revisit near
-10,000 mentions. (1,039 today; embedding them all takes 1.25s.)
+Timed on 2026-09-25 with synthetic mentions built from the live graph's own vocabulary (1,020 real
+mentions today):
+
+| mentions | embedding stage | heuristic stage | peak memory |
+|---|---|---|---|
+| 1,000 | ~10 s (+ model load) | 6 s | 311 MB (the model) |
+| 5,000 | 34 s | 27 s | 27 MB |
+| 10,000 | 115 s | 121 s | 55 MB |
+| 20,000 | 395 s | 444 s | 112 MB |
+
+Memory is not the wall; row blocks did their job. Time is, and the heuristic
+stage costs as much as the embedding stage, so an ANN index alone would halve
+the problem, not solve it. **The bigger lever is incremental resolution:** a
+pair of old mentions was already judged last run. Compare only pairs that
+involve a new mention, and carry the rest of the union forward. Revisit near
+**5,000 mentions** (about 500 notes at today's rate), and build incremental first,
+ANN second.
 
 ### 9. Comprehension quality — SETTLED: focused stays
 
