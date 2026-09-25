@@ -33,7 +33,9 @@ in pairs and feeds them to a Union-Find. Pairs are also batched -- eight
 verdicts per call -- because the corpus produces ~143 candidate pairs and the
 tier that runs this counts requests.
 
-MEASURED, AND NOT ADOPTED -- IT IS OFF BY DEFAULT.
+RE-MEASURED 2026-09-25, AND ADOPTED ON GROQ -- see the end of this docstring.
+
+FIRST MEASUREMENT (kept, because what changed it is the point):
 
 Four runs against 21 labelled pairs from the live graph, judging only what the
 deterministic guards in entity_resolution.py leave undecided:
@@ -59,6 +61,30 @@ measured on gpt-oss-120b, which is the small thing the free tier offers);
 asking only about pairs in the ambiguous similarity band rather than all of
 them; and giving the judge the SENTENCES the two names appeared in, which is
 the one piece of evidence a human uses here and this prompt withholds.
+
+THE RE-MEASUREMENT. resolution_cases.json now fixes 71 labelled pairs in
+advance -- the embedding path's real candidates, answered by hand before any
+model saw them -- and brahmastra.resolution_eval scores any model on them:
+
+                          stopped wrong    broke right    across 3 runs
+    gpt-oss-120b             21-22 / 29       6-9 / 42     unstable
+    qwen/qwen3.8-27b         21    / 29       3   / 42     identical x3
+
+On qwen3.8-27b the three it "breaks" are all labels a reader could argue
+(`Neo4j Aura` / `Neo4j Aura Free` is a product and its tier; `qwen2.5:7b` /
+`-instruct` really are two models). Run live, read-only, it refused 43 of 119
+candidates: ~25 plainly right (`Obsidian` / `Obsidian replacement`,
+`checkpoint` / `checkpoint queue`), 2 plainly wrong (`Groq key` / `live Groq
+key`), the rest arguable. Stable, cheap and clearly net positive: the two
+objections that kept it off -- break-even and churn -- are both gone.
+
+So it runs by DEFAULT where it was measured: when the resolution model
+(RESOLUTION_LLM_MODEL, default groq:qwen/qwen3.8-27b) belongs to the provider
+actually in use. On Ollama that is a 7B model nobody measured, so it stays off
+there unless ENTITY_CONFIRM=1 asks for it. ENTITY_CONFIRM=0 turns it off
+everywhere. An unanswered pair still merges as it did before the judge, so a
+retired model or a spent quota degrades to the old behaviour, not to a
+different graph.
 
 THE REMAINING WEAKNESS, stated rather than hidden: Union-Find is transitive.
 If A~B and B~C are both confirmed, A and C merge without ever being asked
@@ -139,14 +165,21 @@ _SCHEMA: dict[str, Any] = {
 
 def enabled() -> bool:
     """
-    OFF unless asked for. ENTITY_CONFIRM=1 turns the judge on.
-
-    Off by default because the measurement did not earn it -- see MEASURED,
-    AND NOT ADOPTED in the module docstring. Opt-in rather than deleted,
-    because the same code on a larger model is the obvious next thing to try
-    and the harness for judging it already exists.
+    ENTITY_CONFIRM=1 / 0 decides when set. Unset: on only where it was
+    measured -- when the resolution model belongs to the provider in use.
+    See RE-MEASURED in the module docstring.
     """
-    return os.environ.get("ENTITY_CONFIRM", "").strip() == "1"
+    explicit = os.environ.get("ENTITY_CONFIRM", "").strip()
+    if explicit in ("0", "1"):
+        return explicit == "1"
+    try:
+        from brahmastra.llm import (parse_model_setting, resolution_model_setting,
+                                    resolve_provider)
+
+        parsed = parse_model_setting(resolution_model_setting())
+        return bool(parsed and parsed[0] and parsed[0] == resolve_provider())
+    except Exception:
+        return False
 
 
 def available() -> bool:
@@ -377,6 +410,15 @@ def _ask(pairs: list[tuple[str, str]], model: str = "") -> dict[int, bool]:
 
 
 def confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
+        dict[tuple[str, str], bool], list[tuple[str, str]]]:
+    """Run the judge on RESOLUTION_LLM_MODEL when it is set. See `_confirm`."""
+    from brahmastra.llm import resolution_model_setting, using_model
+
+    with using_model(resolution_model_setting()):
+        return _confirm(pairs)
+
+
+def _confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
         dict[tuple[str, str], bool], list[tuple[str, str]]]:
     """
     Verdicts, and the pairs nobody managed to answer for.

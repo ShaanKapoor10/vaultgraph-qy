@@ -458,6 +458,14 @@ def _run_pipeline_locked(full: bool, result: dict[str, Any]) -> dict[str, Any]:
         "merge_edges": resolve_result["merge_edges"],
         "embedding_used": resolve_result["embedding_used"],
     }
+    # A resolve that lost its embeddings is a PARTIAL run, not an ok one: it
+    # either kept yesterday's merges or (with none to keep) wrote fewer.
+    if resolve_result.get("embedding_error"):
+        result["stages"]["resolve"]["error"] = (
+            f"embeddings unavailable ({resolve_result['embedding_error']}); "
+            + ("kept the previous canonical map"
+               if resolve_result.get("kept_previous_map")
+               else "resolved without meaning-based merges"))
 
     # ---------------------------------------------------------------
     # Stage: build-graph

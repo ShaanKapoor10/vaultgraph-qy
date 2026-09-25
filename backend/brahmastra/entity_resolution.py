@@ -1301,8 +1301,28 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
     # two runs should not have to sort them itself.
     clusters.sort(key=lambda c: c["cluster_id"])
 
-    # 5. Persist
-    db.replace_canonical_map(clusters)
+    # 5. Persist -- unless this run could not see what the last one saw.
+    #
+    # Losing embeddings used to DEGRADE the run: the heuristics still merged,
+    # the report said embedding_error, and the canonical map was rewritten
+    # anyway. Measured 2026-09-25 on the live graph, that rewrite drops every
+    # meaning-based merge -- 85 of 154 edges -- and the cause was not a missing
+    # package but Windows Smart App Control intermittently blocking one of
+    # scipy's DLLs in the venv: the same import failed once and passed twice.
+    # A transient, then, and a transient must not reshape the graph. When the
+    # model was MEANT to run (EMBEDDINGS_ENABLED) and a previous map exists,
+    # that map stays; the next healthy run replaces it. A deliberate
+    # EMBEDDINGS_ENABLED=0 still writes, because that is a choice, not a fault.
+    from brahmastra.embeddings import embeddings_enabled
+
+    kept_previous = False
+    if _embedding_error and embeddings_enabled():
+        try:
+            kept_previous = bool(db.get_canonical_map())
+        except Exception:
+            kept_previous = False
+    if not kept_previous:
+        db.replace_canonical_map(clusters)
 
     merge_edges = _build_merge_edges(mentions, heuristic_merged, embedding_pairs)
 
@@ -1324,6 +1344,8 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
         # heuristics still merged, so the run is degraded rather than failed --
         # but a stage that quietly stops contributing must say so.
         **({"embedding_error": _embedding_error} if _embedding_error else {}),
+        # True when the map above was NOT written, for the reason in step 5.
+        "kept_previous_map": kept_previous,
         # Established names that absorbed another established name. Reported
         # because a merge of two things the graph already had names for is the
         # one event somebody should actually look at.

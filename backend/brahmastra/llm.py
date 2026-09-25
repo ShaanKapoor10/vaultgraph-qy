@@ -211,8 +211,80 @@ def model_for(name: str) -> str:
     itself -- see the registry comment for the run where half the system had
     been fixed and the other half was still calling a decommissioned model.
     """
+    override = _MODEL_OVERRIDE.get()
+    if override and override[0] == name:
+        return override[1]
     spec = provider_spec(name)
     return _env(spec.model_env, spec.default_model)
+
+
+# -- one stage, its own model ------------------------------------------------
+#
+# Extraction and entity resolution ask different questions: one reads prose
+# into triples at volume, the other makes a few dozen yes/no calls where being
+# wrong fuses two things in the graph. cocoindex's meeting example keeps them
+# apart (LLM_MODEL and RESOLUTION_LLM_MODEL), and ROADMAP item 7 needs exactly
+# that -- to measure the merge judge on a different model without changing
+# what extraction runs on.
+#
+# A context, not an argument threaded through every provider function, and
+# BOUND TO ONE PROVIDER: if the call falls back from Groq to Ollama on a spent
+# quota, Ollama must not be handed a Groq model id.
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+
+_MODEL_OVERRIDE: ContextVar[tuple[str, str] | None] = ContextVar(
+    "brahmastra_model_override", default=None)
+
+
+def parse_model_setting(value: str) -> tuple[str | None, str] | None:
+    """`groq:openai/gpt-oss-120b` or a bare model id -> (provider|None, model).
+
+    A prefix counts as a provider only when it IS one: Ollama's own ids carry
+    colons (`qwen2.5:7b-instruct`)."""
+    value = (value or "").strip()
+    if not value:
+        return None
+    head, sep, tail = value.partition(":")
+    if sep and head.lower() in PROVIDERS and tail:
+        return head.lower(), tail
+    return None, value
+
+
+@contextmanager
+def using_model(setting: str | None):
+    """Inside this block, `model_for` answers with the setting's model -- for
+    its provider only (the resolved provider when the setting names none)."""
+    parsed = parse_model_setting(setting or "")
+    if parsed is None:
+        yield
+        return
+    provider, model = parsed
+    if provider is None:
+        try:
+            provider = resolve_provider()
+        except Exception:                                     # noqa: BLE001
+            yield
+            return
+    token = _MODEL_OVERRIDE.set((provider, model))
+    try:
+        yield
+    finally:
+        _MODEL_OVERRIDE.reset(token)
+
+
+def resolution_model_setting() -> str:
+    """RESOLUTION_LLM_MODEL, read at call time.
+
+    Default groq:qwen/qwen3.8-27b: measured as the merge judge on 71 labelled
+    pairs, stable across runs where gpt-oss-120b was not (entity_confirm.py).
+    Bound to Groq, so on any other provider it changes nothing. Set it empty
+    to use the provider's ordinary model."""
+    return os.environ.get("RESOLUTION_LLM_MODEL", DEFAULT_RESOLUTION_MODEL).strip()
+
+
+DEFAULT_RESOLUTION_MODEL = "groq:qwen/qwen3.8-27b"
 
 
 def groq_model() -> str:
@@ -736,7 +808,7 @@ def ollama_chat(
     """
     host = _env("OLLAMA_HOST", OLLAMA_HOST)
     payload: dict = {
-        "model": _env("OLLAMA_MODEL", OLLAMA_MODEL),
+        "model": model_for("ollama"),
         "stream": False,
         "options": {"temperature": temperature, "num_ctx": num_ctx},
         "messages": [

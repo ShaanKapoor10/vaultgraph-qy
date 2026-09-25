@@ -116,19 +116,37 @@ def test_a_pair_the_model_skipped_is_unanswered(monkeypatch):
     assert unanswered == [PAIRS[1]]
 
 
-def test_it_is_off_unless_asked_for(monkeypatch):
+def test_off_where_it_was_not_measured(monkeypatch):
     """
-    Off by DEFAULT, and "off" means nothing was asked -- not "everything
-    refused". Four runs over 21 labelled pairs said it reliably prevents two
-    wrong merges and reliably costs one or two right ones, and that the ones
-    it costs change between runs at temperature 0. A resolver whose clusters
-    differ run to run makes the graph churn for no reason.
+    Unset, the judge runs only when the resolution model belongs to the
+    provider in use. Here the provider is Ollama and the model is Groq's,
+    so nothing is asked -- and "off" means unanswered, not refused.
     """
+    import brahmastra.llm as llm
     monkeypatch.delenv("ENTITY_CONFIRM", raising=False)
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "ollama")
     assert ec.enabled() is False
     verdicts, unanswered = ec.confirm(PAIRS)
     assert verdicts == {}
     assert unanswered == PAIRS
+
+
+def test_on_by_default_where_it_was_measured(monkeypatch):
+    import brahmastra.llm as llm
+    monkeypatch.delenv("ENTITY_CONFIRM", raising=False)
+    monkeypatch.delenv("RESOLUTION_LLM_MODEL", raising=False)
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "groq")
+    assert ec.enabled() is True
+
+
+def test_an_explicit_setting_always_wins(monkeypatch):
+    import brahmastra.llm as llm
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "groq")
+    monkeypatch.setenv("ENTITY_CONFIRM", "0")
+    assert ec.enabled() is False
+    monkeypatch.setattr(llm, "resolve_provider", lambda: "ollama")
+    monkeypatch.setenv("ENTITY_CONFIRM", "1")
+    assert ec.enabled() is True
 
 
 # -- reading the reply ------------------------------------------------------

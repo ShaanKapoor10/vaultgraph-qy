@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 878 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 890 passing tests, deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -70,47 +70,34 @@ ONTOLOGY_DESIGN.md should say so.
 
 ## Tier 1 — evidence in hand
 
-### 1. Typed extraction — NOT adopted, and a post-mortem of why
+### 1. Typed extraction — CLOSED: the noise floor says it is noise
 
-The first verdict was right and its reasons were not. Re-read from the cached
-replies, no new calls:
+The noise floor was measured on 2026-09-25: JSON mode run a second time on the same 17 notes (A′).
 
-| claim in the first verdict | what the replies say |
-|---|---|
-| "the enum forces awkward choices" | the cited triple (`_different_numbers blocks merge`) is in the **JSON-mode** reply too, degraded there as well |
-| "degraded 24 vs 19" | five of the schema's are one list in one note fanned out; without it, 19 each |
-| "nothing better" | quotes are verbatim more often under the schema (92% vs 84%), but per note it is 7 wins, 4 losses, 6 ties — noise at n=17 |
-| (unstated) | **no noise floor**: JSON mode was never run against itself, and only 63 of ~180 endpoint pairs recur between runs |
+| | JSON A | JSON A′ | schema B |
+|---|---|---|---|
+| quotes verbatim | 84.0% | **92.6%** | 91.8% |
+| degraded | 14 | 22 | 18 |
+| related_to share | 11.8% | 14.8% | 12.3% |
+| endpoint overlap with A | — | 21% | 21% |
+| per-note verbatim vs A (win/loss/tie) | — | 7/4/6 | 7/4/6 |
 
-**What it actually found:** a hole in the vocabulary that both modes fall into.
-The model steps outside the type list in JSON mode to write `function`,
-`module`, `hook`, `environment variable`; the schema forbids that and forces
-`feature`/`tool`/`concept`; the domain check then degrades the triple either
-way. Fixed without a model — `code_symbol`, assigned by spelling (see Done).
-The schema constrained the decoding; the constraint that mattered was the
-ontology's.
+JSON against itself differs exactly as much as JSON against the schema. The
+schema's one apparent gain, grounding, was A being an unlucky draw. The only
+difference beyond the noise is volume (195 against 162–169 triples), and more is
+not better. Not adopted, for good; the post-mortem's other finding, the
+`code_symbol` vocabulary gap, was the real one.
 
-**Is ours better than cocoindex's here?** On this corpus, yes, on cost. Schema
-enforcement (their typed LLM output) buys a shape guarantee we already get from
-`_coerce_triple`, which keeps a note when one array element is malformed, and it
-costs ~15% more output tokens against a daily token cap that is our binding
-constraint.
-
-**Still owed:** the noise floor — JSON mode against itself on the same 17 notes,
-~70k tokens. Attempted today; the cap was spent. Only if the grounding gain
-survives it is a second A/B worth running.
-
-One data point for that A/B: on 2026-09-24 JSON mode returned Groq's
-`400 Failed to validate JSON` three times on one note (the code-index note), and the next run
-extracted it cleanly. It is the one failure a schema could plausibly remove, and
-also one Groq's strict mode validates against too, so count it in both arms
-rather than assume.
+**The bigger finding:** two extraction runs at temperature 0 share only **21%** of
+their triples. The memo cache is what makes the graph stable between rebuilds;
+without it every full re-extraction would draw a different graph. Treat
+`LLM_MEMO=0` as a change to the graph, not a performance setting.
 
 **Budget note for any corpus-wide probe:** the free tier cannot read the whole
-corpus in one day (200,000 tokens/day per account). Throttle, or stop well short
-of the cap — a probe that exhausts it takes extraction, cluster summaries and
-`/ask` down with it. Groq's day is a ROLLING window: a 1-token probe can pass
-while a full-size request is still refused.
+corpus in one day (200,000 tokens/day per account; `GROQ_API_KEYS` holds two
+accounts). Groq's day is a ROLLING window: a 1-token probe can pass while a
+full-size request is still refused. Limits are **per model**, so the judge on
+qwen3.8-27b does not spend extraction's gpt-oss-120b budget.
 
 ---
 
@@ -207,30 +194,32 @@ The general hole remains: any chain the guards do not refuse still fuses. It is 
 narrower, since the two biggest bridge makers were JW prefixes and version
 suffixes.
 
-### 7. Re-measure the LLM merge judge — with two model knobs; the evidence is in
+### 7. The LLM merge judge — ADOPTED on Groq (qwen3.8-27b)
 
-Off because four runs showed it break-even and unstable at temperature 0 — on
-`gpt-oss-120b`, the free tier's small model. cocoindex's meeting example runs
-**two** model settings, `LLM_MODEL` for extraction and `RESOLUTION_LLM_MODEL`
-for resolution. Split ours the same way first, so the judge can be measured on a
-stronger model without changing extraction.
+`RESOLUTION_LLM_MODEL` now separates the judge's model from extraction's
+(`llm.using_model`, a context bound to one provider, so a fallback to Ollama is
+never handed a Groq model id). `brahmastra/resolution_cases.json` holds 71
+labelled pairs from the audit (one annotator, arguable pairs left out), and
+`python -m brahmastra.resolution_eval` scores any model on them:
 
-**What the audit left for it.** Of 85 embedding merges, about 25 are wrong, and
-they are all the same shape: *a name plus words that change what it names.*
+| model | wrong merges stopped | right merges broken | 3 runs |
+|---|---|---|---|
+| gpt-oss-120b | 21–22 / 29 | 6–9 / 42 | varies |
+| **qwen/qwen3.8-27b** | **21 / 29** | **3 / 42** | **identical** |
 
-    Obsidian ≈ Obsidian replacement        checkpoint ≈ checkpoint queue
-    Neo4j ≈ neo4j package                  Groq API ≈ Groq API key
-    pipeline ≈ pipeline stage              PageRank ≈ Personalized PageRank
-    old resolver ≈ resolver                Claude Code ≈ brain for Claude Code
+qwen's three "broken" are arguable labels (`Neo4j Aura` / `Neo4j Aura Free`,
+`qwen2.5:7b` / `-instruct`). Live and read-only, it refused 43 of 119
+candidates: about 25 plainly right, 2 plainly wrong (`Groq key` / `live Groq key`).
+Both objections that kept it off, break-even and churn, are gone. **On by default
+when the provider is Groq**, off on Ollama (a 7B judge was never measured);
+`ENTITY_CONFIRM=0/1` overrides. An unanswered pair still merges as before.
 
-But the right ones have exactly the same shape (`SQLite ≈ SQLite database`,
-`Groq key ≈ live Groq key`, `run_extraction ≈ run_extraction function`). A list
-of "type words" (database, function, model...) would separate most of them, but
-not `live`, `per-cluster` or `persistent`. **No spelling rule separates these; it
-is a judgement of meaning, which is what the judge is for.** Use these ~25 wrong
-and ~60 right pairs as its labelled test set.
+Still missed, all 3 runs: `GraphRAG` / `Microsoft GraphRAG`, `uvicorn` / `uvicorn
+backend`, `/health/ready` / `Health endpoint`, `CONNECT_TIMEOUT failure` / `connection
+timeout`. The next lever, per the judge's own docstring: give it the SENTENCES
+the two names appeared in.
 
-### 7b. An activity merged with the thing it is about — confirmed, folded into 7
+### 7b. An activity merged with the thing it is about — handled by 7
 
 The audit found more of the pattern: `coverage for session checkpointing` ≈
 `session checkpointing`, `solution to invisible MCP tools` ≈ `MCP tools`,
@@ -254,6 +243,23 @@ metadata and the conversation, then extract statements from a transcript with
 the names substituted. Unrecognised speakers stay `(Speaker A)` and their
 statements are kept but **not attributed**. Our text transcripts already carry
 names; audio will not.
+
+---
+
+### 12. Windows Smart App Control blocks the venv intermittently (new, environment)
+
+2026-09-25: `ImportError: DLL load failed ... An Application Control policy has
+blocked this file` on scipy's `_rgi_cython.pyd`. The same import then passed
+twice. Smart App Control is On and checks reputation online, and a failed check
+blocks. It hits only HOST processes (MCP server, hooks, scripts); Docker is Linux
+and unaffected.
+
+The damage it could do was real. The embedding model fails to load, and
+resolution used to rewrite the canonical map without all 85 meaning-based merges.
+**Fixed in code:** a resolve whose embeddings were meant to run and did not keeps
+the previous map and marks the pipeline `partial`. **The environment is the
+user's decision**: allow the files in Windows Security › Protection history, or
+turn Smart App Control off. It cannot be turned back on without a reset.
 
 ---
 

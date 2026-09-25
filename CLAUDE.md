@@ -438,6 +438,21 @@ GraphRAG, cluster summaries), so they can never disagree about which provider is
 
 ---
 
+## Entity resolution: the judge is ON when the provider is Groq
+
+Embedding candidates are confirmed by an LLM judge (`entity_confirm.py`) on its own
+model: `RESOLUTION_LLM_MODEL` defaults to `groq:qwen/qwen3.8-27b`. On 71 labelled pairs
+it stopped 21/29 wrong merges and broke 3/42 right ones, identically across 3 runs;
+`gpt-oss-120b` was worse and unstable. `python -m brahmastra.resolution_eval
+[--model provider:id] [--runs N]` re-scores any model. `ENTITY_CONFIRM=0/1`
+overrides; Ollama stays off by default. Groq limits are per model, so the judge does
+not spend extraction's budget.
+
+**A resolve that cannot load embeddings keeps the previous canonical map** and marks
+the run `partial`. Windows Smart App Control on this machine intermittently blocks a
+scipy DLL in `.venv`, and before this fix that silently dropped 85 merges.
+Deliberately setting `EMBEDDINGS_ENABLED=0` still writes.
+
 ## Pipeline (7 stages)
 
 Sync (Notion) → Extract → Resolve (Union-Find + Jaro-Winkler + sentence-transformers)
