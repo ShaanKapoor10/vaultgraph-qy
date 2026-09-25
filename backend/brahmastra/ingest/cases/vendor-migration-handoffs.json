@@ -1,0 +1,66 @@
+{
+  "name": "vendor-migration-handoffs",
+  "note": "Labelled by hand FROM THE TRANSCRIPT, before any model saw it (2026-09-25). Built to exercise what a whole-meeting pass claims to fix and the other two cases never test, because in them every owner is named in the same breath as the task: (1) the invoice export is raised at 00:00:40 with no owner and only given to Omar at 00:04:10, several chunks later at small chunk sizes; (2) Lena offers the load test, then hands it to Omar -- Lena must NOT end up owning it; (3) Omar's customer email is announced as already sent -- still an action item he owns, but done; (4) the rollback window question is answered later by Priti; (5) the Friday cutover is decided and then moved to Monday -- the Friday one must not stand as current. The traps are the wrong versions of each. Owner mistakes (Lena keeping the load test or the invoice export) are scored through the labels' owners -- attribution -- not as traps: a text matcher cannot tell 'Lena runs the load test' from 'Omar runs the load test', so as traps they scored the right answer as a fabrication (the audit caught it).",
+  "transcript": "[00:00:05] Priti: Let's go through the vendor migration. We're moving billing webhooks from Paylink to Stripe.\n[00:00:20] Omar: Before anything else, what's our rollback window if Stripe misbehaves?\n[00:00:30] Priti: Good question. Let me come back to that, I need to check the contract.\n[00:00:40] Lena: One thing nobody owns yet: someone has to rebuild the invoice export, because it reads Paylink's schema directly.\n[00:00:55] Priti: Noted. Park it for a minute, let's get the cutover date settled first.\n[00:01:05] Omar: I'd say cutover this Friday. Traffic is lowest then.\n[00:01:15] Priti: Agreed, we cut over on Friday.\n[00:01:25] Lena: I can run the load test against Stripe's sandbox before then.\n[00:01:40] Omar: Lena, you're on the dashboard rewrite this week. Let me take the load test instead.\n[00:01:50] Lena: Fair, that's better. Omar has the load test.\n[00:02:05] Omar: And for the record, I already emailed the three enterprise customers about the change this morning.\n[00:02:20] Priti: Great, that's one less thing.\n[00:02:35] Lena: Is Stripe's sandbox rate limited? If so the load test will lie to us.\n[00:02:50] Omar: It is, at a hundred requests a second. I'll ask their support for a raised limit.\n[00:03:05] Priti: Worry: finance closes the month on the last business day, and Friday is the 30th.\n[00:03:20] Omar: That's a real problem. A cutover during month close could double-bill.\n[00:03:35] Priti: Then Friday is off. We cut over Monday the 3rd instead.\n[00:03:45] Lena: Monday works for me.\n[00:03:55] Priti: On the rollback window: I checked, Paylink keeps our account live for thirty days, so we have a month to roll back.\n[00:04:10] Priti: And the invoice export. Omar, can you own that? You know the Stripe schema best.\n[00:04:20] Omar: Yes, I'll rebuild the invoice export by Wednesday.\n[00:04:30] Lena: I'll update the runbook with the new cutover date today.\n[00:04:40] Priti: Last risk: nobody has tested refunds end to end on Stripe.\n[00:04:50] Priti: That's all. Thanks.",
+  "expected": [
+    {
+      "kind": "decision",
+      "statement": "Cut over the billing webhooks to Stripe on Monday the 3rd, not Friday"
+    },
+    {
+      "kind": "decision",
+      "statement": "Omar takes the load test instead of Lena"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Omar runs the load test against Stripe's sandbox",
+      "owner": "Omar"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Omar rebuilds the invoice export by Wednesday",
+      "owner": "Omar"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Omar requests a raised limit from support",
+      "owner": "Omar"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Lena updates the runbook with the new cutover date today",
+      "owner": "Lena"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Omar emailed the three enterprise customers about the change",
+      "owner": "Omar"
+    },
+    {
+      "kind": "risk",
+      "statement": "A cutover during finance's month close could double-bill"
+    },
+    {
+      "kind": "risk",
+      "statement": "Stripe's sandbox is rate limited at a hundred requests a second, so the load test may mislead"
+    },
+    {
+      "kind": "risk",
+      "statement": "Nobody has tested refunds end to end on Stripe"
+    },
+    {
+      "kind": "open_question",
+      "statement": "What is the rollback window if Stripe misbehaves"
+    }
+  ],
+  "must_not_find": [
+    {
+      "kind": "decision",
+      "statement": "Cut over to Stripe this Friday"
+    },
+    {
+      "kind": "action_item",
+      "statement": "Priti checks the contract for the rollback window"
+    }
+  ]
+}

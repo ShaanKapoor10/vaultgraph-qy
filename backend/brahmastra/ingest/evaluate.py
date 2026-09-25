@@ -413,7 +413,8 @@ def totals(scores: dict[str, Score]) -> Score:
 
 
 def run_case(case: dict[str, Any],
-             comprehend: Callable[..., Any] | None = None) -> dict[str, Any]:
+             comprehend: Callable[..., Any] | None = None,
+             reconcile_pass: bool = False) -> dict[str, Any]:
     """Segment, comprehend, consolidate, score. One labelled transcript."""
     comprehend = comprehend or comprehend_chunk
     chunks = segment(case["transcript"])
@@ -439,8 +440,25 @@ def run_case(case: dict[str, Any],
 
     scoring = time.perf_counter()
     reduced = consolidate(produced)
-    scores = score_against(case["expected"], reduced["artifacts"],
-                           case.get("must_not_find"))
+    final = reduced["artifacts"]
+    reconciled: dict[str, Any] | None = None
+    if reconcile_pass:
+        # The whole-meeting pass (ingest/reconcile.py), after consolidation --
+        # exactly where it would sit in ingestion. Timed with the reading.
+        from brahmastra.ingest.evidence import speaker_of
+        from brahmastra.ingest.reconcile import reconcile
+        from brahmastra.ingest.speakers import is_anonymous
+
+        by_index = {c.index: c for c in chunks}
+        participants = sorted({s for c in chunks for s in (c.speakers or [])
+                               if s and not is_anonymous(s)})
+        started = time.perf_counter()
+        final, reconciled = reconcile(
+            final, participants, case.get("name", ""),
+            speaker_of=lambda a: speaker_of(a.quote or "", by_index.get(a.chunk_index)))
+        read_seconds += time.perf_counter() - started
+        calls += 1
+    scores = score_against(case["expected"], final, case.get("must_not_find"))
     score_seconds = time.perf_counter() - scoring
 
     return {
@@ -450,6 +468,7 @@ def run_case(case: dict[str, Any],
         "errors": errors,
         "raw_artifacts": len(produced),
         "after_consolidation": len(reduced["artifacts"]),
+        "reconciled": reconciled,
         "merged": reduced["merged"],
         "scores": scores,
         # Split, because the wall clock around this function is NOT the cost
