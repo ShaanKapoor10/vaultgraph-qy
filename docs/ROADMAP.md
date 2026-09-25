@@ -1,6 +1,6 @@
 # Roadmap — what is left, and why each thing is on the list
 
-Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 950 passing tests, deployed to the
+Revised 2026-09-24 (evening), on branch `brahmastra-v3`, at 950 passing tests (frontend typechecked), deployed to the
 local Docker stack (`python -m brahmastra.version --against http://localhost:8001`
 confirms the running code matches the checkout).
 The morning version was written before coercions were collected; the evidence
@@ -304,7 +304,7 @@ text side is ready for it.
 
 ---
 
-### 12. Windows Smart App Control blocks the venv intermittently (new, environment)
+### 12. Windows Smart App Control — RESOLVED (turned off 2026-09-25)
 
 2026-09-25: `ImportError: DLL load failed ... An Application Control policy has
 blocked this file` on scipy's `_rgi_cython.pyd`. The same import then passed
@@ -320,6 +320,32 @@ user's decision**: allow the files in Windows Security › Protection history, o
 turn Smart App Control off. It cannot be turned back on without a reset.
 
 ---
+
+## The September proposals (A–D), re-checked 2026-09-25
+
+The ingestion brief of 2 September listed an entity rule and Proposals A–D. Each was
+checked against the code and against the data before anything was built:
+
+| | proposal | outcome |
+|---|---|---|
+| — | entity rule (refuse a finding naming people or things its quote does not) | **Closed.** Caught 0 of 16 on real artifacts; the first-person attribution check that shipped instead is what catches this class |
+| **A** | ingest any source (documents, threads, agent runs) | **Next, after meetings are finished.** Shaan's call |
+| **B** | review queue + meeting screens | **Built as a view + reject, not a queue.** Reading the one live meeting line by line found 28 items with three faults: 16 leftover duplicates, `decided_by` taken from the wrong person, and a risk raised by two different people. All three had root causes, all three are now fixed in code, and 12 of 12 items check out against the transcript. What remained worth building was the Meetings screen, with Reject: a person's rejection is SOURCE data (`artifact_rejections`), keyed by the statement-derived id, so it survives re-processing |
+| **C** | a verifier LLM that checks each claim against its quote | **Held.** Two cheaper versions (NLI, cross-encoder) measured and rejected; nothing since shows a need |
+| **D** | provenance: prefer human-written notes | **Replaced.** Measured: would change 0 of the 7 live contradictions. The real gap was that notes had no timestamp and contradictions resolved by re-extraction time, which is arbitrary. Notes now carry `created_at`/`updated_at`, 87 of 103 were backfilled from evidence, and contradictions resolve to the newest fact or say "unresolved" |
+
+### 13. Diagnostics — BUILT
+
+`GET /diagnostics` and the Diagnostics tab. They show what is running, what is
+waiting, what failed and whether it will fix itself: every failed note carries a
+verdict (`will retry` or `will fail again`, with the reason), per-key Groq state,
+the checkpoint queue, incomplete meetings, unresolved contradictions, and whether
+the server runs the code on disk. Safe actions only: retry a note, retry all
+failed, run the pipeline, reprocess a meeting, distil the checkpoint queue.
+
+**Known limit, stated on the page:** key state is per process. The backend
+container and the scheduler container each keep their own pool, so the page shows
+the backend's view. A shared rest table would fix it; nothing has needed it yet.
 
 ## Deliberately not doing
 

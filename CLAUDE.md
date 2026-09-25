@@ -638,6 +638,13 @@ leak made 18 tests take 29 seconds; stubbing it took them to 0.10s.
 
 ---
 
+## Dashboard tabs worth knowing
+
+**Meetings** (each finding with speaker, quote and time; Reject survives re-processing)
+and **Diagnostics** (`GET /diagnostics`: what is waiting, what failed and whether it
+will fix itself, key state, queues, with safe action buttons). Check Diagnostics before
+digging through logs; it computes the verdicts the logs only imply.
+
 ## API routes (22)
 
 ```
