@@ -84,6 +84,32 @@ def _clean(text: str | None) -> str:
     return " ".join((text or "").split())[:MAX_NAME].strip()
 
 
+def _person_for(artifact: Any, kind: str) -> str:
+    """
+    Who a decision was DECIDED by, a risk RAISED by, a question ASKED by:
+    whoever spoke the quote. Only an action item's person is its owner.
+
+    Found on the one live meeting: "Raj, you own reconciliation" was stored as
+    decided_by Raj, and "The staging environment has been flaky" as raised by
+    Mei in one copy and Sarah in the other. Sarah said both. The model's
+    `owner` field answers "who is this about?", which for an assignment is the
+    assignee -- right for `assigned_to`, wrong for every other edge. The
+    transcript already records who said each line, so for those edges it
+    decides, and a quote whose speaker cannot be found gets no edge at all.
+
+    `said_by` is set by ingestion (assemble), which has the chunks. When it is
+    absent entirely -- a caller handing in artifacts without transcript
+    context -- the owner is used, as before.
+    """
+    if kind != "action_item" and _has(artifact, "said_by"):
+        return _clean(_field(artifact, "said_by"))
+    return _clean(_field(artifact, "owner"))
+
+
+def _has(artifact: Any, name: str) -> bool:
+    return name in artifact if isinstance(artifact, dict) else hasattr(artifact, name)
+
+
 def _field(artifact: Any, name: str) -> Any:
     if isinstance(artifact, dict):
         return artifact.get(name)
@@ -124,7 +150,7 @@ def record_triples(meeting: str, participants: Iterable[str],
         item_type, to_person = _BY_KIND[kind]
         quote = _field(artifact, "quote") or ""
         add(statement, item_type, "discussed_in", meeting, "meeting", quote)
-        owner = _clean(_field(artifact, "owner"))
+        owner = _person_for(artifact, kind)
         if owner and not is_anonymous(owner):
             add(statement, item_type, to_person, owner, "person", quote)
     return triples
@@ -152,8 +178,8 @@ def record_body(meeting: str, participants: Iterable[str],
         lines.append(f"\n{heading}:")
         for a in of_kind:
             line = f"- {_clean(_field(a, 'statement'))}"
-            if _clean(_field(a, "owner")):
-                line += f" ({who[kind]} {_clean(_field(a, 'owner'))})"
+            if _person_for(a, kind):
+                line += f" ({who[kind]} {_person_for(a, kind)})"
             if _field(a, "quote"):
                 line += f' -- "{_clean(_field(a, "quote"))}"'
             lines.append(line)

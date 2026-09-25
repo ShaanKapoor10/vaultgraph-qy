@@ -13,6 +13,8 @@ every kind kept, the speaker's own words as the evidence, no model involved.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from brahmastra import db
@@ -263,3 +265,64 @@ def test_the_meeting_set_is_only_live_during_a_run(monkeypatch):
     er.run_resolution()
     assert seen["meetings"] == frozenset({"Q3 release planning"})
     assert er._MEETINGS == frozenset()
+
+
+# -- who decided is who SAID it ------------------------------------------------
+#
+# Live: "Raj, you own reconciliation" (Sarah speaking) was stored as decided_by
+# Raj; "The staging environment has been flaky" (Sarah) as raised by Mei.
+
+def test_a_decision_is_decided_by_whoever_said_it_not_whoever_it_is_about():
+    art = {"kind": "decision", "statement": "Raj owns reconciliation", "owner": "Raj",
+           "quote": "Raj, you own reconciliation", "said_by": "Sarah"}
+    edges = _edges(gr.record_triples(MEETING, [], [art]))
+    assert ("Raj owns reconciliation", "decided_by", "Sarah") in edges
+    assert not any(r == "decided_by" and o == "Raj" for _, r, o in edges)
+
+
+def test_a_risk_is_raised_by_its_speaker():
+    art = {"kind": "risk", "statement": "Staging is flaky", "owner": "Mei",
+           "quote": "The staging environment has been flaky", "said_by": "Sarah"}
+    assert ("Staging is flaky", "raised_by", "Sarah") in _edges(gr.record_triples(MEETING, [], [art]))
+
+
+def test_an_action_item_still_goes_to_its_assignee():
+    art = {"kind": "action_item", "statement": "Own reconciliation", "owner": "Raj",
+           "quote": "Raj, you own reconciliation", "said_by": "Sarah"}
+    assert ("Own reconciliation", "assigned_to", "Raj") in _edges(gr.record_triples(MEETING, [], [art]))
+
+
+def test_a_quote_nobody_can_place_gets_no_person_edge():
+    art = {"kind": "decision", "statement": "Freeze scope", "owner": "Raj",
+           "quote": "freeze it", "said_by": None}
+    assert _edges(gr.record_triples(MEETING, [], [art])) == {("Freeze scope", "discussed_in", MEETING)}
+
+
+def test_ingestion_attributes_decisions_to_their_speaker(store, understood):
+    tid = store.create_transcript(Transcript("", "Release planning", TRANSCRIPT))
+    assemble.process_transcript(tid, store=store)
+    edges = _edges(t for t in db.get_all_triples()
+                   if t["source_note_id"] == gr.record_note_id(tid))
+    assert ("The release moves to April 15th", "decided_by", "Sarah") in edges
+
+
+# -- rows from before ownership are still the transcript's ----------------------
+
+def test_reprocessing_removes_artifact_rows_the_ledger_never_knew(store, understood):
+    tid = store.create_transcript(Transcript("", "Release planning", TRANSCRIPT))
+    assemble.process_transcript(tid, store=store)
+    # A copy from before ownership existed: the old 12-hex id scheme, and no
+    # ledger row -- inserted directly, as the 2 September run left it.
+    row = dict(store.get_artifacts(transcript_id=tid)[0], id="f36c0c35ff8a")
+    cols = list(row)
+    with store._cursor() as cur:
+        cur.execute(store._ph(f"INSERT INTO meeting_artifacts ({', '.join(cols)}) "
+                              f"VALUES ({', '.join('?' for _ in cols)})"),
+                    tuple(json.dumps(row[c]) if isinstance(row[c], (list, dict)) else row[c]
+                          for c in cols))
+    assert len(store.get_artifacts(transcript_id=tid)) == 3
+
+    report = assemble.process_transcript(tid, store=store, force=True)
+    statements = [a["statement"] for a in store.get_artifacts(transcript_id=tid)]
+    assert sorted(statements) == ["The release moves to April 15th", "Update the roadmap"]
+    assert report["artifacts_removed"] >= 1

@@ -220,6 +220,10 @@ def _segment_with_speakers(record: dict[str, Any], report: dict[str, Any]) -> li
     return chunk_turns(speakers.apply(turns, mapping))
 
 
+def _field_of(artifact: Any, name: str) -> Any:
+    return artifact.get(name) if isinstance(artifact, dict) else getattr(artifact, name, None)
+
+
 def _write_graph_record(notes: ownership.Streaming, transcript_id: str,
                         record: dict[str, Any], chunks: list[Chunk],
                         artifacts: list[Any], report: dict[str, Any]) -> int:
@@ -238,6 +242,16 @@ def _write_graph_record(notes: ownership.Streaming, transcript_id: str,
 
     from brahmastra import db
     from brahmastra.ingest import graph_record as gr
+
+    from brahmastra.ingest.evidence import speaker_of
+
+    # Who actually said each item's quote -- see graph_record._person_for.
+    by_index = {getattr(c, "index", i): c for i, c in enumerate(chunks)}
+    artifacts = [
+        {**(vars(a) if not isinstance(a, dict) else a),
+         "said_by": speaker_of(_field_of(a, "quote") or "",
+                               by_index.get(_field_of(a, "chunk_index")))}
+        for a in artifacts]
 
     try:
         meeting = gr.meeting_name(record["title"], record.get("occurred_at"))
@@ -325,6 +339,20 @@ def _settle_artifacts(ledger: ownership.Ledger, store: IngestStore,
         )
         report["artifacts_written"] = len(decided.upserts)
         report["artifacts_removed"] = len(decided.deletes)
+
+        # Rows the ledger never knew about. The transcript owns every artifact
+        # carrying its id whether or not a ledger row says so, and rows written
+        # before ownership existed have none -- which is how the one live
+        # meeting came to hold each finding twice: a 2 September copy under the
+        # old id scheme beside the 23 September one. Only after the sync
+        # succeeded, so the new rows exist before any old one goes.
+        wanted = {aid for aid, _ in identified}
+        stray = [row["id"] for row in store.get_artifacts(
+                     transcript_id=transcript_id, limit=1_000_000)
+                 if row["id"] not in wanted]
+        if stray:
+            store.delete_artifacts(stray)
+            report["artifacts_removed"] += len(stray)
     except Exception as exc:
         report["errors"].append(
             {"stage": "ownership",
