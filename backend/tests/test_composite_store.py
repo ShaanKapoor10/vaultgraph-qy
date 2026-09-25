@@ -311,3 +311,23 @@ def test_deleting_a_workspace_reaches_both_halves():
     store.delete_workspace("office")
     assert log == [("graph", "delete_workspace", "office"),
                    ("notes", "delete_workspace", "office")]
+
+
+def test_an_unreachable_note_store_is_not_reported_as_a_downgrade():
+    """A stopped Docker engine once read as 'Postgres lacks pgvector'."""
+    import pytest
+    from brahmastra.stores.composite_store import CompositeStore
+
+    class Down:
+        unreachable = "OperationalError: connection timeout expired"
+        workspace = "default"
+        def capabilities(self): return frozenset()
+        def describe(self): return "postgres:test"
+
+    class Graph:
+        workspace = "default"
+        def capabilities(self): return frozenset({"hybrid_search"})
+        def describe(self): return "graph:test"
+
+    with pytest.raises(ConnectionError, match="unreachable"):
+        CompositeStore(notes=Down(), graph=Graph(), allow_downgrade=True)

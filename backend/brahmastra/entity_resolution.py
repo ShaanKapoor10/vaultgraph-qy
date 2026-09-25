@@ -1147,6 +1147,27 @@ def run_resolution() -> dict[str, Any]:
         _MEETINGS = frozenset()
 
 
+def usage_context(triples: list[dict[str, Any]], names: Collection[str],
+                  per_name: int = 2) -> dict[str, list[str]]:
+    """
+    For each name, a few sentences from the notes it was used in -- the
+    evidence the merge judge is shown. The triples' source quotes, shortest
+    first (a short quote is about the name; a long one is about everything),
+    distinct, and never the bare name itself.
+    """
+    wanted = {n.strip() for n in names}
+    found: dict[str, set[str]] = {n: set() for n in wanted}
+    for t in triples:
+        quote = " ".join(str(t.get("source_quote") or "").split())
+        if not quote:
+            continue
+        for side in ("subject_text", "object_text"):
+            name = (t.get(side) or "").strip()
+            if name in found and quote.lower() != name.lower():
+                found[name].add(quote)
+    return {n: sorted(q, key=len)[:per_name] for n, q in found.items() if q}
+
+
 def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
 
     # 1. Collect unique mentions
@@ -1237,7 +1258,8 @@ def _resolve(triples: list[dict[str, Any]]) -> dict[str, Any]:
     judged = {"asked": 0, "refused": 0, "unanswered": 0}
     if embedding_pairs and entity_confirm.enabled():
         candidates = list(embedding_pairs)
-        verdicts, unanswered = entity_confirm.confirm(candidates)
+        verdicts, unanswered = entity_confirm.confirm(
+            candidates, usage_context(triples, {n for p in candidates for n in p}))
         judged["asked"] = len(candidates)
         judged["unanswered"] = len(unanswered)
         for pair, same in verdicts.items():

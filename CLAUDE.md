@@ -438,6 +438,15 @@ GraphRAG, cluster summaries), so they can never disagree about which provider is
 
 ---
 
+## Diarized transcripts: voices are named before anything reads them
+
+`ingest/speakers.py` replaces diarizer labels (`Speaker A`, `SPEAKER_01`) with names
+before chunking. A self-introduction settles it with no model; the model's answer
+must be grounded (the name is in the transcript and the evidence is verbatim), and
+two voices are never one person. An unnamed voice stays `(Speaker A)` and
+`is_anonymous` keeps it out of every owner and attendee edge. Transcripts that
+already carry names never reach the model. Measured: 0 wrong names across all runs.
+
 ## Entity resolution: the judge is ON when the provider is Groq
 
 Embedding candidates are confirmed by an LLM judge (`entity_confirm.py`) on its own

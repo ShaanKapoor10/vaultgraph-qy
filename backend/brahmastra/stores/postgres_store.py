@@ -142,6 +142,10 @@ class PostgresStore(GraphStore):
         self._dsn = dsn_override or dsn()
         self._conn = None
         self._has_vector: bool | None = None
+        # Why the last capability check could not get an answer, if it could
+        # not. Read by CompositeStore, so "the server is down" is never
+        # reported as "the server lacks pgvector".
+        self.unreachable: str = ""
         self._extensions_ready = False
 
     # -- connection --------------------------------------------------------
@@ -236,7 +240,8 @@ class PostgresStore(GraphStore):
                 with self._connect().cursor() as cur:
                     cur.execute("SELECT 1 AS ok FROM pg_extension WHERE extname = 'vector'")
                     self._has_vector = cur.fetchone() is not None
-            except Exception:
+            except Exception as exc:
+                self.unreachable = f"{type(exc).__name__}: {exc}"[:300]
                 # A failure to ASK is not an answer. Caching False here made a
                 # transient outage permanent: the store would report
                 # lexical-only for the rest of the process even once the server

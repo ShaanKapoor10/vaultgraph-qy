@@ -39,7 +39,7 @@ def test_the_judge_runs_on_the_resolution_model(monkeypatch):
     seen = []
     monkeypatch.setenv("RESOLUTION_LLM_MODEL", "groq:judge/model")
     monkeypatch.setattr(ec, "available", lambda: True)
-    monkeypatch.setattr(ec, "_ask", lambda batch, model: seen.append(
+    monkeypatch.setattr(ec, "_ask", lambda batch, model, context=None: seen.append(
         (llm.model_for("groq"), model)) or {i + 1: True for i in range(len(batch))})
     monkeypatch.setattr(ec, "_active_model", lambda: llm.model_for("groq"))
     ec.confirm([("SQLite", "SQLite database")])

@@ -74,6 +74,19 @@ class CompositeStore(GraphStore):
             )
 
         missing = REQUIRED_NOTE_CAPABILITIES - notes.capabilities()
+        unreachable = getattr(notes, "unreachable", "")
+        unreachable = unreachable if isinstance(unreachable, str) else ""
+        if missing and unreachable:
+            # Could not ASK, which is not the same as being told no. Reported
+            # as a downgrade, a stopped Docker engine read like a Postgres
+            # missing pgvector (2026-09-25), and sent the reader after the
+            # wrong thing. Raised whatever ALLOW_SEARCH_DOWNGRADE says: a store
+            # that cannot be reached cannot hold notes either.
+            raise ConnectionError(
+                f"note store {notes.describe()} is unreachable ({unreachable}). "
+                f"Nothing about its capabilities is known -- start it (for the "
+                f"compose stack: `docker compose up -d` from the repo root) and "
+                f"retry.")
         if missing and not allow_downgrade:
             raise CapabilityDowngrade(
                 f"note store {notes.describe()} cannot provide "

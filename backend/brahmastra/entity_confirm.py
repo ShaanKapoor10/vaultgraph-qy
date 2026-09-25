@@ -86,6 +86,22 @@ everywhere. An unanswered pair still merges as it did before the judge, so a
 retired model or a spent quota degrades to the old behaviour, not to a
 different graph.
 
+THEN THE SENTENCES (2026-09-25). The lever the first measurement named:
+each name is shown with up to two sentences from the notes it was used in
+(`entity_resolution.usage_context`). Same 71 pairs, same model:
+
+                          stopped wrong    broke right    runs
+    names only               21 / 29          3 / 42       x3 identical
+    reworded guidance only   22 / 29          4 / 42       noise
+    names + sentences        25 / 29          7 / 42       x2 identical
+
+The four it newly stops were the hard ones: GraphRAG / Microsoft GraphRAG,
+backend/.env / loading backend/.env, /health/ready / Health endpoint, a
+decision note / the concept it decided. Five of the seven it breaks are one
+family -- Neo4j Aura and its tier, backend and instance -- which becomes a few
+VISIBLE duplicate nodes, against four INVISIBLE wrong merges prevented. By the
+asymmetry this module is built on, adopted.
+
 THE REMAINING WEAKNESS, stated rather than hidden: Union-Find is transitive.
 If A~B and B~C are both confirmed, A and C merge without ever being asked
 about. Confirming every edge makes that far less likely than it was; it does
@@ -127,13 +143,27 @@ project:
   - two distinct files, functions, modules, branches or endpoints, however
     alike their names;
   - a product and one particular tier, edition or version of it;
-  - something asserted and the same thing denied.
+  - something asserted and the same thing denied;
+  - a thing and something ABOUT it, FOR it, PART of it or DONE to it: a
+    service and its API key, a database and its client package, a system and
+    its replacement, a pipeline and one of its stages, a component and its
+    queue or cache, a file and the act of loading it, a feature and the tests
+    or coverage for it. Extra words that only say what KIND of thing it is
+    ("database", "function", "model", "library", "class", "column") do not
+    make it different; extra words that name a DIFFERENT object do;
+  - an old or previous version of something and the current one;
+  - a general idea and one specific, named implementation of it (someone
+    else's product versus this project's feature of the same name).
 
 Use what you know about software to tell these apart. When a pair genuinely
 leaves you undecided, answer `different` -- an unmerged duplicate is a visible
 extra node somebody can merge later, while a wrong merge is invisible. That is
 the tiebreaker for a real coin-flip, not a reason to refuse a pair you can
 actually call.
+
+When sentences from the notes follow a pair, they show how each name was
+actually used. Judge by what the sentences say each name IS, not only by how
+the names are spelled.
 
 Return ONLY JSON:
 
@@ -276,10 +306,27 @@ def _prompt_for(kind: str) -> str:
     return "\n".join(parts)
 
 
-def _render(pairs: list[tuple[str, str]]) -> str:
+CONTEXT_PER_NAME = 2
+CONTEXT_CHARS = 200
+
+
+def _render(pairs: list[tuple[str, str]],
+            context: dict[str, list[str]] | None = None) -> str:
+    """
+    The pairs, each name followed by the sentences it was used in.
+
+    THE EVIDENCE A PERSON USES. The first measurement named this as the most
+    promising lever: "giving the judge the SENTENCES the two names appeared
+    in, which is the one piece of evidence a human uses here and this prompt
+    withholds." Two names can read alike and be used as plainly different
+    things; the sentences are where that shows.
+    """
     lines = []
     for i, (a, b) in enumerate(pairs, start=1):
         lines.append(f"{i}. {a!r}  ||  {b!r}")
+        for name in (a, b):
+            for quote in (context or {}).get(name, [])[:CONTEXT_PER_NAME]:
+                lines.append(f"     {name!r} used in: \"{quote[:CONTEXT_CHARS]}\"")
     return "\n".join(lines)
 
 
@@ -334,7 +381,8 @@ def _active_model() -> str:
         return ""
 
 
-def _ask(pairs: list[tuple[str, str]], model: str = "") -> dict[int, bool]:
+def _ask(pairs: list[tuple[str, str]], model: str = "",
+         context: dict[str, list[str]] | None = None) -> dict[int, bool]:
     """
     One call. Returns {pair_number: same}. Raises Unanswered if the model
     could not be reached or its reply could not be read.
@@ -352,7 +400,7 @@ def _ask(pairs: list[tuple[str, str]], model: str = "") -> dict[int, bool]:
     from brahmastra import memo
     from brahmastra.llm import chat
 
-    user = _render(pairs)
+    user = _render(pairs, context)
     # Every pair in a batch shares a type, because `confirm` groups them.
     system = _prompt_for(entity_type(*pairs[0]))
     key = memo.key_for(user, VARIANT, model, system)
@@ -409,16 +457,19 @@ def _ask(pairs: list[tuple[str, str]], model: str = "") -> dict[int, bool]:
     raise last
 
 
-def confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
+def confirm(pairs: Iterable[tuple[str, str]],
+            context: dict[str, list[str]] | None = None) -> tuple[
         dict[tuple[str, str], bool], list[tuple[str, str]]]:
-    """Run the judge on RESOLUTION_LLM_MODEL when it is set. See `_confirm`."""
+    """Run the judge on RESOLUTION_LLM_MODEL when it is set. See `_confirm`.
+    `context` maps a name to sentences it was used in (see `_render`)."""
     from brahmastra.llm import resolution_model_setting, using_model
 
     with using_model(resolution_model_setting()):
-        return _confirm(pairs)
+        return _confirm(pairs, context)
 
 
-def _confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
+def _confirm(pairs: Iterable[tuple[str, str]],
+             context: dict[str, list[str]] | None = None) -> tuple[
         dict[tuple[str, str], bool], list[tuple[str, str]]]:
     """
     Verdicts, and the pairs nobody managed to answer for.
@@ -452,7 +503,7 @@ def _confirm(pairs: Iterable[tuple[str, str]]) -> tuple[
         for start in range(0, len(group), BATCH):
             batch = group[start:start + BATCH]
             try:
-                answers = _ask(batch, model)
+                answers = _ask(batch, model, context)
             except Unanswered:
                 unanswered.extend(batch)
                 continue

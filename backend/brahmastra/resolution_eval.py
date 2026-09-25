@@ -60,7 +60,8 @@ def score(verdicts: dict[tuple[str, str], bool], unanswered: list[tuple[str, str
     return out
 
 
-def run(model: str | None = None, runs: int = 1) -> list[dict[str, Any]]:
+def run(model: str | None = None, runs: int = 1,
+        with_context: bool = True) -> list[dict[str, Any]]:
     from brahmastra import entity_confirm
     from brahmastra.llm import using_model
 
@@ -68,6 +69,13 @@ def run(model: str | None = None, runs: int = 1) -> list[dict[str, Any]]:
 
     cases = load_cases()
     pairs = [(c["a"], c["b"]) for c in cases]
+    context = None
+    if with_context:
+        # The same evidence the pipeline gives it: the live notes' own quotes.
+        from brahmastra import db
+        from brahmastra.entity_resolution import usage_context
+
+        context = usage_context(db.get_all_triples(), {n for p in pairs for n in p})
     base = entity_confirm.VARIANT
     results = []
     # Measuring the judge means asking it, whether or not the pipeline has it
@@ -79,7 +87,7 @@ def run(model: str | None = None, runs: int = 1) -> list[dict[str, Any]]:
             # Run 1 may come from the memo; every later run is asked afresh.
             entity_confirm.VARIANT = base if i == 0 else f"{base}#eval{i}"
             with using_model(model):
-                verdicts, unanswered = entity_confirm._confirm(pairs)
+                verdicts, unanswered = entity_confirm._confirm(pairs, context)
             results.append(score(verdicts, unanswered, cases))
     finally:
         entity_confirm.VARIANT = base
@@ -94,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     model = argv[argv.index("--model") + 1] if "--model" in argv else None
     runs = int(argv[argv.index("--runs") + 1]) if "--runs" in argv else 1
-    for i, r in enumerate(run(model, runs), 1):
+    for i, r in enumerate(run(model, runs, with_context="--no-context" not in argv), 1):
         print(f"run {i}: stopped {r['stopped']}/{r['wrong_total']} wrong merges, "
               f"broke {r['broke']}/{r['right_total']} right ones, silent {r['silent']}")
         for p in r["broke_pairs"]:

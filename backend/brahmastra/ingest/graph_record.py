@@ -106,7 +106,12 @@ def record_triples(meeting: str, participants: Iterable[str],
             "source_quote": _clean(quote),
         })
 
-    for person in sorted({_clean(p) for p in participants if _clean(p)}):
+    from brahmastra.ingest.speakers import is_anonymous
+
+    # A voice nobody could name ("(Speaker A)") attended, but is nobody the
+    # graph can hold a fact about -- see ingest/speakers.py.
+    for person in sorted({_clean(p) for p in participants
+                          if _clean(p) and not is_anonymous(_clean(p))}):
         add(person, "person", "attended", meeting, "meeting")
 
     for artifact in artifacts:
@@ -120,7 +125,7 @@ def record_triples(meeting: str, participants: Iterable[str],
         quote = _field(artifact, "quote") or ""
         add(statement, item_type, "discussed_in", meeting, "meeting", quote)
         owner = _clean(_field(artifact, "owner"))
-        if owner:
+        if owner and not is_anonymous(owner):
             add(statement, item_type, to_person, owner, "person", quote)
     return triples
 

@@ -341,3 +341,31 @@ def test_a_verdict_that_parsed_is_never_asked_again(monkeypatch):
 
     assert len(calls) == 1
     assert verdicts == {PAIRS[0]: False, PAIRS[1]: False}
+
+
+# -- the evidence a person uses ------------------------------------------------
+
+def test_each_name_is_shown_with_the_sentences_it_was_used_in():
+    text = ec._render([("GraphRAG", "Microsoft GraphRAG")], {
+        "GraphRAG": ["Brahmastra's GraphRAG answers /ask"],
+        "Microsoft GraphRAG": ["Microsoft GraphRAG popularised community summaries"],
+    })
+    assert "'GraphRAG' used in: \"Brahmastra's GraphRAG answers /ask\"" in text
+    assert "Microsoft GraphRAG popularised" in text
+
+
+def test_no_context_renders_as_before():
+    assert ec._render([("a", "b")]) == "1. 'a'  ||  'b'"
+
+
+def test_usage_context_prefers_short_quotes_and_skips_the_bare_name():
+    from brahmastra.entity_resolution import usage_context
+    triples = [
+        {"subject_text": "Neo4j", "object_text": "x", "source_quote": "Neo4j"},
+        {"subject_text": "Neo4j", "object_text": "y",
+         "source_quote": "a long sentence that mentions Neo4j among many other things"},
+        {"subject_text": "z", "object_text": "Neo4j", "source_quote": "Neo4j stores the graph"},
+    ]
+    ctx = usage_context(triples, {"Neo4j"})
+    assert ctx["Neo4j"][0] == "Neo4j stores the graph"
+    assert "Neo4j" not in ctx["Neo4j"]

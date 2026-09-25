@@ -240,9 +240,13 @@ def speaker_of(quote: str, chunk: Any) -> str | None:
     needle = _normalise(quote)[:60]
     if not needle:
         return None
+    from brahmastra.ingest.speakers import is_anonymous
+
     for turn in getattr(chunk, "turns", None) or []:
         if needle in _normalise(getattr(turn, "text", "")):
-            return getattr(turn, "speaker", None)
+            speaker = getattr(turn, "speaker", None)
+            # "(Speaker A)" said it, but that attributes it to nobody.
+            return None if is_anonymous(speaker) else speaker
     return None
 
 

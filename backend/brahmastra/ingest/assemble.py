@@ -181,6 +181,45 @@ def comprehension_strategy():
     return comprehend_chunk_focused
 
 
+def _segment_with_speakers(record: dict[str, Any], report: dict[str, Any]) -> list[Chunk]:
+    """
+    Chunks, with a diarizer's "Speaker A" replaced by a name wherever the
+    transcript itself says who that is (ingest/speakers.py). Transcripts that
+    already carry names never reach the model.
+
+    Memoised like comprehension, and for a sharper reason than cost: a second
+    run that named the voices differently would rewrite every owner in the
+    meeting record, so the answer is asked once and kept.
+    """
+    from brahmastra.ingest import speakers
+    from brahmastra.ingest.segment import chunk_turns, parse_turns
+
+    turns = parse_turns(record["content"])
+    if not any(speakers.is_anonymous(t.speaker) for t in turns):
+        return chunk_turns(turns)
+
+    def cached_chat(system: str, user: str, **kwargs: Any) -> str:
+        from brahmastra.ingest import memo
+        from brahmastra.llm import active_model, chat
+
+        try:
+            model = active_model()
+        except Exception:
+            model = ""
+        key = memo.key_for(user, "speakers", model, system)
+        hit = memo.load(key)
+        if hit is not None:
+            return hit
+        reply = chat(system, user, **kwargs)
+        memo.save(key, reply)
+        return reply
+
+    mapping, found = speakers.identify(turns, title=record.get("title") or "",
+                                       chat=cached_chat)
+    report["speakers"] = found
+    return chunk_turns(speakers.apply(turns, mapping))
+
+
 def _write_graph_record(notes: ownership.Streaming, transcript_id: str,
                         record: dict[str, Any], chunks: list[Chunk],
                         artifacts: list[Any], report: dict[str, Any]) -> int:
@@ -542,7 +581,7 @@ def _process(
     owned_chunks = ownership.Streaming(ledger, OWNER_KIND, transcript_id,
                                        "chunk", force=force)
 
-    chunks = segment(record["content"])
+    chunks = _segment_with_speakers(record, report)
     report["chunks"] = len(chunks)
     store.set_transcript_status(transcript_id, "processing", chunk_count=len(chunks))
 

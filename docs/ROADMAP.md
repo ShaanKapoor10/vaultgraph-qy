@@ -214,10 +214,26 @@ Both objections that kept it off, break-even and churn, are gone. **On by defaul
 when the provider is Groq**, off on Ollama (a 7B judge was never measured);
 `ENTITY_CONFIRM=0/1` overrides. An unanswered pair still merges as before.
 
-Still missed, all 3 runs: `GraphRAG` / `Microsoft GraphRAG`, `uvicorn` / `uvicorn
-backend`, `/health/ready` / `Health endpoint`, `CONNECT_TIMEOUT failure` / `connection
-timeout`. The next lever, per the judge's own docstring: give it the SENTENCES
-the two names appeared in.
+**Then the sentences** (the lever the first measurement named). Each name is shown
+with up to two sentences from the notes it was used in:
+
+| | stopped | broke | runs |
+|---|---|---|---|
+| names only | 21 / 29 | 3 / 42 | ×3 identical |
+| reworded guidance only | 22 / 29 | 4 / 42 | noise |
+| **names + sentences** | **25 / 29** | 7 / 42 | ×2 identical |
+
+It newly stops `GraphRAG` / `Microsoft GraphRAG`, `backend/.env` / `loading
+backend/.env`, `/health/ready` / `Health endpoint`, and a decision note vs its
+concept. Five of the seven it breaks are one family (Neo4j Aura and its tier,
+backend and instance): visible duplicates, against four invisible wrong merges.
+Adopted.
+
+**Still missed, both runs:** `knowledge graph` / `knowledge graph engine`,
+`Brahmastra pipeline` / `brahmastra_run_pipeline`, `quota` / `quota consumption`,
+`uvicorn` / `uvicorn backend`. These are "X" against "X + a head noun", the
+pattern no spelling rule separates. What's left to try: a stronger model when one
+exists on the tier, or a second opinion on exactly the "X vs X + noun" shape.
 
 ### 7b. An activity merged with the thing it is about — handled by 7
 
@@ -230,19 +246,42 @@ The audit found more of the pattern: `coverage for session checkpointing` ≈
 Row blocks cap memory at any size; the work is still quadratic. Revisit near
 10,000 mentions. (1,039 today; embedding them all takes 1.25s.)
 
-### 9. Settle the comprehension quality question
+### 9. Comprehension quality — SETTLED: focused stays
 
-Per-kind (4 calls) vs focused (2 calls) is unresolved because the free tier's
-daily cap produced 0% runs. Needs a tier that will not run out mid-measurement.
+Measured on 2026-09-25 on gpt-oss-120b: both labelled meetings, 3 runs each, with the ingest memo off
+(`INGEST_MEMO=0`) so no run was served from cache:
 
-### 11. Identify speakers before extracting, for diarized audio (new)
+| | recall | precision | traps | calls |
+|---|---|---|---|---|
+| **focused** (default) | **67%** [50–79] | **68%** | 0 | 12 |
+| per-kind | 61% [29–86] | 52% | 0 | 24 |
 
-For the transcription path. cocoindex's conversation example runs extraction in
-**two steps**: first map `Speaker A` / `Speaker B` to real names using the
-metadata and the conversation, then extract statements from a transcript with
-the names substituted. Unrecognised speakers stay `(Speaker A)` and their
-statements are kept but **not attributed**. Our text transcripts already carry
-names; audio will not.
+Twice the calls buy no recall, a wider spread and lower precision. No traps in
+either, across all 12 runs. `comprehension_strategy()` already picks focused for
+a large model, so nothing changes; the question is closed.
+
+### 11. Speaker identification for diarized transcripts — DONE
+
+`brahmastra/ingest/speakers.py`, run in `assemble` between parsing and chunking,
+and only when a transcript carries diarizer labels (`Speaker A`, `SPEAKER_01`,
+`spk_2`). cocoindex's conversation example is the shape; the order is ours:
+
+1. **No model:** a self-introduction in the speaker's own turn ("it's Sarah").
+2. **The model**, for voices named only by being addressed. Held to the transcript:
+   the name must occur in it, the quoted evidence must be verbatim, and two voices
+   are never one person. Memoised, so a re-ingest cannot rename the owners.
+3. **Fail closed:** an unnamed voice stays `(Speaker A)` and is never an owner, a
+   `decided_by`/`assigned_to` target or an attendee.
+
+**Measured.** On a diarized standup with the usual clues, 3 of 4 voices named
+correctly, identically on 2 runs; the latecomer stayed unnamed, and "I'm not
+sure" was not read as a name. On the two labelled meetings with their names
+removed, the only voice the text identifies (Raj, addressed and answering) was
+named, and nobody was named wrongly. Priya, mentioned but absent, was never
+assigned. 0 wrong names in all runs.
+
+Next only with real audio: a diarizer (whisper + pyannote) in front of this. The
+text side is ready for it.
 
 ---
 
