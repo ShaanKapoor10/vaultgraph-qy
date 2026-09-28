@@ -194,7 +194,7 @@ validation:
 # Kept out of the prompt so no cached extraction is invalidated and no model is
 # invited to invent a decision. See ontology.py for the measurement behind it.
 # ---------------------------------------------------------------------------
-system_entity_types: ["meeting", "decision", "action_item", "risk", "question"]
+system_entity_types: ["meeting", "decision", "action_item", "risk", "question", "statement"]
 
 # Assigned by SPELLING in extraction (ontology.code_symbol_type), also never in
 # the prompt: snake_case, CONSTANT_CASE and call() names become code_symbol.
@@ -223,7 +223,7 @@ system_relations:
     functional: false
     description: "this person asked the question"
   - name: "discussed_in"
-    domain: ["decision", "action_item", "risk", "question"]
+    domain: ["decision", "action_item", "risk", "question", "statement"]
     range: ["meeting"]
     functional: false
     description: "the item came up in this meeting"
@@ -232,3 +232,13 @@ system_relations:
     range: ["meeting"]
     functional: false
     description: "the person took part in the meeting"
+  - name: "said_by"
+    domain: ["statement"]
+    range: ["person"]
+    functional: false
+    description: "this person said it -- the speaker of its quote"
+  - name: "mentions"
+    domain: ["statement"]
+    range: ["person", "project", "concept", "tool", "organisation", "event", "date", "location", "feature", "file", "status", "unknown"]
+    functional: false
+    description: "the statement is about this person, thing or idea"

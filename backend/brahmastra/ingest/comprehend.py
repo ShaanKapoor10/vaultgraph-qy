@@ -160,6 +160,9 @@ class Artifact:
     # was later reversed is worth keeping as history rather than deleting.
     mentions: int = 1
     superseded_by: str | None = None
+    # What a point is ABOUT: [{"name", "type"}], each name found in the passage.
+    # Becomes `mentions` edges from the statement (ingest/graph_record.py).
+    about: list[dict[str, str]] = field(default_factory=list)
     # Filled by the store when the artifact is written, and DERIVED from the
     # artifact rather than drawn at random -- so the same decision keeps the
     # same id across re-ingestions. None until then: an artifact that has been
@@ -257,6 +260,39 @@ def owner_is_named(owner: str | None, source: str, participants: list[str]) -> b
 # ---------------------------------------------------------------------------
 # Reading the reply
 # ---------------------------------------------------------------------------
+
+# The types a point may be about: the ontology's own, less the ones that are
+# never a subject of conversation in this sense.
+_ABOUT_TYPES = {"person", "project", "concept", "tool", "organisation", "event",
+                "location", "feature"}
+
+
+def _grounded_about(raw: Any, quote: str, source: str) -> list[dict[str, str]]:
+    """
+    What a point is about, kept only where the NAME occurs in the passage.
+
+    The same rule as quotes, applied to names: a model can decide a point is
+    about "Stripe's API" when the passage only said "their sandbox". An entity
+    nobody named would enter the graph as if someone had, and entity
+    resolution would then merge real things into it.
+    """
+    if not isinstance(raw, list):
+        return []
+    haystack = _normalise(quote + " " + source)
+    out: list[dict[str, str]] = []
+    for entry in raw[:6]:
+        if isinstance(entry, str):
+            entry = {"name": entry, "type": "concept"}
+        if not isinstance(entry, dict):
+            continue
+        name = re.sub(r"^(the|a|an)\s+", "", str(entry.get("name") or "").strip(), flags=re.I)
+        if not (2 < len(name) <= 60) or _normalise(name) not in haystack:
+            continue
+        kind = str(entry.get("type") or "concept").strip().lower()
+        if all(o["name"].lower() != name.lower() for o in out):
+            out.append({"name": name, "type": kind if kind in _ABOUT_TYPES else "concept"})
+    return out
+
 
 def _as_list(payload: dict[str, Any], key: str) -> list[dict[str, Any]]:
     value = payload.get(key)
@@ -393,8 +429,10 @@ def build_understanding(payload: dict[str, Any], chunk: Chunk,
                         f"question: answer's quote not found in the passage — {statement[:60]!r}")
                     rationale = None
 
+            about = _grounded_about(item.get("about"), quote or "", source) if kind == "point" else []
             result.artifacts.append(Artifact(
                 kind=kind,
+                about=about,
                 statement=statement,
                 owner=owner,
                 due=(item.get("due") or "").strip() or None,

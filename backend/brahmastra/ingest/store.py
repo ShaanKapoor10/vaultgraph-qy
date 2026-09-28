@@ -150,6 +150,8 @@ _ADDED_COLUMNS = {
     "transcripts": {"mode": "TEXT"},
     # What each part was about, from the notes pass.
     "transcript_chunks": {"topic": "TEXT"},
+    # What a point is about ([{"name", "type"}], JSON) -- ingest/graph_record.py.
+    "meeting_artifacts": {"about": "TEXT"},
 }
 
 _POSTGRES_SCHEMA = _SQLITE_SCHEMA.replace("INTEGER", "INTEGER")
@@ -581,7 +583,7 @@ class IngestStore:
                  a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
                  json.dumps(a.speakers), a.start_time, a.end_time,
                  getattr(a, "mentions", 1), getattr(a, "superseded_by", None),
-                 _now())
+                 _now(), json.dumps(getattr(a, "about", None) or []))
             )
         # IDEMPOTENT, because ownership requires it. `created_at` is
         # deliberately NOT overwritten: it records when this system first knew
@@ -593,8 +595,8 @@ class IngestStore:
                 INSERT INTO meeting_artifacts
                     (id, workspace_id, transcript_id, chunk_index, kind, statement,
                      owner, due, rationale, quote, speakers, start_time, end_time,
-                     mentions, superseded_by, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mentions, superseded_by, created_at, about)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (workspace_id, id) DO UPDATE SET
                     transcript_id = excluded.transcript_id,
                     chunk_index = excluded.chunk_index,
@@ -608,7 +610,8 @@ class IngestStore:
                     start_time = excluded.start_time,
                     end_time = excluded.end_time,
                     mentions = excluded.mentions,
-                    superseded_by = excluded.superseded_by
+                    superseded_by = excluded.superseded_by,
+                    about = excluded.about
                 """), rows)
         return len(rows)
 
@@ -660,11 +663,14 @@ class IngestStore:
             cur.execute(self._ph(sql), tuple(params))
             rows = self._rows(cur)
         for r in rows:
-            if isinstance(r.get("speakers"), str):
-                try:
-                    r["speakers"] = json.loads(r["speakers"])
-                except ValueError:
-                    r["speakers"] = []
+            for key in ("speakers", "about"):
+                if isinstance(r.get(key), str):
+                    try:
+                        r[key] = json.loads(r[key])
+                    except ValueError:
+                        r[key] = []
+                elif r.get(key) is None:
+                    r[key] = []
         return rows
 
     # -- rejections (a person's verdict; SOURCE data) ------------------------

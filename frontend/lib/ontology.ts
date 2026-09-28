@@ -28,6 +28,8 @@ export type RelationType =
   | "asked_by"
   | "discussed_in"
   | "attended"
+  | "said_by"
+  | "mentions"
 
 export interface RelationDef {
   functional: boolean
@@ -59,6 +61,8 @@ export const ONTOLOGY: Record<RelationType, RelationDef> = {
   asked_by:        { functional: false, description: "this person asked the question" },
   discussed_in:    { functional: false, description: "the item came up in this meeting" },
   attended:        { functional: false, description: "the person took part in the meeting" },
+  said_by:         { functional: false, description: "this person said it — the speaker of its quote" },
+  mentions:        { functional: false, description: "the statement is about this person, thing or idea" },
 }
 
 export const RELATION_TYPES = Object.keys(ONTOLOGY) as RelationType[]

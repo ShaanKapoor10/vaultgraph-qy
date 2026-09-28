@@ -313,9 +313,15 @@ RELATION_NAMES: list[str] = [r.name for r in RELATIONS]
 
 SYSTEM_ENTITY_TYPES: list[str] = [
     "meeting", "decision", "action_item", "risk", "question",
+    # Something said in a meeting or taught in a class, kept WHOLE -- the
+    # cocoindex conversation_to_knowledge shape, with our quote check. A
+    # triple cannot hold "payments is sixty percent done: card flow finished,
+    # refunds not started", and measured end to end (ingest/qa_eval.py) that is
+    # exactly the detail the graph lost: 5 of 15 detail questions answered.
+    "statement",
 ]
 
-_ITEMS = ["decision", "action_item", "risk", "question"]
+_ITEMS = ["decision", "action_item", "risk", "question", "statement"]
 
 SYSTEM_RELATIONS: list[RelationDef] = [
     RelationDef("decided_by", domain=["decision"], range_=["person"],
@@ -330,6 +336,10 @@ SYSTEM_RELATIONS: list[RelationDef] = [
                 description="the item came up in this meeting"),
     RelationDef("attended", domain=["person"], range_=["meeting"],
                 description="the person took part in the meeting"),
+    RelationDef("said_by", domain=["statement"], range_=["person"],
+                description="this person said it -- the speaker of its quote"),
+    RelationDef("mentions", domain=["statement"], range_=list(ENTITY_TYPES),
+                description="the statement is about this person, thing or idea"),
 ]
 
 SYSTEM_RELATION_NAMES: list[str] = [r.name for r in SYSTEM_RELATIONS]

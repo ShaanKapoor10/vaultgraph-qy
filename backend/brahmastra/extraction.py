@@ -915,7 +915,15 @@ CODE_WRITTEN_SOURCES: frozenset[str] = frozenset({"meeting-record"})
 
 
 def _model_extracted(note: dict[str, Any]) -> bool:
-    return (note.get("source") or "") not in CODE_WRITTEN_SOURCES
+    source = note.get("source") or ""
+    if source == "transcript" and os.environ.get("INGEST_EXTRACT_PART_NOTES", "1").strip() == "0":
+        # A transcript part's note is a SUMMARY. With its items and key points
+        # declared straight into the graph as verified statements
+        # (ingest/graph_record.py), extracting the summary too adds a model's
+        # re-reading of prose a model wrote -- "no summary in between". The
+        # note stays, for reading and search. Measured before it is the default.
+        return False
+    return source not in CODE_WRITTEN_SOURCES
 
 
 def run_extraction(full: bool = False) -> dict[str, Any]:
@@ -950,6 +958,14 @@ def run_extraction(full: bool = False) -> dict[str, Any]:
         retried = db.get_notes(status="error")
 
     queue = [n for n in pending + retried if _model_extracted(n)]
+    # Part notes skipped by INGEST_EXTRACT_PART_NOTES=0 are settled rather than
+    # left pending forever: done, and holding no triples from an earlier run
+    # that DID extract them -- otherwise switching the flag would leave the
+    # summary's triples in the graph beside the statements.
+    for note in pending + retried:
+        if (note.get("source") or "") == "transcript" and not _model_extracted(note):
+            db.delete_triples_for_note(note["id"])
+            db.mark_note_done(note["id"])
     if not queue:
         return {
             "extracted": 0, "total_pending": 0, "retried": 0,

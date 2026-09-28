@@ -186,11 +186,43 @@ def test_a_lecture_question_reaches_the_graph_record_as_asked_by():
 
     triples = record_triples("Trading 101", ["Priya", "Dev"], [
         {"kind": "question", "statement": "What is in it for the dealers?", "said_by": "Dev"},
-        {"kind": "point", "statement": "The buyer of a swap pays fixed", "said_by": "Priya"},
     ])
     rels = {(t["subject_text"], t["relation"], t["object_text"]) for t in triples}
     assert ("What is in it for the dealers?", "asked_by", "Dev") in rels
-    assert not any("pays fixed" in t["subject_text"] for t in triples)
+
+
+def test_a_point_becomes_a_whole_statement_with_its_speaker_and_what_it_is_about():
+    from brahmastra.ingest.graph_record import record_triples
+
+    long = ("Payments is maybe sixty percent done: the card flow is basically done, "
+            "while refunds and the reconciliation job have not been started, and Priya is out "
+            "until the 20th, so the March date is not real any more")
+    triples = record_triples("Q3 planning", ["Mei"], [
+        {"kind": "point", "statement": long, "said_by": "Mei", "quote": "sixty percent done",
+         "about": [{"name": "payments integration", "type": "project"},
+                   {"name": "Priya", "type": "person"}, {"name": "Mei", "type": "person"}]},
+    ])
+    rels = {(t["subject_text"], t["relation"], t["object_text"], t["object_type"]) for t in triples}
+    assert (long, "said_by", "Mei", "person") in rels                 # kept whole, not cut at 160
+    assert (long, "mentions", "payments integration", "project") in rels
+    assert (long, "mentions", "Priya", "person") in rels
+    assert not any(r[1] == "mentions" and r[2] == "Mei" for r in rels)  # the speaker is said_by
+    assert all(t["subject_type"] == "statement" for t in triples if t["subject_text"] == long)
+
+
+def test_a_point_is_about_only_what_the_passage_names(monkeypatch):
+    from brahmastra.ingest.comprehend import build_understanding, POINT_SPECS
+
+    chunk = segment(LECTURE)[0]
+    u = build_understanding({"points": [{
+        "point": "The buyer of a swap pays fixed and receives floating",
+        "quote": "Buyer of the swap is always paying fixed and receiving float",
+        "about": [{"name": "the buyer of the swap", "type": "concept"},
+                  {"name": "Stripe", "type": "organisation"},
+                  {"name": "swap", "type": "weird-type"}]}]}, chunk, specs=POINT_SPECS)
+    about = u.artifacts[0].about
+    assert {a["name"] for a in about} == {"buyer of the swap", "swap"}   # Stripe was never said
+    assert next(a for a in about if a["name"] == "swap")["type"] == "concept"
 
 
 def test_the_presenters_own_questions_are_not_audience_questions():
@@ -212,3 +244,23 @@ def test_a_discussion_has_no_presenter():
     from brahmastra.ingest.reader import presenter_of
     assert presenter_of(segment(
         "Sarah: One two three four five.\nMei: Six seven eight nine ten.\nRaj: Eleven twelve.\n")) is None
+
+
+def test_part_notes_can_stay_out_of_extraction_and_are_settled(monkeypatch, tmp_path):
+    """INGEST_EXTRACT_PART_NOTES=0: the summary note is kept, never re-read into triples."""
+    monkeypatch.setenv("BRAHMASTRA_DB", str(tmp_path / "x.db"))
+    monkeypatch.setenv("GRAPH_BACKEND", "sqlite")
+    monkeypatch.setenv("NOTE_BACKEND", "")
+    from brahmastra import db, extraction
+
+    db.init_db()
+    db.upsert_note("t1-c0", "Part 1", "A summary a model wrote.", mark_pending=True, source="transcript")
+    db.insert_triples([{"subject_text": "A", "subject_type": "concept", "relation": "related_to",
+                        "object_text": "B", "object_type": "concept", "confidence": 0.5,
+                        "source_quote": "", "source_note_id": "t1-c0"}])
+    monkeypatch.setenv("INGEST_EXTRACT_PART_NOTES", "0")
+    monkeypatch.setattr(extraction, "extract_note", lambda *a, **k: pytest.fail("summary was extracted"))
+    out = extraction.run_extraction()
+    assert out["extracted"] == 0
+    assert db.get_note("t1-c0")["extraction_status"] == "done"
+    assert not [t for t in db.get_all_triples() if t.get("source_note_id") == "t1-c0"]

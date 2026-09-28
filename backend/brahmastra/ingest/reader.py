@@ -51,7 +51,10 @@ Return ONLY a JSON object:
   "topic": "a short label for what this part is about",
   "summary": "2-4 sentences on what happened in this part, in plain prose",
   "points": [
-    {{"point": "one full, specific statement", "quote": "verbatim words from the passage that back it"}}
+    {{"point": "one full, specific statement",
+      "quote": "verbatim words from the passage that back it",
+      "about": [{{"name": "a person, product, organisation or idea the point is about",
+                 "type": "person | project | concept | tool | organisation | event | location | feature"}}]}}
   ]
 }}
 
@@ -66,6 +69,10 @@ RULES:
 4. Use only names that appear in the passage. Never introduce a person.
 5. Small talk, greetings, logistics, sound checks and screen-sharing trouble
    are not points. If the part is only that, return an empty list.
+6. "about" names what the point is ABOUT, as it is named in the passage:
+   "Priya", "the payments integration", "Brent", "swap". Not the speaker
+   unless the point is about them. Two to four names is usual; never a
+   pronoun, never a whole sentence.
 """
 
 _NOTES_BRIEF = {

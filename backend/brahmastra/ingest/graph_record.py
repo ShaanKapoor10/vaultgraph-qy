@@ -58,15 +58,23 @@ _BY_KIND = {
     "action_item": ("action_item", "assigned_to"),
     "risk": ("risk", "raised_by"),
     "open_question": ("question", "asked_by"),
-    # A lecture's audience question (ingest/modes.py). A lecture's points are
-    # not here: they reach the graph through the part notes, where extraction
-    # reads them as the facts they are.
+    # A lecture's audience question (ingest/modes.py).
     "question": ("question", "asked_by"),
+    # A key point, kept WHOLE as a statement: who said it, where, and what it
+    # is about. The cocoindex conversation_to_knowledge shape, with our quote
+    # check. Before this, points reached the graph only through extraction of
+    # the part note, and a triple cannot hold "payments is sixty percent done:
+    # card flow finished, refunds not started" -- end to end, the graph
+    # answered 5 of 15 detail questions (ingest/qa_eval.py).
+    "point": ("statement", "said_by"),
 }
 
 # Node names are the statements themselves; a runaway one should not become a
 # paragraph-long node label.
 MAX_NAME = 160
+# A statement IS its detail. Cut at 160 characters, the number or the reason at
+# its end is exactly what goes.
+MAX_STATEMENT = 320
 
 
 def record_note_id(transcript_id: str) -> str:
@@ -84,8 +92,8 @@ def meeting_name(title: str, occurred_at: str | None) -> str:
     return f"{title} ({day})" if day else title
 
 
-def _clean(text: str | None) -> str:
-    return " ".join((text or "").split())[:MAX_NAME].strip()
+def _clean(text: str | None, limit: int = MAX_NAME) -> str:
+    return " ".join((text or "").split())[:limit].strip()
 
 
 def _person_for(artifact: Any, kind: str) -> str:
@@ -148,7 +156,8 @@ def record_triples(meeting: str, participants: Iterable[str],
         kind = _field(artifact, "kind")
         if kind not in _BY_KIND or _field(artifact, "superseded_by"):
             continue
-        statement = _clean(_field(artifact, "statement"))
+        statement = _clean(_field(artifact, "statement"),
+                           MAX_STATEMENT if kind == "point" else MAX_NAME)
         if not statement:
             continue
         item_type, to_person = _BY_KIND[kind]
@@ -157,6 +166,11 @@ def record_triples(meeting: str, participants: Iterable[str],
         owner = _person_for(artifact, kind)
         if owner and not is_anonymous(owner):
             add(statement, item_type, to_person, owner, "person", quote)
+        for about in (_field(artifact, "about") or []) if kind == "point" else []:
+            name = _clean((about or {}).get("name"))
+            if name and name.lower() != (owner or "").lower():
+                add(statement, item_type, "mentions", name,
+                    (about or {}).get("type") or "concept", quote)
     return triples
 
 
@@ -171,9 +185,11 @@ def record_body(meeting: str, participants: Iterable[str],
     if people:
         lines.append(f"Attended by {', '.join(people)}.")
     headings = {"decision": "Decisions", "action_item": "Action items",
-                "risk": "Risks raised", "open_question": "Open questions"}
+                "risk": "Risks raised", "open_question": "Open questions",
+                "question": "Questions from the audience", "point": "Key points"}
     who = {"decision": "decided by", "action_item": "assigned to",
-           "risk": "raised by", "open_question": "asked by"}
+           "risk": "raised by", "open_question": "asked by",
+           "question": "asked by", "point": "said by"}
     items = [a for a in artifacts if not _field(a, "superseded_by")]
     for kind, heading in headings.items():
         of_kind = [a for a in items if _field(a, "kind") == kind]

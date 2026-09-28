@@ -57,6 +57,7 @@ DESTROY takes the notes too, ABANDON leaves them and releases the claim. See
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from datetime import datetime, timezone
@@ -240,7 +241,7 @@ def rebuild_record(transcript_id: str, store: IngestStore | None = None) -> dict
     report: dict[str, Any] = {"transcript_id": transcript_id, "errors": []}
     chunks = _segment_with_speakers(record, report)
     fields = ("kind", "statement", "owner", "due", "rationale", "quote",
-              "chunk_index", "start_time", "end_time", "mentions", "superseded_by")
+              "chunk_index", "start_time", "end_time", "mentions", "superseded_by", "about")
     artifacts = [Artifact(**{k: row.get(k) for k in fields if row.get(k) is not None})
                  for row in store.get_artifacts(transcript_id=transcript_id,
                                                 limit=1_000_000)]
@@ -366,7 +367,8 @@ def _settle_artifacts(ledger: ownership.Ledger, store: IngestStore,
             ownership.fingerprint(a.kind, a.statement, a.owner, a.due,
                                   a.rationale, a.quote, a.chunk_index,
                                   getattr(a, "mentions", 1),
-                                  getattr(a, "superseded_by", None)),
+                                  getattr(a, "superseded_by", None),
+                                  json.dumps(getattr(a, "about", None) or [], sort_keys=True)),
             a,
         )
         for aid, a in identified

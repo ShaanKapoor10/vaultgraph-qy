@@ -46,6 +46,8 @@ export const RELATION_LABEL: Record<RelationType, string> = {
   asked_by: "asked by",
   discussed_in: "discussed in",
   attended: "attended",
+  said_by: "said by",
+  mentions: "mentions",
 }
 
 export function noteTitleMap(notes: { id: string; title: string }[]): Record<string, string> {
