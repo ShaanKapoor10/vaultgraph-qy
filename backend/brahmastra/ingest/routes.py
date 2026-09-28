@@ -13,6 +13,7 @@ id immediately and polls.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, File, Form, HTTPException, UploadFile
@@ -20,6 +21,7 @@ from pydantic import BaseModel, Field
 
 from brahmastra.ingest import assemble
 from brahmastra.ingest.assemble import process_transcript
+from brahmastra.ingest.modes import MODES, get_mode, is_mode
 from brahmastra.ingest.store import Transcript, get_ingest_store
 from brahmastra.workspace import current_workspace
 
@@ -39,6 +41,24 @@ class TranscriptIn(BaseModel):
     source: str = "upload"
     source_ref: str | None = None
     occurred_at: str | None = None
+    # How to read it (ingest/modes.py): "meeting" or "lecture". Unset is a meeting.
+    mode: str | None = None
+
+
+def _checked_mode(mode: str | None) -> str | None:
+    """A named mode must exist: a typo would otherwise read a lecture as a meeting."""
+    if mode is None or not mode.strip():
+        return None
+    if not is_mode(mode):
+        raise HTTPException(status_code=422,
+                            detail=f"unknown mode {mode!r}; expected one of {sorted(MODES)}")
+    return mode.strip().lower()
+
+
+@router.get("/modes")
+async def list_modes() -> list[dict[str, Any]]:
+    """The kinds of session a transcript can be read as, and what each yields."""
+    return [m.as_dict() for m in MODES.values()]
 
 
 def _launch(transcript_id: str, workspace: str) -> None:
@@ -69,9 +89,11 @@ async def submit_transcript(
     tid = store.create_transcript(Transcript(
         id="", title=body.title, content=body.content, source=body.source,
         source_ref=body.source_ref, occurred_at=body.occurred_at,
+        mode=_checked_mode(body.mode),
     ))
     background_tasks.add_task(_launch, tid, workspace)
-    return {"transcript_id": tid, "status": "pending", "workspace": workspace}
+    return {"transcript_id": tid, "status": "pending", "workspace": workspace,
+            "mode": get_mode(body.mode).id}
 
 
 @router.post("/transcripts/upload")
@@ -80,8 +102,10 @@ async def upload_transcript(
     file: UploadFile = File(...),
     title: str = Form(""),
     occurred_at: str = Form(""),
+    mode: str = Form(""),
 ) -> dict[str, Any]:
     """Accept a transcript file. The same path, with a file on the front."""
+    chosen = _checked_mode(mode)
     name = file.filename or "transcript"
     suffix = ("." + name.rsplit(".", 1)[-1].lower()) if "." in name else ""
     if suffix and suffix not in ALLOWED_SUFFIXES:
@@ -113,6 +137,7 @@ async def upload_transcript(
     tid = store.create_transcript(Transcript(
         id="", title=title.strip() or name, content=text,
         source="upload", source_ref=name, occurred_at=occurred_at or None,
+        mode=chosen,
     ))
     background_tasks.add_task(_launch, tid, workspace)
     return {"transcript_id": tid, "status": "pending", "workspace": workspace,
@@ -124,7 +149,14 @@ async def list_transcripts(
     status: Literal["pending", "processing", "done", "error"] | None = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    return get_ingest_store().list_transcripts(status=status, limit=min(limit, 200))
+    store = get_ingest_store()
+    rows = store.list_transcripts(status=status, limit=min(limit, 200))
+    # Only for meetings still running: a poll every few seconds should not
+    # read every chunk of every finished meeting.
+    for r in rows:
+        if r.get("status") in ("pending", "processing"):
+            r["progress"] = progress(r, store.get_chunks(r["id"]))
+    return rows
 
 
 @router.get("/transcripts/{transcript_id}")
@@ -172,16 +204,26 @@ async def get_transcript(transcript_id: str, include_text: bool = False) -> dict
 
 @router.post("/transcripts/{transcript_id}/reprocess")
 async def reprocess(transcript_id: str,
-                    background_tasks: BackgroundTasks) -> dict[str, Any]:
+                    background_tasks: BackgroundTasks,
+                    mode: str | None = None) -> dict[str, Any]:
     """
     Run it again. Derived rows are cleared first, so this corrects rather than
     duplicates -- which is what makes it safe to retry a partial run.
+
+    `?mode=lecture` reads it as a different kind of session from now on: a
+    lecture first read as a meeting is corrected by processing it again.
     """
     workspace = current_workspace()
-    if get_ingest_store(workspace).get_transcript(transcript_id) is None:
+    store = get_ingest_store(workspace)
+    record = store.get_transcript(transcript_id)
+    if record is None:
         raise HTTPException(status_code=404, detail=f"no transcript {transcript_id!r}")
+    chosen = _checked_mode(mode)
+    if chosen:
+        store.set_transcript_mode(transcript_id, chosen)
     background_tasks.add_task(_launch, transcript_id, workspace)
-    return {"transcript_id": transcript_id, "status": "pending"}
+    return {"transcript_id": transcript_id, "status": "pending",
+            "mode": get_mode(chosen or record.get("mode")).id}
 
 
 @router.delete("/transcripts/{transcript_id}")
@@ -263,6 +305,24 @@ async def meeting_view(transcript_id: str) -> dict[str, Any]:
     order = {"decision": 0, "action_item": 1, "risk": 2, "open_question": 3}
     items.sort(key=lambda a: (order.get(a["kind"], 9), a.get("start_time") or "", a["statement"]))
     speakers = sorted({s for c in chunks for s in (c.speakers or [])})
+    stored = store.get_chunks(transcript_id)
+    points_by_part: dict[int, list[dict[str, Any]]] = {}
+    for item in items:
+        if item["kind"] == "point" and not item.get("rejected"):
+            points_by_part.setdefault(item.get("chunk_index") or 0, []).append(
+                {"id": item["id"], "statement": item["statement"], "said_by": item.get("said_by")})
+    parts = [{"idx": c["idx"], "status": c.get("status"), "error": c.get("error"),
+              "topic": c.get("topic"), "summary": c.get("summary"),
+              "start_time": c.get("start_time"), "end_time": c.get("end_time"),
+              "speakers": c.get("speakers"), "points": points_by_part.get(c["idx"], [])}
+             for c in stored if c["idx"] < (record.get("chunk_count") or len(stored))]
+    mode = get_mode(record.get("mode"))
+    for p in parts:
+        if isinstance(p["speakers"], str):
+            try:
+                p["speakers"] = json.loads(p["speakers"])
+            except ValueError:
+                p["speakers"] = []
     return {
         "id": transcript_id,
         "title": record["title"],
@@ -273,8 +333,39 @@ async def meeting_view(transcript_id: str) -> dict[str, Any]:
         "unnamed_voices": [s for s in speakers if is_anonymous(s)],
         "speaker_identification": report.get("speakers"),
         "chunks": len(chunks),
+        "mode": mode.as_dict(),
+        "overview": store.get_overview(transcript_id),
+        "progress": progress(record, stored),
+        "parts": parts,
         "items": items,
     }
+
+
+def progress(record: dict[str, Any], chunks: list[dict[str, Any]]) -> dict[str, Any]:
+    """
+    Where a run is, from what it has already stored -- no extra bookkeeping.
+
+    Findings are only written once EVERY part is read (consolidation needs the
+    whole meeting), so while a meeting processes its counts are honestly zero.
+    This is what says how far it has got instead.
+    """
+    status = record.get("status")
+    total = int(record.get("chunk_count") or 0)
+    current = [c for c in chunks if c["idx"] < total]
+    read = sum(1 for c in current if c.get("status") in ("done", "error"))
+    failed = sum(1 for c in current if c.get("status") == "error")
+    if status == "pending":
+        stage = "queued"
+    elif status == "processing" and total == 0:
+        stage = "splitting the transcript into parts"
+    elif status == "processing" and read < total:
+        stage = f"reading part {read + 1} of {total}"
+    elif status == "processing":
+        stage = "merging findings and writing them to the graph"
+    else:
+        stage = status or "unknown"
+    return {"status": status, "stage": stage, "parts_total": total,
+            "parts_read": read, "parts_failed": failed}
 
 
 @router.post("/artifacts/{artifact_id}/reject")

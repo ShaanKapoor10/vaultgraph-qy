@@ -75,10 +75,12 @@ from brahmastra import ownership
 # Headings used in the generated note. Plain words on purpose: the note is read
 # by an extraction prompt, and prose beats a data structure there.
 _SECTIONS = [
+    ("point", "Key points"),
     ("decision", "Decisions"),
     ("action_item", "Action items"),
     ("risk", "Risks and blockers"),
     ("open_question", "Open questions"),
+    ("question", "Questions from the audience"),
 ]
 
 
@@ -542,6 +544,12 @@ def _sentence_for(artifact: Any, kind: str) -> str:
         # Kept as a question, because that is what it is -- and the question
         # mark is the only thing marking it unresolved once it is prose.
         return f"{body}?" + (f" ({artifact.owner} asked it.)" if artifact.owner else "")
+    elif kind == "question":
+        asked = f" {artifact.owner} asked it." if artifact.owner else ""
+        answer = (artifact.rationale or "").strip().rstrip(".")
+        return f"{body}?{asked}" + (f" Answer: {answer}." if answer else " It was not answered.")
+    elif kind == "point":
+        return f"{body}."           # a point is already a sentence someone could study
 
     if artifact.rationale:
         rationale = artifact.rationale.strip().rstrip(".")
@@ -631,7 +639,11 @@ def _process(
         "errors": [],
     }
 
-    store.set_transcript_status(transcript_id, "processing")
+    # chunk_count 0 until segmentation says otherwise: a progress reader takes
+    # it as "still splitting", where the last run's count would claim parts
+    # this run has not made yet.
+    store.set_transcript_status(transcript_id, "processing", chunk_count=0)
+    store.mark_chunks_pending(transcript_id)
 
     # EVERYTHING this transcript owns, opened before the first row is written
     # and settled after the last, so the run can answer "and what did the
@@ -679,8 +691,17 @@ def _process(
     db.init_db()
 
     pending_artifacts: list[Any] = []
-    # Resolved once per document, so a run cannot change strategy halfway.
-    comprehend = comprehension_strategy()
+    # What kind of session this is decides what is read out of it
+    # (ingest/modes.py). One reader per document, because each part is told
+    # what the part before it noted. Resolved once, so a run cannot change
+    # strategy halfway.
+    from brahmastra.ingest.modes import get_mode
+    from brahmastra.ingest.reader import SessionReader
+
+    mode = get_mode(record.get("mode"))
+    report["mode"] = mode.id
+    comprehend = SessionReader(mode, meeting_strategy=comprehension_strategy())
+    parts: list[dict[str, Any]] = []
 
     for chunk in chunks:
         # Declared, then written UNCONDITIONALLY -- unlike a note, where the
@@ -771,7 +792,12 @@ def _process(
             transcript_id, chunk.index, "done",
             summary=understanding.summary, note_id=note_id,
             error="; ".join(failures)[:300] if failures else None,
+            topic=understanding.topic or None,
         )
+        parts.append({"idx": chunk.index, "start_time": chunk.start_time,
+                      "topic": understanding.topic, "summary": understanding.summary,
+                      "points": [a.statement for a in understanding.artifacts
+                                 if a.kind == "point"]})
         if failures:
             # DEGRADED, not failed, and the distinction is load-bearing: this
             # chunk produced artifacts, it is only missing the kinds the failed
@@ -798,6 +824,11 @@ def _process(
     # not yet know what it declares -- and before the status is decided, so a
     # `partial` run still reports what it removed.
     reduced = consolidate(pending_artifacts)
+    if mode.id == "lecture":
+        from brahmastra.ingest.reader import drop_presenter_questions
+
+        reduced["artifacts"], presenter_drops = drop_presenter_questions(reduced["artifacts"], chunks)
+        report["rejected"].extend(presenter_drops)
 
     # The meeting record, declared straight into the graph from the verified
     # artifacts -- see ingest/graph_record.py for what the prose bridge lost.
@@ -813,6 +844,18 @@ def _process(
 
     report["artifacts"] = _settle_artifacts(
         ledger, store, transcript_id, reduced["artifacts"], report, force)
+
+    # The whole session from its part notes (ingest/overview.py). Last, and
+    # reported rather than raised: it adds a headline, it holds nothing up.
+    if parts:
+        from brahmastra.ingest.overview import write_overview
+
+        overview = write_overview(mode, record["title"], parts)
+        try:
+            store.save_overview(transcript_id, overview)
+        except Exception as exc:                        # noqa: BLE001
+            overview = {"error": f"{type(exc).__name__}: {exc}"[:300]}
+        report["overview"] = "error: " + overview["error"] if overview.get("error") else "ok"
     report["merged"] = reduced["merged"]
     report["superseded"] = reduced["superseded"]
     report["revisions"] = reduced["notes"]

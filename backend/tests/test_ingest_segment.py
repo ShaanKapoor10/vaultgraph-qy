@@ -254,3 +254,49 @@ def test_a_realistic_hour_long_transcript_is_chunked_sanely():
         assert c.speakers
     assert chunks[0].index == 0
     assert [c.index for c in chunks] == list(range(len(chunks)))
+
+
+# -- Teams / WebVTT voice tags (a real Teams export read as UUIDs and no speakers) --
+
+TEAMS_VTT = (
+    "WEBVTT\r\n\r\n"
+    "3f1c9a20-0000-4000-8000-00000000c0de/13-0\r\n00:00:11.703 --> 00:00:12.823\r\n"
+    "<v Priya  Menon>Hi, everyone.</v>\r\n\r\n"
+    "NOTE a comment block, never speech\r\n\r\n"
+    "3f1c9a20-0000-4000-8000-00000000c0de/16-0\r\n00:00:13.303 --> 00:00:15.063\r\n"
+    "<v Arjun Rao>Where is this?</v>\r\n\r\n"
+    "3f1c9a20-0000-4000-8000-00000000c0de/195-0\r\n00:14:25.783 --> 00:14:29.599\r\n"
+    "<v Priya Menon>So,\r\nLeo and Tom enter into a swap</v>\r\n\r\n"
+    "3f1c9a20-0000-4000-8000-00000000c0de/195-1\r\n00:14:29.599 --> 00:14:30.503\r\n"
+    "<v Priya Menon>contract.</v>\r\n"
+)
+
+
+def test_teams_voice_tags_name_the_speaker_and_cue_ids_are_not_speech():
+    turns = parse_turns(TEAMS_VTT)
+    assert [t.speaker for t in turns] == ["Priya Menon", "Arjun Rao", "Priya Menon"]
+    assert not any("3f1c9a20" in t.text or "<v" in t.text or "NOTE" in t.text for t in turns)
+
+
+def test_one_speakers_consecutive_cues_join_into_whole_sentences():
+    turns = parse_turns(TEAMS_VTT)
+    assert turns[-1].text == "So, Leo and Tom enter into a swap contract."
+    assert turns[-1].timestamp == "00:14:25.783"
+
+
+def test_names_are_spelled_one_way():
+    """Teams wrote 'Priya  Menon' with two spaces in some cues, one in others."""
+    assert parse_turns(TEAMS_VTT)[0].speaker == "Priya Menon"
+
+
+def test_srt_sequence_numbers_are_not_speech():
+    srt = "1\n00:00:01,000 --> 00:00:02,000\nSarah: Ship it.\n\n2\n00:00:03,000 --> 00:00:04,000\nMei: Agreed.\n"
+    turns = parse_turns(srt)
+    assert [(t.speaker, t.text) for t in turns] == [("Sarah", "Ship it."), ("Mei", "Agreed.")]
+
+
+def test_doubled_line_endings_still_parse():
+    """A CRLF file written in Windows text mode becomes \r\r\n: a blank after every line."""
+    doubled = TEAMS_VTT.replace("\r\n", "\r\r\n")
+    assert [(t.speaker, t.text) for t in parse_turns(doubled)] == \
+        [(t.speaker, t.text) for t in parse_turns(TEAMS_VTT)]

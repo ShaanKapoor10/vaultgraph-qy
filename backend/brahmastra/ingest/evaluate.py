@@ -416,7 +416,17 @@ def run_case(case: dict[str, Any],
              comprehend: Callable[..., Any] | None = None,
              reconcile_pass: bool = False) -> dict[str, Any]:
     """Segment, comprehend, consolidate, score. One labelled transcript."""
-    comprehend = comprehend or comprehend_chunk
+    from brahmastra.ingest.modes import get_mode
+    from brahmastra.ingest.reader import SessionReader
+
+    # A case names its mode (ingest/modes.py). A non-meeting case is read the
+    # way production reads it -- one SessionReader per document, since each
+    # part is told what the one before noted -- and scored only on the kinds
+    # that mode claims.
+    mode = get_mode(case.get("mode"))
+    if comprehend is None:
+        comprehend = SessionReader(mode) if mode.id != "meeting" else comprehend_chunk
+    scored_kinds = {k.id for k in mode.kinds}
     chunks = segment(case["transcript"])
 
     produced: list[Any] = []
@@ -441,6 +451,9 @@ def run_case(case: dict[str, Any],
     scoring = time.perf_counter()
     reduced = consolidate(produced)
     final = reduced["artifacts"]
+    if mode.id == "lecture":
+        from brahmastra.ingest.reader import drop_presenter_questions
+        final, _ = drop_presenter_questions(final, chunks)
     reconciled: dict[str, Any] | None = None
     if reconcile_pass:
         # The whole-meeting pass (ingest/reconcile.py), after consolidation --
@@ -458,7 +471,8 @@ def run_case(case: dict[str, Any],
             speaker_of=lambda a: speaker_of(a.quote or "", by_index.get(a.chunk_index)))
         read_seconds += time.perf_counter() - started
         calls += 1
-    scores = score_against(case["expected"], final, case.get("must_not_find"))
+    scores = score_against(case["expected"], [a for a in final if a.kind in scored_kinds],
+                           case.get("must_not_find"))
     score_seconds = time.perf_counter() - scoring
 
     return {

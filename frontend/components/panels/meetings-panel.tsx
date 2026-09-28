@@ -24,13 +24,75 @@ interface TranscriptRow {
   occurred_at?: string | null
   created_at?: string | null
   chunk_count?: number | null
+  mode?: string | null
+  progress?: Progress
+}
+
+/** How a session is read (GET /ingest/modes): a meeting, a lecture, ... */
+interface ModeInfo {
+  id: string
+  label: string
+  description: string
+  kinds: { id: string; label: string; person: string }[]
+  points_kind: string | null
+  points_label: string
+  examples: string[]
+}
+
+/** The whole session in a few lines, written from the part notes. */
+interface Overview {
+  headline: string | null
+  summary: string | null
+  themes: { title: string; points: string[] }[]
+  error: string | null
+}
+
+// Shown until GET /ingest/modes answers, and if it never does.
+const FALLBACK_MODES: ModeInfo[] = [
+  {
+    id: "meeting",
+    label: "Meeting",
+    description: "People deciding and dividing up work: decisions, action items, risks, open questions.",
+    kinds: [
+      { id: "decision", label: "Decisions", person: "decided by" },
+      { id: "action_item", label: "Action items", person: "owner" },
+      { id: "risk", label: "Risks", person: "raised by" },
+      { id: "open_question", label: "Open questions", person: "asked by" },
+    ],
+    points_kind: null,
+    points_label: "Discussion points",
+    examples: [],
+  },
+]
+
+/** Where a run is. Findings only land once every part is read. */
+interface Progress {
+  status: string
+  stage: string
+  parts_total: number
+  parts_read: number
+  parts_failed: number
+}
+
+/** One part of the transcript as it was read: its summary, or why it failed. */
+interface Part {
+  idx: number
+  status: string
+  error: string | null
+  topic: string | null
+  summary: string | null
+  start_time: string | null
+  end_time: string | null
+  speakers: string[] | null
+  points: { id: string; statement: string; said_by: string | null }[]
 }
 
 /** One finding, as GET /ingest/transcripts/{id}/meeting returns it. */
 interface Item {
   id: string
-  kind: "decision" | "action_item" | "risk" | "open_question"
+  kind: string
   statement: string
+  rationale: string | null
   owner: string | null
   said_by: string | null
   quote: string | null
@@ -49,15 +111,46 @@ interface Meeting {
   error: string | null
   participants: string[]
   unnamed_voices: string[]
+  mode?: ModeInfo
+  overview?: Overview | null
+  progress?: Progress
+  parts?: Part[]
   items: Item[]
 }
 
-const KINDS: { id: Item["kind"]; label: string; person: string }[] = [
-  { id: "decision", label: "Decisions", person: "decided by" },
-  { id: "action_item", label: "Action items", person: "owner" },
-  { id: "risk", label: "Risks", person: "raised by" },
-  { id: "open_question", label: "Open questions", person: "asked by" },
-]
+const running = (status: string | undefined) => status === "pending" || status === "processing"
+
+/** HH:MM:SS, without the milliseconds a VTT file carries. */
+function clock(ts: string | null | undefined) {
+  return ts ? ts.replace(/[.,]\d+$/, "") : null
+}
+
+function ProgressBar({ progress, compact = false }: { progress: Progress; compact?: boolean }) {
+  const pct = progress.parts_total ? Math.round((progress.parts_read / progress.parts_total) * 100) : 0
+  return (
+    <div className={`flex flex-col ${compact ? "gap-1" : "gap-1.5"}`}>
+      <div className="flex items-center gap-1.5 font-mono text-[11px] text-primary">
+        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        <span className="truncate">{progress.stage}</span>
+      </div>
+      <div
+        className="h-1 overflow-hidden rounded-full bg-secondary"
+        role="progressbar"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={progress.stage}
+      >
+        <div className="h-full bg-primary transition-[width] duration-500" style={{ width: `${pct}%` }} />
+      </div>
+      {!compact && progress.parts_failed > 0 && (
+        <span className="font-mono text-[11px] text-destructive">
+          {progress.parts_failed} part{progress.parts_failed > 1 ? "s" : ""} failed; they are retried on the next run
+        </span>
+      )}
+    </div>
+  )
+}
 
 /** The person an item is attributed to -- the same rule the graph uses. */
 function personOf(item: Item): string | null {
@@ -92,7 +185,15 @@ function scoped(path: string, workspace: string) {
   return `${path}${path.includes("?") ? "&" : "?"}workspace=${encodeURIComponent(workspace)}`
 }
 
-export function MeetingsPanel({ workspace, backendAvailable }: { workspace: string; backendAvailable: boolean }) {
+export function MeetingsPanel({
+  workspace,
+  workspaces = [],
+  backendAvailable,
+}: {
+  workspace: string
+  workspaces?: { id: string; name?: string }[]
+  backendAvailable: boolean
+}) {
   const [rows, setRows] = useState<TranscriptRow[]>([])
   const [selected, setSelected] = useState<string | null>(null)
   const [meeting, setMeeting] = useState<Meeting | null>(null)
@@ -100,6 +201,15 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
   const [error, setError] = useState<string | null>(null)
   const [busyItem, setBusyItem] = useState<string | null>(null)
   const [showRejected, setShowRejected] = useState(false)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [modes, setModes] = useState<ModeInfo[]>(FALLBACK_MODES)
+
+  useEffect(() => {
+    if (!backendAvailable) return
+    api<ModeInfo[]>("/ingest/modes")
+      .then((m) => m.length && setModes(m))
+      .catch(() => {})
+  }, [backendAvailable])
 
   const loadList = useCallback(async () => {
     try {
@@ -138,7 +248,7 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
   }, [selected, loadMeeting])
 
   // While anything is being processed, keep the list (and the open meeting) live.
-  const inFlight = rows.some((r) => r.status === "pending" || r.status === "processing")
+  const inFlight = rows.some((r) => running(r.status))
   useEffect(() => {
     if (!inFlight) return
     const t = setInterval(() => {
@@ -164,10 +274,12 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
     }
   }
 
-  const reprocess = async (id: string) => {
+  const reprocess = async (id: string, mode?: string) => {
     try {
-      await api(scoped(`/ingest/transcripts/${id}/reprocess`, workspace), { method: "POST" })
+      const q = mode ? `?mode=${encodeURIComponent(mode)}` : ""
+      await api(scoped(`/ingest/transcripts/${id}/reprocess${q}`, workspace), { method: "POST" })
       await loadList()
+      await loadMeeting(id)
     } catch (e) {
       setError((e as Error).message)
     }
@@ -180,9 +292,10 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
   return (
     <div className="flex flex-col gap-5">
       <p className="text-sm text-muted-foreground">
-        Every decision, action item, risk and open question found in a meeting, with the words that were actually said.
-        Each item goes into the graph as it appears here. <span className="text-foreground">Reject</span> anything
-        that is wrong: it leaves the graph at once and stays out, even when the meeting is processed again.
+        What each session yielded, read the way its kind asks: a meeting for its decisions, action items, risks and
+        open questions, a lecture for what was taught and what the audience asked. Every item carries the words that
+        were actually said. <span className="text-foreground">Reject</span> anything that is wrong: it leaves the
+        graph at once and stays out, even when the session is processed again.
       </p>
 
       {error && (
@@ -191,11 +304,32 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
           <span>{error}</span>
         </div>
       )}
+      {notice && (
+        <div className="flex items-start justify-between gap-2 rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm text-foreground">
+          <span>{notice}</span>
+          <button onClick={() => setNotice(null)} className="font-mono text-[11px] text-muted-foreground hover:text-foreground">
+            dismiss
+          </button>
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-[280px_minmax(0,1fr)]">
         {/* Meeting list + intake */}
         <aside className="flex flex-col gap-3">
-          <AddMeeting workspace={workspace} onAdded={(id) => { loadList(); setSelected(id) }} />
+          <AddMeeting
+            workspace={workspace}
+            workspaces={workspaces}
+            modes={modes}
+            onAdded={(id, target) => {
+              if (target === workspace) {
+                loadList()
+                setSelected(id)
+                setNotice(null)
+              } else {
+                setNotice(`Added to the "${target}" workspace. Switch to it in the header to watch it process.`)
+              }
+            }}
+          />
           <div className="flex items-center justify-between">
             <h3 className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
               Meetings &middot; {rows.length}
@@ -224,7 +358,18 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
                   </div>
                   <span className="font-mono text-[11px] text-muted-foreground">
                     {fmtDate(r.occurred_at) ?? fmtDate(r.created_at) ?? "undated"}
+                    {r.mode && r.mode !== "meeting" && (
+                      <> &middot; {modes.find((m) => m.id === r.mode)?.label.toLowerCase() ?? r.mode}</>
+                    )}
                   </span>
+                  {running(r.status) && r.progress && (
+                    <div className="mt-1.5">
+                      <ProgressBar progress={r.progress} compact />
+                    </div>
+                  )}
+                  {r.status === "error" && r.error && (
+                    <p className="mt-1 line-clamp-2 text-[11px] text-destructive">{r.error}</p>
+                  )}
                 </button>
               </li>
             ))}
@@ -237,11 +382,12 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
           {meeting && (
             <MeetingView
               meeting={meeting}
+              modes={modes}
               busyItem={busyItem}
               showRejected={showRejected}
               onToggleShowRejected={() => setShowRejected((s) => !s)}
               onToggleReject={toggleReject}
-              onReprocess={() => reprocess(meeting.id)}
+              onReprocess={(mode) => reprocess(meeting.id, mode)}
             />
           )}
         </section>
@@ -252,6 +398,7 @@ export function MeetingsPanel({ workspace, backendAvailable }: { workspace: stri
 
 function MeetingView({
   meeting,
+  modes,
   busyItem,
   showRejected,
   onToggleShowRejected,
@@ -259,22 +406,30 @@ function MeetingView({
   onReprocess,
 }: {
   meeting: Meeting
+  modes: ModeInfo[]
   busyItem: string | null
   showRejected: boolean
   onToggleShowRejected: () => void
   onToggleReject: (item: Item) => void
-  onReprocess: () => void
+  onReprocess: (mode?: string) => void
 }) {
-  const rejectedCount = meeting.items.filter((i) => i.rejected).length
+  const mode = meeting.mode ?? FALLBACK_MODES[0]
+  const kinds = mode.kinds
+  const shownKinds = new Set(kinds.map((k) => k.id))
+  const rejectedCount = meeting.items.filter((i) => i.rejected && shownKinds.has(i.kind)).length
   const current = meeting.items.filter((i) => !i.superseded_by)
   const grouped = useMemo(
     () =>
-      KINDS.map((k) => ({
+      kinds.map((k) => ({
         ...k,
-        items: current.filter((i) => i.kind === k.id && (showRejected || !i.rejected)),
+        items: current
+          .filter((i) => i.kind === k.id && (showRejected || !i.rejected))
+          .sort((a, b) => (a.start_time ?? "").localeCompare(b.start_time ?? "")),
       })),
-    [current, showRejected],
+    [kinds, current, showRejected],
   )
+  const [readAs, setReadAs] = useState(mode.id)
+  useEffect(() => setReadAs(mode.id), [mode.id])
 
   return (
     <div className="flex flex-col gap-4">
@@ -299,16 +454,43 @@ function MeetingView({
               )}
             </div>
           </div>
-          <button
-            onClick={onReprocess}
-            className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 font-mono text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
-          >
-            <RotateCw className="h-3 w-3" /> process again
-          </button>
+          <div className="flex items-center gap-1.5">
+            <label className="sr-only" htmlFor="read-as">Read this session as</label>
+            <select
+              id="read-as"
+              value={readAs}
+              onChange={(e) => setReadAs(e.target.value)}
+              title="What kind of session this is decides what is taken from it"
+              className="rounded-md border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground focus:border-primary/50 focus:outline-none"
+            >
+              {modes.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={() => onReprocess(readAs !== mode.id ? readAs : undefined)}
+              disabled={running(meeting.status)}
+              className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 font-mono text-[11px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground disabled:opacity-50"
+            >
+              <RotateCw className="h-3 w-3" />
+              {readAs !== mode.id ? `process again as ${modes.find((m) => m.id === readAs)?.label.toLowerCase() ?? readAs}` : "process again"}
+            </button>
+          </div>
         </div>
         {meeting.error && <p className="mt-2 text-sm text-destructive">{meeting.error}</p>}
+        {running(meeting.status) && meeting.progress && (
+          <div className="mt-3 flex flex-col gap-1.5">
+            <ProgressBar progress={meeting.progress} />
+            <p className="text-xs text-muted-foreground">
+              Findings appear once every part is read, because duplicates and reversed decisions can only be
+              settled across the whole meeting. Each part&apos;s summary shows below as soon as it is read.
+            </p>
+          </div>
+        )}
         <div className="mt-3 flex flex-wrap gap-2">
-          {KINDS.map((k) => (
+          {kinds.map((k) => (
             <span key={k.id} className="flex items-baseline gap-1.5 rounded-md border border-border bg-background px-2 py-0.5">
               <span className="font-mono text-sm font-semibold text-foreground">
                 {current.filter((i) => i.kind === k.id && !i.rejected).length}
@@ -327,6 +509,10 @@ function MeetingView({
         </div>
       </div>
 
+      {meeting.overview && (meeting.overview.headline || meeting.overview.summary) && !running(meeting.status) && (
+        <OverviewCard overview={meeting.overview} />
+      )}
+
       {grouped.map((group) =>
         group.items.length === 0 ? null : (
           <div key={group.id} className="flex flex-col gap-2">
@@ -343,8 +529,131 @@ function MeetingView({
           </div>
         ),
       )}
-      {current.length === 0 && (
-        <p className="text-sm text-muted-foreground">Nothing was found in this meeting yet.</p>
+      {current.length === 0 && !running(meeting.status) && (
+        <p className="text-sm text-muted-foreground">Nothing was found in this meeting.</p>
+      )}
+
+      {meeting.parts && meeting.parts.length > 0 && (
+        <Parts
+          parts={meeting.parts}
+          pointsLabel={mode.points_kind ? null : mode.points_label}
+          defaultOpen={running(meeting.status)}
+        />
+      )}
+    </div>
+  )
+}
+
+/** The session in a few lines. Written from the part notes, so it says so. */
+function OverviewCard({ overview }: { overview: Overview }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      {overview.headline && <p className="text-sm font-medium text-foreground">{overview.headline}</p>}
+      {overview.summary && <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">{overview.summary}</p>}
+      {overview.themes.length > 0 && (
+        <>
+          <button
+            onClick={() => setOpen((o) => !o)}
+            aria-expanded={open}
+            className="mt-2 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+          >
+            {open ? "▾" : "▸"} {overview.themes.length} theme{overview.themes.length > 1 ? "s" : ""}
+          </button>
+          {open && (
+            <div className="mt-2 flex flex-col gap-3">
+              {overview.themes.map((t) => (
+                <div key={t.title}>
+                  <p className="text-sm text-foreground">{t.title}</p>
+                  <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-5 text-sm text-muted-foreground">
+                    {t.points.map((pt, i) => (
+                      <li key={i}>{pt}</li>
+                    ))}
+                  </ul>
+                </div>
+              ))}
+            </div>
+          )}
+        </>
+      )}
+      <p className="mt-2 font-mono text-[10px] text-muted-foreground/70">
+        Written from the part notes below, not from the transcript, and never added to the graph.
+      </p>
+    </div>
+  )
+}
+
+/** What each part of the transcript was about, in order: the session as it was read. */
+function Parts({
+  parts,
+  pointsLabel,
+  defaultOpen,
+}: {
+  parts: Part[]
+  pointsLabel: string | null
+  defaultOpen: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  const read = parts.filter((p) => p.status === "done" || p.status === "error").length
+  return (
+    <div className="flex flex-col gap-2">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        className="flex items-center gap-2 text-left font-mono text-[11px] uppercase tracking-wider text-muted-foreground hover:text-foreground"
+      >
+        <span>{open ? "▾" : "▸"}</span>
+        Part by part &middot; {read} of {parts.length} read
+      </button>
+      {open && (
+        <ol className="flex flex-col gap-2">
+          {parts.map((p) => (
+            <li key={p.idx} className="rounded-lg border border-border bg-card p-3">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[11px] text-muted-foreground">
+                <span className="text-foreground">part {p.idx + 1}</span>
+                {(p.start_time || p.end_time) && (
+                  <span className="flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
+                    {clock(p.start_time)}–{clock(p.end_time)}
+                  </span>
+                )}
+                {p.speakers && p.speakers.length > 0 && (
+                  <span className="flex items-center gap-1">
+                    <Users className="h-3 w-3" />
+                    {p.speakers.join(", ")}
+                  </span>
+                )}
+                <span
+                  className={`ml-auto rounded-full border px-1.5 py-0.5 text-[10px] ${
+                    p.error
+                      ? STATUS_STYLE.error
+                      : STATUS_STYLE[p.status === "pending" ? "pending" : "done"]
+                  }`}
+                >
+                  {p.error ? "failed" : p.status === "pending" ? "waiting" : "read"}
+                </span>
+              </div>
+              {p.topic && <p className="mt-1.5 text-sm font-medium text-foreground">{p.topic}</p>}
+              {p.summary ? (
+                <p className="mt-1 text-sm leading-relaxed text-muted-foreground">{p.summary}</p>
+              ) : p.error ? (
+                <p className="mt-1.5 text-xs text-destructive">{p.error}</p>
+              ) : (
+                <p className="mt-1.5 text-xs text-muted-foreground">Not read yet.</p>
+              )}
+              {pointsLabel && p.points.length > 0 && (
+                <div className="mt-2">
+                  <p className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{pointsLabel}</p>
+                  <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-5 text-sm text-foreground">
+                    {p.points.map((pt) => (
+                      <li key={pt.id}>{pt.statement}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </li>
+          ))}
+        </ol>
       )}
     </div>
   )
@@ -402,6 +711,17 @@ function ItemCard({
         )}
         {item.mentions > 1 && <span>said {item.mentions}&times;</span>}
       </div>
+      {item.kind === "question" && (
+        <p className="mt-1.5 text-sm text-muted-foreground">
+          {item.rationale ? (
+            <>
+              <span className="font-mono text-[10px] uppercase tracking-wider">answer</span> {item.rationale}
+            </>
+          ) : (
+            <span className="text-amber-400">not answered in the session</span>
+          )}
+        </p>
+      )}
       {item.quote && (
         <blockquote className="mt-2 border-l-2 border-primary/40 pl-2.5 text-xs italic text-muted-foreground">
           &ldquo;{item.quote}&rdquo;
@@ -411,8 +731,24 @@ function ItemCard({
   )
 }
 
-function AddMeeting({ workspace, onAdded }: { workspace: string; onAdded: (id: string) => void }) {
+function AddMeeting({
+  workspace,
+  workspaces,
+  modes,
+  onAdded,
+}: {
+  workspace: string
+  workspaces: { id: string; name?: string }[]
+  modes: ModeInfo[]
+  onAdded: (id: string, target: string) => void
+}) {
+  const [mode, setMode] = useState("meeting")
   const [open, setOpen] = useState(false)
+  // Asked every time, defaulting to the graph on screen: a meeting filed in
+  // the wrong workspace is invisible from the right one.
+  const [target, setTarget] = useState(workspace)
+  useEffect(() => setTarget(workspace), [workspace])
+  const choices = workspaces.some((w) => w.id === workspace) ? workspaces : [{ id: workspace }, ...workspaces]
   const [title, setTitle] = useState("")
   const [date, setDate] = useState("")
   const [text, setText] = useState("")
@@ -433,16 +769,16 @@ function AddMeeting({ workspace, onAdded }: { workspace: string; onAdded: (id: s
     setBusy(true)
     setErr(null)
     try {
-      const res = await api<{ transcript_id?: string; id?: string }>(scoped("/ingest/transcripts", workspace), {
+      const res = await api<{ transcript_id?: string; id?: string }>(scoped("/ingest/transcripts", target), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: title.trim(), content: text, occurred_at: date || null }),
+        body: JSON.stringify({ title: title.trim(), content: text, occurred_at: date || null, mode }),
       })
       setTitle("")
       setDate("")
       setText("")
       setOpen(false)
-      onAdded(res.transcript_id ?? res.id ?? "")
+      onAdded(res.transcript_id ?? res.id ?? "", target)
     } catch (e) {
       setErr((e as Error).message)
     } finally {
@@ -469,6 +805,38 @@ function AddMeeting({ workspace, onAdded }: { workspace: string; onAdded: (id: s
         placeholder="Meeting title"
         className="rounded-md border border-border bg-background px-2.5 py-1.5 text-sm text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
       />
+      <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+        kind
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+          className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:border-primary/50 focus:outline-none"
+        >
+          {modes.map((m) => (
+            <option key={m.id} value={m.id}>
+              {m.label}
+            </option>
+          ))}
+        </select>
+      </label>
+      <p className="-mt-1 text-[11px] leading-snug text-muted-foreground">
+        {modes.find((m) => m.id === mode)?.description}
+      </p>
+      <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+        workspace
+        <select
+          value={target}
+          onChange={(e) => setTarget(e.target.value)}
+          className="flex-1 rounded-md border border-border bg-background px-2 py-1 text-xs text-foreground focus:border-primary/50 focus:outline-none"
+        >
+          {choices.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.name && w.name !== w.id ? `${w.name} (${w.id})` : w.id}
+              {w.id === workspace ? " · on screen" : ""}
+            </option>
+          ))}
+        </select>
+      </label>
       <input
         type="date"
         value={date}

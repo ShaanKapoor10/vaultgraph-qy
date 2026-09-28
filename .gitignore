@@ -79,3 +79,7 @@ backend/data/.graph-touch-*
 # by hand, so they miss the .venv/ and node_modules/ rules above and turn up
 # as ~48,000 untracked files.
 *-dead/
+
+# Labelled eval cases built from REAL recordings (names, internal sessions):
+# kept on this machine, never committed. Synthetic cases live in ingest/cases/.
+backend/data/eval-private/

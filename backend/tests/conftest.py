@@ -214,3 +214,22 @@ def _no_detached_processes(monkeypatch):
     from brahmastra import checkpoint
 
     monkeypatch.setattr(checkpoint, "_spawn", lambda module_args: None)
+
+
+@pytest.fixture(autouse=True)
+def _no_llm_session_passes(monkeypatch, request):
+    """
+    The notes pass and the overview (ingest/reader.py, ingest/overview.py) are
+    extra calls beside comprehension. Tests that fake comprehension would
+    otherwise reach a real provider through them -- and, with no key, see every
+    meeting come back "partial". Stubbed empty here; a test that exercises them
+    marks itself `real_session_passes` and fakes the chat it needs.
+    """
+    if "real_session_passes" in request.keywords:
+        return
+    from brahmastra.ingest import overview, reader
+
+    monkeypatch.setattr(reader, "_one_pass_with_prefix",
+                        lambda *a, **k: ({"topic": "", "summary": "", "points": []}, None))
+    monkeypatch.setattr(overview, "write_overview",
+                        lambda *a, **k: {"headline": "", "summary": "", "themes": []})

@@ -347,8 +347,8 @@ export function Dashboard({
                 )}
                 {view === "links" && <PredictedLinks links={result.predictedLinks} onSelect={select} />}
                 {view === "resolution" && <EntityResolution resolution={result.resolution} onSelect={select} />}
-                {view === "notes" && <NotesPanel notes={notes} triples={triples} onAddNote={addNote} />}
-                {view === "meetings" && <MeetingsPanel workspace={workspace} backendAvailable={backendAvailable} />}
+                {view === "notes" && <NotesPanel notes={notes} triples={triples} onAddNote={addNote} workspace={workspace} backendAvailable={backendAvailable} />}
+                {view === "meetings" && <MeetingsPanel workspace={workspace} workspaces={workspaces} backendAvailable={backendAvailable} />}
                 {view === "diagnostics" && <DiagnosticsPanel workspace={workspace} backendAvailable={backendAvailable} />}
               </div>
             </div>

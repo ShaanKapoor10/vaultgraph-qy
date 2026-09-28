@@ -58,6 +58,10 @@ _BY_KIND = {
     "action_item": ("action_item", "assigned_to"),
     "risk": ("risk", "raised_by"),
     "open_question": ("question", "asked_by"),
+    # A lecture's audience question (ingest/modes.py). A lecture's points are
+    # not here: they reach the graph through the part notes, where extraction
+    # reads them as the facts they are.
+    "question": ("question", "asked_by"),
 }
 
 # Node names are the statements themselves; a runaway one should not become a

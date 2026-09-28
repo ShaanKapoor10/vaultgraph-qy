@@ -176,6 +176,8 @@ class ChunkUnderstanding:
     """Everything one chunk yielded, including what was thrown away and why."""
     chunk_index: int
     summary: str = ""
+    # What this part is about, from the notes pass: "Swap settlement".
+    topic: str = ""
     topics: list[str] = field(default_factory=list)
     participants: list[str] = field(default_factory=list)
     artifacts: list[Artifact] = field(default_factory=list)
@@ -281,32 +283,46 @@ _FIELD_BY_KIND = {
 }
 
 
-def build_understanding(payload: dict[str, Any], chunk: Chunk) -> ChunkUnderstanding:
+# Where each kind sits in a reply: (list key, statement field). The meeting
+# kinds are the default; a mode's passes name their own (see ingest/modes.py).
+MEETING_SPECS: dict[str, tuple[str, str]] = {
+    "decision": ("decisions", "statement"),
+    "action_item": ("action_items", "task"),
+    "risk": ("risks", "description"),
+    "open_question": ("open_questions", "question"),
+}
+POINT_SPECS: dict[str, tuple[str, str]] = {"point": ("points", "point")}
+AUDIENCE_SPECS: dict[str, tuple[str, str]] = {
+    "question": ("questions", "question"),
+    "action_item": ("action_items", "task"),
+}
+
+
+def build_understanding(payload: dict[str, Any], chunk: Chunk,
+                        specs: dict[str, tuple[str, str]] | None = None) -> ChunkUnderstanding:
     """
     Turn a parsed reply into verified artifacts, dropping anything unproven.
 
     Separated from the LLM call so the verification rules -- the part that
     actually protects the knowledge base -- can be tested exhaustively without
-    a provider.
+    a provider. Every kind, in every mode, passes the same checks.
     """
     result = ChunkUnderstanding(chunk_index=chunk.index)
     result.summary = (payload.get("summary") or "").strip()
     result.topics = _clean_strings(payload.get("topics"))
     result.participants = _clean_strings(payload.get("participants"))
+    topic = payload.get("topic")
+    if isinstance(topic, str) and topic.strip():
+        result.topic = topic.strip()
 
     source = chunk.text
-    plural = {
-        "decision": "decisions",
-        "action_item": "action_items",
-        "risk": "risks",
-        "open_question": "open_questions",
-    }
+    specs = specs or MEETING_SPECS
 
-    for kind in ARTIFACT_KINDS:
-        for item in _as_list(payload, plural[kind]):
-            statement = (item.get(_FIELD_BY_KIND[kind]) or "").strip()
+    for kind, (list_key, field_name) in specs.items():
+        for item in _as_list(payload, list_key):
+            statement = (item.get(field_name) or "").strip()
             quote = (item.get("quote") or "").strip() or None
-            owner = (item.get("owner") or "").strip() or None
+            owner = (item.get("owner") or item.get("asked_by") or "").strip() or None
 
             if not statement:
                 result.rejected.append(f"{kind}: empty statement")
@@ -355,19 +371,34 @@ def build_understanding(payload: dict[str, Any], chunk: Chunk) -> ChunkUnderstan
                     f"{kind}: owner {owner!r} did not speak the cited quote"
                 )
                 owner = None
-            if not owner:
+            if not owner and kind != "point":
                 # Recovered rather than left blank. A first-person quote names
                 # its owner by who said it, so an artifact quoting "I'll update
                 # the roadmap" belongs to whoever spoke that line -- including
                 # the one whose wrong owner was just removed above.
                 owner = evidence.owner_from_speaker(quote, chunk)
+            if kind == "point":
+                owner = None        # a point is taught or said, not owned
+
+            rationale = (item.get("rationale") or "").strip() or None
+            if kind == "question":
+                # The answer is held to the passage like everything else: its
+                # own quote must be found, or the question is kept unanswered.
+                answer = (item.get("answer") or "").strip()
+                answer_quote = (item.get("answer_quote") or "").strip()
+                if answer and quote_is_grounded(answer_quote, source):
+                    rationale = answer
+                elif answer:
+                    result.rejected.append(
+                        f"question: answer's quote not found in the passage — {statement[:60]!r}")
+                    rationale = None
 
             result.artifacts.append(Artifact(
                 kind=kind,
                 statement=statement,
                 owner=owner,
                 due=(item.get("due") or "").strip() or None,
-                rationale=(item.get("rationale") or "").strip() or None,
+                rationale=rationale,
                 quote=quote,
                 chunk_index=chunk.index,
                 speakers=chunk.speakers,

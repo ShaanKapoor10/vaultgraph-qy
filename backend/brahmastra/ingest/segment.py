@@ -152,44 +152,108 @@ def detect_format(text: str) -> str:
     return "prose"
 
 
+# WebVTT names the speaker in a voice tag: `<v Priya Menon>Hi.</v>`, or
+# `<v.loud Name>` with a class. Teams, Webex and YouTube all emit this.
+_VTT_VOICE = re.compile(r"<v(?:\.[\w.-]+)?\s+([^>]+)>")
+_VTT_TAG = re.compile(r"</?[a-z][^>]*>", re.I)
+_VTT_SKIP_BLOCKS = ("WEBVTT", "NOTE", "STYLE", "REGION")
+
+# Consecutive cues by one speaker are joined into one turn, up to this many
+# characters. Teams cuts speech every second or two -- "Leo and Tom enter
+# into a swap" / "contract." -- and a cue per turn handed the model sentence
+# fragments. Capped so a lecturer's twenty-minute monologue still keeps
+# timestamps every few sentences.
+_CUE_MERGE_CHARS = 700
+
+
+def _speaker_name(raw: str) -> str:
+    """One spelling per person: Teams wrote "Priya  Menon" with two spaces."""
+    return " ".join(raw.split())
+
+
+def _cue_payload(lines: list[str]) -> tuple[str | None, str]:
+    joined = " ".join(part.strip() for part in lines).strip()
+    voice = _VTT_VOICE.search(joined)
+    speaker = _speaker_name(voice.group(1)) if voice else None
+    body = " ".join(_VTT_TAG.sub(" ", joined).split())
+    if speaker is None:
+        m = _SPEAKER_LINE.match(body)
+        if m:
+            speaker, body = _speaker_name(m.group("speaker")), m.group("text").strip()
+    return speaker, body
+
+
 def _parse_cues(text: str) -> list[Turn]:
-    """WebVTT and SRT: a timestamp line followed by the spoken text."""
-    turns: list[Turn] = []
-    lines = text.splitlines(keepends=True)
+    """
+    WebVTT and SRT, read cue by cue: a block of lines separated by blank lines,
+    holding an optional identifier, the timing line, then the payload.
+
+    Only the payload is speech. Everything before the timing line is a cue
+    identifier -- SRT's sequence number, or Teams' `3f1c9a20-.../13-0` -- and
+    was being read as speech: in a real Teams transcript half the turns the
+    model saw were UUIDs, and no turn had a speaker, because the `<v Name>`
+    voice tag went unrecognised and stayed in the text.
+    """
+    # Driven by the TIMING lines, not by blank lines. A file saved with doubled
+    # line endings ("\r\r\n", what a Windows text-mode write of a CRLF file
+    # produces) puts a blank line after every line, and reading blocks by blank
+    # lines then found no cue with a payload at all: zero turns, silently.
+    lines: list[tuple[str, int, int]] = []          # (stripped, start, end), blanks marked ""
     offset = 0
-    pending_ts: str | None = None
-    buffer: list[str] = []
-    buf_start = 0
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        lines.append((line.strip(), offset, offset + len(body)))
+        offset += len(line)
+    filled = [i for i, (ln, _, _) in enumerate(lines) if ln]
+
+    cues: list[Turn] = []
+    ts: str | None = None
+    payload: list[tuple[str, int, int]] = []
+    skipping = False
 
     def flush() -> None:
-        nonlocal buffer, pending_ts, buf_start
-        if buffer:
-            joined = " ".join(part.strip() for part in buffer).strip()
-            if joined:
-                speaker = None
-                m = _SPEAKER_LINE.match(joined)
-                if m:
-                    speaker = m.group("speaker")
-                    joined = m.group("text").strip()
-                turns.append(Turn(speaker, pending_ts, joined, buf_start,
-                                  buf_start + len(joined)))
-        buffer = []
+        nonlocal payload
+        if ts is not None and payload:
+            speaker, spoken = _cue_payload([ln for ln, _, _ in payload])
+            if spoken:
+                cues.append(Turn(speaker, ts, spoken, payload[0][1], payload[-1][2]))
+        payload = []
 
-    for line in lines:
-        stripped = line.strip()
-        cue = _VTT_CUE.search(stripped)
+    for pos, i in enumerate(filled):
+        ln = lines[i][0]
+        if i > 0 and not lines[i - 1][0] and ln.split(" ", 1)[0] in _VTT_SKIP_BLOCKS:
+            skipping = True                  # NOTE / STYLE / REGION run to a blank line
+        if skipping:
+            if i + 1 < len(lines) and not lines[i + 1][0]:
+                skipping = False
+            continue
+        cue = _VTT_CUE.search(ln)
         if cue:
             flush()
-            pending_ts = cue.group("start")
-            buf_start = offset
-        elif stripped and stripped != "WEBVTT" and not stripped.isdigit():
-            if not buffer:
-                buf_start = offset
-            buffer.append(stripped)
-        elif not stripped:
-            flush()
-        offset += len(line)
+            ts = cue.group("start")
+            continue
+        nxt = filled[pos + 1] if pos + 1 < len(filled) else None
+        after_blank = i > 0 and not lines[i - 1][0]
+        if (nxt is not None and _VTT_CUE.search(lines[nxt][0])
+                and (ts is None or (payload and after_blank))):
+            # A cue identifier, never speech: it only ever comes before the
+            # first cue, or after a finished payload and a blank line. A
+            # payload line that merely precedes the next timing line is speech.
+            continue
+        if ln.split(" ", 1)[0] == "WEBVTT":
+            continue
+        payload.append(lines[i])
     flush()
+
+    turns: list[Turn] = []
+    for cue in cues:
+        last = turns[-1] if turns else None
+        if (last is not None and last.speaker == cue.speaker
+                and len(last.text) + len(cue.text) < _CUE_MERGE_CHARS):
+            last.text = f"{last.text} {cue.text}"
+            last.end_char = cue.end_char
+        else:
+            turns.append(cue)
     return turns
 
 

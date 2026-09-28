@@ -127,7 +127,30 @@ CREATE TABLE IF NOT EXISTS artifact_rejections (
     rejected_at   TEXT NOT NULL,
     PRIMARY KEY (workspace_id, artifact_id)
 );
+
+-- The whole session in a few lines, written from the part notes after every
+-- part is read (ingest/overview.py). DERIVED: rewritten by every run.
+CREATE TABLE IF NOT EXISTS session_overviews (
+    workspace_id  TEXT NOT NULL DEFAULT 'default',
+    transcript_id TEXT NOT NULL,
+    headline      TEXT,
+    summary       TEXT,
+    themes        TEXT NOT NULL DEFAULT '[]',
+    error         TEXT,
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (workspace_id, transcript_id)
+);
 """
+
+# Columns added after the tables above were first deployed. Added in place when
+# missing -- never by recreating a table, since `transcripts` is source data.
+_ADDED_COLUMNS = {
+    # What kind of session it is (ingest/modes.py). NULL is a meeting: every
+    # transcript stored before modes existed was read as one.
+    "transcripts": {"mode": "TEXT"},
+    # What each part was about, from the notes pass.
+    "transcript_chunks": {"topic": "TEXT"},
+}
 
 _POSTGRES_SCHEMA = _SQLITE_SCHEMA.replace("INTEGER", "INTEGER")
 
@@ -140,6 +163,7 @@ class Transcript:
     source: str = "upload"
     source_ref: str | None = None
     occurred_at: str | None = None
+    mode: str | None = None
 
 
 def _now() -> str:
@@ -331,6 +355,14 @@ class IngestStore:
         with self._cursor() as cur:
             for statement in filter(None, (s.strip() for s in schema.split(";"))):
                 cur.execute(statement)
+            for table, columns in _ADDED_COLUMNS.items():
+                for column, ddl in columns.items():
+                    if self.backend == "postgres":
+                        cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
+                    else:
+                        cur.execute(f"PRAGMA table_info({table})")
+                        if column not in {row[1] for row in cur.fetchall()}:
+                            cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
         self._ready = True
 
     def describe(self) -> str:
@@ -346,11 +378,11 @@ class IngestStore:
                 """
                 INSERT INTO transcripts
                     (id, workspace_id, title, content, source, source_ref,
-                     occurred_at, created_at, status)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+                     occurred_at, created_at, status, mode)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
                 """),
                 (tid, self.workspace, t.title, t.content, t.source,
-                 t.source_ref, t.occurred_at, _now()),
+                 t.source_ref, t.occurred_at, _now(), t.mode),
             )
         return tid
 
@@ -367,7 +399,7 @@ class IngestStore:
                          limit: int = 50) -> list[dict[str, Any]]:
         self.init_schema()
         sql = ("SELECT id, title, source, source_ref, occurred_at, created_at, "
-               "status, error, chunk_count FROM transcripts WHERE workspace_id = ?")
+               "status, error, chunk_count, mode FROM transcripts WHERE workspace_id = ?")
         params: list[Any] = [self.workspace]
         if status:
             sql += " AND status = ?"
@@ -392,11 +424,20 @@ class IngestStore:
         with self._cursor() as cur:
             cur.execute(self._ph(sql), tuple(params))
 
+    def set_transcript_mode(self, transcript_id: str, mode: str) -> None:
+        """A person's choice of how the session is read. Takes effect on the next run."""
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                "UPDATE transcripts SET mode = ? WHERE workspace_id = ? AND id = ?"),
+                (mode, self.workspace, transcript_id))
+
     def delete_transcript(self, transcript_id: str) -> None:
         """Removes the transcript and everything derived from it."""
         self.init_schema()
         with self._cursor() as cur:
-            for table in ("meeting_artifacts", "transcript_chunks", "transcripts"):
+            for table in ("meeting_artifacts", "transcript_chunks", "session_overviews",
+                          "transcripts"):
                 column = "id" if table == "transcripts" else "transcript_id"
                 cur.execute(self._ph(
                     f"DELETE FROM {table} WHERE workspace_id = ? AND {column} = ?"),
@@ -421,7 +462,7 @@ class IngestStore:
         """
         self.init_schema()
         with self._cursor() as cur:
-            for table in ("meeting_artifacts", "transcript_chunks"):
+            for table in ("meeting_artifacts", "transcript_chunks", "session_overviews"):
                 cur.execute(self._ph(
                     f"DELETE FROM {table} WHERE workspace_id = ? AND transcript_id = ?"),
                     (self.workspace, transcript_id))
@@ -450,6 +491,7 @@ class IngestStore:
                     end_char = excluded.end_char,
                     status = 'pending',
                     summary = NULL,
+                    topic = NULL,
                     note_id = NULL,
                     error = NULL
                 """),
@@ -457,19 +499,66 @@ class IngestStore:
                  start_time, end_time, start_char, end_char),
             )
 
+    def mark_chunks_pending(self, transcript_id: str) -> None:
+        """
+        At the start of a run: nothing is read yet. Without this a re-run shows
+        the LAST run's parts as already done, so its progress starts at 100%.
+        Summaries are kept until each part is read again.
+        """
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                "UPDATE transcript_chunks SET status = 'pending', error = NULL "
+                "WHERE workspace_id = ? AND transcript_id = ?"),
+                (self.workspace, transcript_id))
+
     def set_chunk_result(self, transcript_id: str, idx: int, status: str,
                          summary: str | None = None, note_id: str | None = None,
-                         error: str | None = None) -> None:
+                         error: str | None = None, topic: str | None = None) -> None:
         self.init_schema()
         with self._cursor() as cur:
             cur.execute(self._ph(
                 """
                 UPDATE transcript_chunks
-                   SET status = ?, summary = ?, note_id = ?, error = ?
+                   SET status = ?, summary = ?, note_id = ?, error = ?, topic = ?
                  WHERE workspace_id = ? AND transcript_id = ? AND idx = ?
                 """),
-                (status, summary, note_id, error, self.workspace, transcript_id, idx),
+                (status, summary, note_id, error, topic, self.workspace, transcript_id, idx),
             )
+
+    def save_overview(self, transcript_id: str, overview: dict[str, Any]) -> None:
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                """
+                INSERT INTO session_overviews
+                    (workspace_id, transcript_id, headline, summary, themes, error, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (workspace_id, transcript_id) DO UPDATE SET
+                    headline = excluded.headline, summary = excluded.summary,
+                    themes = excluded.themes, error = excluded.error,
+                    created_at = excluded.created_at
+                """),
+                (self.workspace, transcript_id, overview.get("headline"),
+                 overview.get("summary"), json.dumps(overview.get("themes") or []),
+                 overview.get("error"), _now()))
+
+    def get_overview(self, transcript_id: str) -> dict[str, Any] | None:
+        self.init_schema()
+        with self._cursor() as cur:
+            cur.execute(self._ph(
+                "SELECT headline, summary, themes, error, created_at FROM session_overviews "
+                "WHERE workspace_id = ? AND transcript_id = ?"),
+                (self.workspace, transcript_id))
+            rows = self._rows(cur)
+        if not rows:
+            return None
+        row = rows[0]
+        try:
+            row["themes"] = json.loads(row.get("themes") or "[]")
+        except ValueError:
+            row["themes"] = []
+        return row
 
     def get_chunks(self, transcript_id: str) -> list[dict[str, Any]]:
         self.init_schema()

@@ -296,3 +296,22 @@ def test_a_degraded_chunk_does_not_report_the_whole_transcript_as_failed(
     assert body["status"] == "done", "a degraded chunk was reported as a failure"
     assert body["complete"] is False, "but the record is not whole"
     assert body["artifact_counts"]["decision"] == 1, "and its artifacts were kept"
+
+
+# -- progress while a meeting is processed (findings only land at the end) ------
+
+def test_progress_says_which_part_is_being_read():
+    from brahmastra.ingest.routes import progress
+    chunks = [{"idx": 0, "status": "done"}, {"idx": 1, "status": "error"},
+              {"idx": 2, "status": "pending"}, {"idx": 9, "status": "done"}]
+    p = progress({"status": "processing", "chunk_count": 3}, chunks)
+    assert p["stage"] == "reading part 3 of 3"
+    assert (p["parts_read"], p["parts_failed"], p["parts_total"]) == (2, 1, 3)
+
+
+def test_progress_before_splitting_and_after_reading():
+    from brahmastra.ingest.routes import progress
+    assert "splitting" in progress({"status": "processing", "chunk_count": 0}, [])["stage"]
+    done = [{"idx": 0, "status": "done"}]
+    assert "merging" in progress({"status": "processing", "chunk_count": 1}, done)["stage"]
+    assert progress({"status": "pending", "chunk_count": 0}, [])["stage"] == "queued"
