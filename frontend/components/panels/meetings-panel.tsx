@@ -10,6 +10,7 @@ import {
   Mic,
   RefreshCw,
   RotateCw,
+  Search,
   Undo2,
   Upload,
   Users,
@@ -382,6 +383,7 @@ export function MeetingsPanel({
           {meeting && (
             <MeetingView
               meeting={meeting}
+              workspace={workspace}
               modes={modes}
               busyItem={busyItem}
               showRejected={showRejected}
@@ -398,6 +400,7 @@ export function MeetingsPanel({
 
 function MeetingView({
   meeting,
+  workspace,
   modes,
   busyItem,
   showRejected,
@@ -406,6 +409,7 @@ function MeetingView({
   onReprocess,
 }: {
   meeting: Meeting
+  workspace: string
   modes: ModeInfo[]
   busyItem: string | null
   showRejected: boolean
@@ -513,6 +517,8 @@ function MeetingView({
         <OverviewCard overview={meeting.overview} />
       )}
 
+      <SaidSearch transcriptId={meeting.id} workspace={workspace} />
+
       {grouped.map((group) =>
         group.items.length === 0 ? null : (
           <div key={group.id} className="flex flex-col gap-2">
@@ -539,6 +545,86 @@ function MeetingView({
           pointsLabel={mode.points_kind ? null : mode.points_label}
           defaultOpen={running(meeting.status)}
         />
+      )}
+    </div>
+  )
+}
+
+/** One raw transcript passage, as GET /ingest/passages returns it. */
+interface Passage {
+  transcript_id: string
+  start_time: string | null
+  end_time: string | null
+  speakers: string | null
+  text: string
+}
+
+/**
+ * Search the words themselves. Everything else on this page passed through a
+ * model; this is what was actually said, with who said it and when.
+ */
+function SaidSearch({ transcriptId, workspace }: { transcriptId: string; workspace: string }) {
+  const [q, setQ] = useState("")
+  const [hits, setHits] = useState<Passage[] | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    setQ("")
+    setHits(null)
+  }, [transcriptId])
+
+  const run = async () => {
+    if (!q.trim()) return
+    setBusy(true)
+    setErr(null)
+    try {
+      setHits(
+        await api<Passage[]>(
+          scoped(`/ingest/passages?q=${encodeURIComponent(q.trim())}&transcript_id=${encodeURIComponent(transcriptId)}&limit=5`, workspace),
+        ),
+      )
+    } catch (e) {
+      setErr((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1.5 focus-within:border-primary/50">
+        {busy ? (
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-muted-foreground" />
+        ) : (
+          <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        )}
+        <input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && run()}
+          placeholder="Search what was said in this session"
+          aria-label="Search what was said in this session"
+          className="flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground"
+        />
+      </div>
+      {err && <p className="text-xs text-destructive">{err}</p>}
+      {hits && hits.length === 0 && <p className="text-xs text-muted-foreground">Nothing said matches that.</p>}
+      {hits && hits.length > 0 && (
+        <ol className="flex flex-col gap-1.5">
+          {hits.map((h, i) => (
+            <li key={i} className="rounded-lg border border-border bg-card p-2.5">
+              <p className="font-mono text-[10px] text-muted-foreground">
+                {clock(h.start_time)}
+                {h.end_time && h.end_time !== h.start_time ? `–${clock(h.end_time)}` : ""}
+                {h.speakers ? ` · ${h.speakers}` : ""}
+              </p>
+              <p className="mt-1 whitespace-pre-line text-xs leading-relaxed text-foreground">
+                {h.text.replace(/^\[[^\]]+\] /gm, "")}
+              </p>
+            </li>
+          ))}
+        </ol>
       )}
     </div>
   )

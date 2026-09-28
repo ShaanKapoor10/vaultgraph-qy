@@ -19,6 +19,7 @@ Usage: from brahmastra.rag import answer_question
 
 from __future__ import annotations
 
+import os
 import re
 from typing import Any
 
@@ -32,6 +33,7 @@ from brahmastra.llm import chat, llm_available
 MAX_MATCHED_ENTITIES = 6     # how many graph nodes a question can anchor to
 MAX_FACTS = 60               # cap subgraph facts sent to the LLM
 MIN_ENTITY_LEN = 3           # ignore 1-2 char tokens when matching ("a", "is")
+MAX_PASSAGES = 4             # raw transcript passages given beside the facts
 
 # Words that signal a broad/thematic question → prefer GLOBAL search.
 _GLOBAL_HINTS = {
@@ -228,12 +230,60 @@ def _is_global(question: str, matched: list[dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 _LOCAL_SYSTEM = (
-    "You answer questions about a personal knowledge graph using ONLY the facts "
-    "provided. Each fact is numbered and tagged with a source note id like [n:abc123]. "
-    "Write a concise, direct answer. After any claim, cite the supporting note id(s) in "
-    "square brackets. If the facts do not contain the answer, say plainly that the graph "
-    "has no information on it. Do not invent facts."
+    "You answer questions about a personal knowledge graph using ONLY the evidence "
+    "provided: numbered facts tagged with a source note id like [n:abc123], and, when "
+    "given, excerpts of what was actually said in meetings, tagged like [t:2]. "
+    "Write a concise, direct answer. After any claim, cite the supporting id(s) in "
+    "square brackets. Prefer the excerpts for who said what, numbers and reasons; they "
+    "are the words themselves. If the evidence does not contain the answer, say plainly "
+    "that the graph has no information on it. Do not invent facts."
 )
+
+
+def _passages(question: str) -> list[dict[str, Any]]:
+    """
+    What was actually SAID that bears on the question (ingest/passages.py).
+
+    Measured before this existed (ingest/qa_eval.py, Q3 planning): questions
+    about detail no item carries were answered 2 of 5 times from the graph and
+    5 of 5 from the transcript. The graph keeps what was extracted; this keeps
+    what was said. RAG_PASSAGES=0 turns it off, which is how the two are
+    compared.
+    """
+    if os.environ.get("RAG_PASSAGES", "1").strip() == "0":
+        return []
+    try:
+        from brahmastra.ingest.passages import search
+
+        return search(question, limit=MAX_PASSAGES)
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def _passage_lines(passages: list[dict[str, Any]]) -> list[str]:
+    lines = []
+    for i, p in enumerate(passages, 1):
+        where = f"{p.get('title') or 'a meeting'}, {p.get('start_time') or ''}".rstrip(", ")
+        lines.append(f"[t:{i}] ({where})\n{p['text']}")
+    return lines
+
+
+def _passage_citations(passages: list[dict[str, Any]], answer: str) -> list[dict[str, Any]]:
+    cited = {int(n) for n in re.findall(r"\[t:(\d+)\]", answer or "")}
+    return [{"transcript_id": p["transcript_id"], "title": p.get("title"),
+             "start_time": p.get("start_time"), "end_time": p.get("end_time"),
+             "speakers": p.get("speakers")}
+            for i, p in enumerate(passages, 1) if not cited or i in cited]
+
+
+def _answer_from_passages(question: str, passages: list[dict[str, Any]],
+                          entities: list[str]) -> dict[str, Any]:
+    """No graph fact to stand on, but the words were said: answer from those."""
+    user = (f"Question: {question}\n\nExcerpts of what was said:\n\n"
+            + "\n\n".join(_passage_lines(passages)))
+    answer = chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
+    return {"mode": "local", "answer": answer, "entities": entities, "citations": [],
+            "passages": _passage_citations(passages, answer), "facts_used": 0}
 
 _GLOBAL_SYSTEM = (
     "You answer broad questions about a personal knowledge graph using the cluster "
@@ -255,7 +305,10 @@ def local_search(
     if depth is None:
         depth = 2 if _wants_multihop(question) else 1
     matched = _match_entities(question, nodes)
+    passages = _passages(question)
     if not matched:
+        if passages:
+            return _answer_from_passages(question, passages, [])
         return {
             "mode": "local",
             "answer": "I couldn't find any entity in your knowledge graph matching that question.",
@@ -265,6 +318,8 @@ def local_search(
 
     entity_ids = {n["id"] for n in matched}
     facts = _subgraph_facts(entity_ids, depth=depth)
+    if not facts and passages:
+        return _answer_from_passages(question, passages, sorted(entity_ids))
     if not facts:
         return {
             "mode": "local",
@@ -287,6 +342,8 @@ def local_search(
         f"Question: {question}\n\n"
         f"Facts from the knowledge graph:\n" + "\n".join(fact_lines)
     )
+    if passages:
+        user += "\n\nExcerpts of what was said:\n\n" + "\n\n".join(_passage_lines(passages))
     answer = chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
 
     # Prefer the notes the answer actually cited; fall back to all subgraph
@@ -301,6 +358,7 @@ def local_search(
         # Surfaced so a caller can see whether the answer used chained facts.
         "depth": depth,
         "facts_used": len(facts),
+        "passages": _passage_citations(passages, answer) if passages else [],
     }
 
 

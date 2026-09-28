@@ -12,10 +12,13 @@ STAGE COVERAGE: for each labelled fact in the case, is it still present at each
 stage? Matched with the evaluator's own meaning matcher, so "present" means the
 same thing it means everywhere else here.
 
-ANSWERS: each question in the case's QA set is asked two ways --
-    graph   the product's own `/ask` (rag.answer_question) over the graph the
-            pipeline built from this session alone
-    raw     the same model answering from the best-matching raw transcript
+ANSWERS: each question in the case's QA set is asked three ways --
+    graph     the product's own `/ask` (rag.answer_question) over the graph the
+              pipeline built from this session alone, with transcript
+              passages switched OFF (RAG_PASSAGES=0): the graph as it was
+    graph+tx  the same `/ask` with passages ON (ingest/passages.py) -- the
+              graph plus the words that were actually said
+    raw       the same model answering from the best-matching raw transcript
             parts, retrieved by embedding -- what a statement- or passage-
             grounded design could reach
 and graded by a DIFFERENT model against the expected answer, so a model is
@@ -35,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
@@ -106,7 +110,7 @@ def _raw_answer(question: str, passages: list[str]) -> str:
 
 
 def run(case_path: Path, qa_path: Path, judge_model: str = DEFAULT_JUDGE,
-        arms: tuple[str, ...] = ("graph", "raw")) -> dict[str, Any]:
+        arms: tuple[str, ...] = ("graph", "graph+tx", "raw")) -> dict[str, Any]:
     from brahmastra import db
     from brahmastra.ingest.assemble import process_transcript
     from brahmastra.ingest.segment import segment
@@ -152,8 +156,11 @@ def run(case_path: Path, qa_path: Path, judge_model: str = DEFAULT_JUDGE,
         row: dict[str, Any] = {"kind": q.get("kind", "item"), "question": q["question"]}
         for arm in arms:
             try:
-                answer = (answer_question(q["question"])["answer"] if arm == "graph"
-                          else _raw_answer(q["question"], passages))
+                if arm == "raw":
+                    answer = _raw_answer(q["question"], passages)
+                else:
+                    os.environ["RAG_PASSAGES"] = "0" if arm == "graph" else "1"
+                    answer = answer_question(q["question"])["answer"]
             except Exception as exc:                           # noqa: BLE001
                 answer = f"(failed: {type(exc).__name__}: {exc})"[:300]
             row[arm] = {"answer": answer, **_judge(q["question"], q["answer"], answer, judge_model)}
@@ -216,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
         for lost in result["lost"][stage][:8]:
             w(f"  lost by {stage}: {lost[:90]}")
     for r in result["graded"]:
-        marks = " ".join(f"{arm}={'Y' if r[arm]['correct'] else 'n'}" for arm in ("graph", "raw") if arm in r)
+        marks = " ".join(f"{arm}={'Y' if r[arm]['correct'] else 'n'}" for arm in ("graph", "graph+tx", "raw") if arm in r)
         w(f"  [{r['kind']:6}] {marks}  {r['question'][:70]}")
     return 0
 

@@ -392,3 +392,18 @@ async def unreject_artifact(artifact_id: str) -> dict[str, Any]:
     store.unreject_artifact(artifact_id)
     rebuilt = assemble.rebuild_record(row["transcript_id"], store=store)
     return {"artifact_id": artifact_id, "rejected": False, "record": rebuilt}
+
+
+@router.get("/passages")
+async def search_passages(q: str, transcript_id: str | None = None,
+                          limit: int = 8) -> list[dict[str, Any]]:
+    """
+    Search what was actually SAID -- raw transcript passages with speaker and
+    time (ingest/passages.py). Hybrid, like note search. `transcript_id`
+    narrows it to one session.
+    """
+    from brahmastra.ingest.passages import PassageIndex, search
+
+    store = get_ingest_store()
+    return search(q, limit=min(max(limit, 1), 30), transcript_id=transcript_id,
+                  store=PassageIndex(workspace=store.workspace))

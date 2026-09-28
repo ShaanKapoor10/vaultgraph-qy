@@ -441,9 +441,14 @@ def drop_transcript(transcript_id: str, store: IngestStore | None = None,
         removed = ownership.drop_owner(ledger, OWNER_KIND, transcript_id,
                                        {"note": remove})
     ledger.forget_owner(OWNER_KIND, transcript_id)
+    # The passages ARE the transcript's words, so they go whichever way the
+    # notes go: a deleted source must not stay searchable.
+    from brahmastra.ingest.passages import PassageIndex
+
+    passages_removed = PassageIndex(workspace=store.workspace).delete(transcript_id)
     store.delete_transcript(transcript_id)
     return {"deleted": transcript_id, "notes_removed": removed.get("note", 0),
-            "notes_kept": not purge_notes}
+            "notes_kept": not purge_notes, "passages_removed": passages_removed}
 
 
 def _settle(notes: ownership.Streaming, report: dict[str, Any]) -> int:
@@ -664,6 +669,19 @@ def _process(
     chunks = _segment_with_speakers(record, report)
     report["chunks"] = len(chunks)
     store.set_transcript_status(transcript_id, "processing", chunk_count=len(chunks))
+
+    # What was actually said, searchable at once and with no model in the loop
+    # (ingest/passages.py). Before comprehension, so a run that then fails on
+    # quota still leaves the transcript findable.
+    try:
+        from brahmastra.ingest import passages
+
+        report["passages"] = passages.index_transcript(
+            transcript_id, record["title"], record.get("occurred_at"),
+            passages.turns_of(chunks), passages.PassageIndex(workspace=store.workspace))
+    except Exception as exc:                            # noqa: BLE001
+        report["errors"].append(
+            {"stage": "passages", "error": f"{type(exc).__name__}: {exc}"[:300]})
 
     if not chunks:
         # A transcript emptied to nothing still OWNS whatever the last run
