@@ -138,3 +138,13 @@ def test_a_drop_riding_on_a_refused_duplicate_is_refused():
 def test_risks_and_questions_are_never_dropped():
     out, _ = reconcile(DECS, ["Omar"], chat=_model([_item("F4", drop="declined")]))
     assert len(out) == 4
+
+
+def test_the_output_budget_grows_with_the_meeting_and_is_capped(monkeypatch):
+    """Measured: a flat 3000 truncated gpt-oss-120b, whose reasoning shares the budget."""
+    from brahmastra.ingest.reconcile import output_budget
+    monkeypatch.delenv("INGEST_RECONCILE_TOKENS", raising=False)
+    assert output_budget(5) < output_budget(20) <= 6000
+    assert output_budget(500) == 6000
+    monkeypatch.setenv("INGEST_RECONCILE_TOKENS", "9000")
+    assert output_budget(5) == 9000

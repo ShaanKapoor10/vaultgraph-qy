@@ -50,13 +50,36 @@ Owners named later: never exercised. Chunk reading already got 27 of 27,
 because the sentence that assigns an owner restates the task. Status,
 priority, the overview and insights are new OUTPUT, not scored.
 
-Still owed before adoption: the same on gpt-oss-120b, the production model
-(its daily quota was spent when this ran).
+RE-MEASURED 2026-09-28, NOT ADOPTED. The table above was scored against a
+broken label: the matcher read the CORRECT "We cut over Monday the 3rd
+instead" as the trap "Cut over to Stripe this Friday", and the old Monday label
+matched nothing (see the case's note). With the label fixed and a standing
+Friday decision counted by its date words, paired, 3 runs x 3 meetings:
+
+                         recall   precision   traps   standing Friday
+    gpt-oss-120b  without  81%      55%         3       0 of 9
+                  with     80%      56%         3       0 of 9
+    qwen3.8-27b   without  76%      55%         3       3 of 9
+                  with     73%      59%         3       0 of 9
+
+The reversal catch is real, and it fixes a mistake the PRODUCTION model does
+not make: gpt-oss-120b never left the Friday decision standing, so on it the
+pass had nothing to remove. What it does do on both models is fold distinct
+items together as duplicates, which costs recall. It never dropped the one
+remaining trap ("Priti checks the contract", a deferral, not a commitment).
+Its insights were padded with "decision X has no owner", and one called the
+answered rollback-window question unanswered.
+
+So it stays here as a measured experiment. Revisit if the production model
+changes, or to score the status/due output on its own -- it is the only part
+not measured, and the new case labels a done task and an answered question.
+The output budget below is what made gpt-oss-120b run at all.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import replace
 from typing import Any, Callable
@@ -176,6 +199,23 @@ def _drop_refusal(drop: str, a: Any, i: int, reversed_by: Any, dup_refused: bool
 
 
 
+def output_budget(n_findings: int) -> int:
+    """
+    Output tokens for one pass, scaled to the meeting.
+
+    A flat 3000 was enough for qwen3.8-27b and NOT for gpt-oss-120b, whose
+    reasoning tokens count against the same budget: on a two-chunk meeting it
+    stopped with "max completion tokens reached before generating a valid
+    document" and the pass silently did nothing (the fail-safe held). The reply
+    is one entry per finding plus an overview, so it grows with the meeting.
+    Capped so a request stays inside Groq's per-minute token window.
+    """
+    override = os.environ.get("INGEST_RECONCILE_TOKENS", "").strip()
+    if override:
+        return int(override)
+    return min(6000, 3000 + 120 * n_findings)
+
+
 def render(artifacts: list[Any], participants: list[str], title: str) -> str:
     lines = [f"Meeting: {title}", f"Participants: {', '.join(participants) or 'unknown'}", "",
              "Findings, in the order they were said:"]
@@ -206,7 +246,7 @@ def reconcile(artifacts: list[Any], participants: list[str], title: str = "",
         from brahmastra.llm import chat as chat
     try:
         raw = chat(SYSTEM_PROMPT, render(artifacts, participants, title),
-                   json_schema=_SCHEMA, temperature=0.0, max_tokens=3000)
+                   json_schema=_SCHEMA, temperature=0.0, max_tokens=output_budget(len(artifacts)))
         payload = json.loads(raw)
     except Exception as exc:                                  # noqa: BLE001
         report["error"] = f"{type(exc).__name__}: {exc}"[:300]

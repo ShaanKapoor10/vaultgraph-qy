@@ -302,6 +302,32 @@ assigned. 0 wrong names in all runs.
 Next only with real audio: a diarizer (whisper + pyannote) in front of this. The
 text side is ready for it.
 
+### 11b. A whole-meeting pass (from meeting-scribe) — MEASURED, NOT ADOPTED
+
+Branch `feat/transcript-extraction-test`, `ingest/reconcile.py`. meeting-scribe
+rebuilds its task list and overview from its per-slice notes. Here that became
+one call after `consolidate`: it proposes duplicates, drops, owners, due dates,
+status, an overview and loose ends. Code accepts only what it can check against
+the quotes.
+
+Paired A/B (the same chunk findings with and without the pass), 3 runs × 3
+labelled meetings, 2026-09-28:
+
+| | recall | precision | standing reversed decision |
+|---|---|---|---|
+| gpt-oss-120b without / with | 81% / 80% | 55% / 56% | 0 / 0 of 9 |
+| qwen3.8-27b without / with | 76% / 73% | 55% / 59% | 3 / 0 of 9 |
+
+It fixes a reversed decision that only the smaller model leaves standing. On the
+production model it has nothing to fix, and on both models its duplicate merges
+cost true items. Not wired in. Measuring it also turned up a bad label: the
+new `vendor-migration-handoffs` case scored the correct "Monday" decision as the
+"Friday" trap. Fixed, and the reason is recorded in the case.
+
+What remains open is its status/due output (done, answered, blocked). It is the only
+part not scored, and the new case labels a done task and an answered question.
+Score that on its own before building UI for it.
+
 ---
 
 ### 12. Windows Smart App Control — RESOLVED (turned off 2026-09-25)
