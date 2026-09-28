@@ -1,0 +1,52 @@
+[
+  {
+    "kind": "item",
+    "question": "What was decided to stop a bad message blocking the queue?",
+    "answer": "Add a dead letter queue: anything failing three times goes there."
+  },
+  {
+    "kind": "item",
+    "question": "Who builds the dead letter queue and by when?",
+    "answer": "Ben, by the end of next week."
+  },
+  {
+    "kind": "item",
+    "question": "What is the new alerting rule and who changes it?",
+    "answer": "Alert on queue depth growing for fifteen minutes; Tomas, probably Thursday."
+  },
+  {
+    "kind": "item",
+    "question": "Will they rewrite the consumer?",
+    "answer": "No, they agreed not to rewrite it."
+  },
+  {
+    "kind": "item",
+    "question": "What will Aisha check?",
+    "answer": "Whether either affected customer hit a timeout on their side, and report back."
+  },
+  {
+    "kind": "detail",
+    "question": "How long did the outage last and was data lost?",
+    "answer": "Ninety minutes; no data was lost, payments were only delayed."
+  },
+  {
+    "kind": "detail",
+    "question": "What caused the consumer to loop?",
+    "answer": "It crashed on a malformed payload, restarted, picked up the same message and crashed again (a poison message)."
+  },
+  {
+    "kind": "detail",
+    "question": "Why did nobody notice for forty minutes?",
+    "answer": "The alert only fired when the queue had been completely empty for an hour."
+  },
+  {
+    "kind": "detail",
+    "question": "Why does Ben not want to rewrite the consumer?",
+    "answer": "The dead letter queue solves the actual problem; a rewrite is months of work."
+  },
+  {
+    "kind": "detail",
+    "question": "How many enterprise customers noticed the delay?",
+    "answer": "Two, and one asked whether they were down."
+  }
+]

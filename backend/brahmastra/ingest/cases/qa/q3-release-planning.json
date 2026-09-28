@@ -1,0 +1,52 @@
+[
+  {
+    "kind": "item",
+    "question": "What is the new Q3 release date?",
+    "answer": "April 15th (moved from March 30th)."
+  },
+  {
+    "kind": "item",
+    "question": "Who owns the reconciliation job and what is its target date?",
+    "answer": "Raj, targeting the 27th."
+  },
+  {
+    "kind": "item",
+    "question": "What will Mei do by Friday?",
+    "answer": "Update the roadmap so nobody works off the March date."
+  },
+  {
+    "kind": "item",
+    "question": "What risk does the Acme contract pose?",
+    "answer": "It assumes a March delivery, so slipping to April may put them in breach."
+  },
+  {
+    "kind": "item",
+    "question": "What was decided about moving the reporting service off the old cluster?",
+    "answer": "Left out of Q3; revisit in Q4 planning."
+  },
+  {
+    "kind": "detail",
+    "question": "How far along is the payments integration?",
+    "answer": "About sixty percent: the card flow is basically done, refunds and the reconciliation job are not started."
+  },
+  {
+    "kind": "detail",
+    "question": "Why can't they go live without the reconciliation job?",
+    "answer": "Finance (Deepa) requires it because of the audit."
+  },
+  {
+    "kind": "detail",
+    "question": "Who owns payments, and when is she back?",
+    "answer": "Priya, who is out until the 20th."
+  },
+  {
+    "kind": "detail",
+    "question": "Why did Mei not commit to moving the reporting service?",
+    "answer": "She doesn't think they have the people."
+  },
+  {
+    "kind": "detail",
+    "question": "How long has the staging environment been flaky, and what is it blocking?",
+    "answer": "About a week; it is blocking QA more days than not."
+  }
+]

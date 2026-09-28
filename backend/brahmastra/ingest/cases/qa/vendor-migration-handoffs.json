@@ -1,0 +1,52 @@
+[
+  {
+    "kind": "item",
+    "question": "When is the Stripe cutover?",
+    "answer": "Monday the 3rd (moved from Friday)."
+  },
+  {
+    "kind": "item",
+    "question": "Who runs the load test?",
+    "answer": "Omar (Lena handed it over)."
+  },
+  {
+    "kind": "item",
+    "question": "Who rebuilds the invoice export and by when?",
+    "answer": "Omar, by Wednesday."
+  },
+  {
+    "kind": "item",
+    "question": "What will Lena do today?",
+    "answer": "Update the runbook with the new cutover date."
+  },
+  {
+    "kind": "item",
+    "question": "What risk has nobody tested?",
+    "answer": "Refunds end to end on Stripe."
+  },
+  {
+    "kind": "detail",
+    "question": "Why was Friday dropped as the cutover day?",
+    "answer": "Finance closes the month on the last business day and Friday is the 30th, so a cutover could double-bill."
+  },
+  {
+    "kind": "detail",
+    "question": "What is the rollback window?",
+    "answer": "Thirty days: Paylink keeps the account live for a month."
+  },
+  {
+    "kind": "detail",
+    "question": "What is Stripe's sandbox rate limit?",
+    "answer": "A hundred requests a second."
+  },
+  {
+    "kind": "detail",
+    "question": "Why must the invoice export be rebuilt?",
+    "answer": "It reads Paylink's schema directly."
+  },
+  {
+    "kind": "detail",
+    "question": "Why is Lena not taking the load test?",
+    "answer": "She is on the dashboard rewrite this week."
+  }
+]

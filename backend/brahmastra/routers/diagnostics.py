@@ -291,3 +291,78 @@ async def drain_checkpoints(background_tasks: BackgroundTasks) -> dict[str, Any]
     if queued:
         background_tasks.add_task(_drain, current_workspace())
     return {"queued": queued, "started": bool(queued)}
+
+
+# -- Groq keys (brahmastra/keys.py) ------------------------------------------
+#
+# Listing is always allowed: it is masked, and "which key is resting and why"
+# is exactly what this screen is for. Changing keys writes secrets, so it is
+# refused unless BRAHMASTRA_KEY_ADMIN=1 -- a deployment reachable by others
+# must not let a browser add or remove its provider credentials.
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+
+class KeyIn(BaseModel):
+    key: str = Field(min_length=10, max_length=200)
+
+
+def _require_key_admin() -> None:
+    from brahmastra import keys
+
+    if not keys.admin_enabled():
+        raise HTTPException(status_code=403, detail=(
+            "Key management is switched off. Set BRAHMASTRA_KEY_ADMIN=1 in .env on a "
+            "machine only you can reach, and restart the backend."))
+
+
+@router.get("/keys")
+async def list_keys() -> dict[str, Any]:
+    from brahmastra import keys
+
+    return {"admin": keys.admin_enabled(), "keys": keys.list_groq_keys()}
+
+
+@router.post("/keys")
+async def add_key(body: KeyIn) -> dict[str, Any]:
+    from brahmastra import keys
+
+    _require_key_admin()
+    try:
+        return keys.add_groq_key(body.key)
+    except keys.KeyError_ as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+@router.delete("/keys/{kid}")
+async def remove_key(kid: str) -> dict[str, Any]:
+    from brahmastra import keys
+
+    _require_key_admin()
+    try:
+        return keys.remove_groq_key(kid)
+    except keys.KeyError_ as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.post("/keys/{kid}/enable")
+async def enable_key(kid: str) -> dict[str, Any]:
+    from brahmastra import keys
+
+    _require_key_admin()
+    try:
+        return keys.enable_groq_key(kid)
+    except keys.KeyError_ as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+
+
+@router.post("/keys/{kid}/test")
+async def test_key(kid: str) -> dict[str, Any]:
+    """Costs no tokens: lists models with that key. Allowed without admin -- it changes nothing."""
+    from brahmastra import keys
+
+    try:
+        key, _ = keys._find(kid)
+    except keys.KeyError_ as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    return {"id": kid, **keys.test_groq_key(key)}

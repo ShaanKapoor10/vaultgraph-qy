@@ -12,6 +12,8 @@ import {
   KeyRound,
   Loader2,
   Play,
+  Plus,
+  Trash2,
   RefreshCw,
   RotateCw,
   TriangleAlert,
@@ -341,18 +343,7 @@ export function DiagnosticsPanel({ workspace, backendAvailable }: { workspace: s
               <span className="text-muted-foreground">off</span>
             )}
           </Row>
-          {(data.llm.groq_keys ?? []).length > 0 && (
-            <ul className="mt-2 flex flex-col gap-1">
-              {data.llm.groq_keys!.map((k) => (
-                <li key={k.key} className="flex items-center justify-between gap-2 font-mono text-[11px]">
-                  <span className="text-muted-foreground">{k.key}</span>
-                  <span className={k.state === "ready" ? "text-green-400" : k.state === "dead" ? "text-destructive" : "text-amber-400"} title={k.reason ?? ""}>
-                    {k.state} &middot; {k.calls} calls
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
+          <GroqKeys />
           <p className="mt-2 text-[11px] text-muted-foreground">
             Key state is this server&apos;s view. Each process keeps its own, so the scheduler may know of a limit this one has not hit yet.
           </p>
@@ -526,5 +517,164 @@ function ActionButton({
       {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
       {children}
     </button>
+  )
+}
+
+/** One Groq key as GET /diagnostics/keys lists it. Never the key itself. */
+interface KeyRow {
+  id: string
+  key: string
+  source: "env" | "dashboard"
+  disabled: boolean
+  state: string
+  reason: string
+  organization: string
+  calls: number
+  failures: number
+}
+
+async function keysApi<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`/api/diagnostics/keys${path}`, { cache: "no-store", ...init })
+  const text = await res.text()
+  const body = text ? JSON.parse(text) : null
+  if (!res.ok) throw new Error(body?.detail ?? `${res.status} ${res.statusText}`)
+  return body as T
+}
+
+/**
+ * The Groq key pool, with add, disable/remove and test. Changing keys is only
+ * offered when the backend has BRAHMASTRA_KEY_ADMIN=1; the list is always shown.
+ */
+function GroqKeys() {
+  const [rows, setRows] = useState<KeyRow[]>([])
+  const [admin, setAdmin] = useState(false)
+  const [draft, setDraft] = useState("")
+  const [busy, setBusy] = useState<string | null>(null)
+  const [message, setMessage] = useState<{ tone: "ok" | "error"; text: string } | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const out = await keysApi<{ admin: boolean; keys: KeyRow[] }>("")
+      setRows(out.keys)
+      setAdmin(out.admin)
+    } catch (e) {
+      setMessage({ tone: "error", text: (e as Error).message })
+    }
+  }, [])
+
+  useEffect(() => {
+    load()
+  }, [load])
+
+  const act = async (id: string, fn: () => Promise<string>) => {
+    setBusy(id)
+    setMessage(null)
+    try {
+      setMessage({ tone: "ok", text: await fn() })
+      await load()
+    } catch (e) {
+      setMessage({ tone: "error", text: (e as Error).message })
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const add = () =>
+    act("add", async () => {
+      const out = await keysApi<{ key: string }>("", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ key: draft.trim() }),
+      })
+      setDraft("")
+      return `Added ${out.key}. It is in use now.`
+    })
+
+  const tone = (k: KeyRow) =>
+    k.disabled ? "text-muted-foreground" : k.state === "ready" || k.state === "unused" ? "text-green-400" : k.state === "dead" ? "text-destructive" : "text-amber-400"
+
+  return (
+    <div className="mt-2 flex flex-col gap-2">
+      <ul className="flex flex-col gap-1">
+        {rows.map((k) => (
+          <li key={k.id} className="flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px]">
+            <span className={k.disabled ? "text-muted-foreground line-through" : "text-foreground"}>{k.key}</span>
+            <span className="text-muted-foreground">{k.source === "env" ? ".env" : "dashboard"}</span>
+            <span className={tone(k)} title={k.reason || k.organization || ""}>
+              {k.state}
+              {k.calls > 0 && <> &middot; {k.calls} calls</>}
+            </span>
+            <span className="ml-auto flex gap-1">
+              <button
+                onClick={() =>
+                  act(k.id, async () => {
+                    const r = await keysApi<{ ok: boolean; models?: number; error?: string }>(`/${k.id}/test`, { method: "POST" })
+                    if (!r.ok) throw new Error(`${k.key}: ${r.error}`)
+                    return `${k.key} works (${r.models} models visible).`
+                  })
+                }
+                disabled={busy !== null}
+                className="rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+              >
+                {busy === k.id ? <Loader2 className="h-3 w-3 animate-spin" /> : "test"}
+              </button>
+              {admin &&
+                (k.disabled ? (
+                  <button
+                    onClick={() => act(k.id, async () => (await keysApi<{ action: string }>(`/${k.id}/enable`, { method: "POST" })).action)}
+                    disabled={busy !== null}
+                    className="rounded border border-border px-1.5 py-0.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+                  >
+                    enable
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => {
+                      const what = k.source === "env" ? "Disable" : "Remove"
+                      if (!window.confirm(`${what} ${k.key}? Calls stop using it straight away.`)) return
+                      act(k.id, async () => `${k.key}: ${(await keysApi<{ action: string }>(`/${k.id}`, { method: "DELETE" })).action}`)
+                    }}
+                    disabled={busy !== null}
+                    aria-label={`${k.source === "env" ? "Disable" : "Remove"} ${k.key}`}
+                    className="rounded border border-destructive/30 px-1.5 py-0.5 text-destructive/80 hover:bg-destructive/10 disabled:opacity-50"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                ))}
+            </span>
+          </li>
+        ))}
+        {rows.length === 0 && <li className="text-[11px] text-muted-foreground">No Groq key configured.</li>}
+      </ul>
+
+      {admin ? (
+        <div className="flex gap-1.5">
+          <input
+            type="password"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && draft.trim() && add()}
+            placeholder="gsk_… add a Groq key"
+            aria-label="New Groq key"
+            className="min-w-0 flex-1 rounded-md border border-border bg-background px-2 py-1 font-mono text-[11px] text-foreground placeholder:text-muted-foreground focus:border-primary/50 focus:outline-none"
+          />
+          <ActionButton icon={Plus} small busy={busy === "add"} disabled={!draft.trim() || busy !== null} onClick={add}>
+            add
+          </ActionButton>
+        </div>
+      ) : (
+        <p className="text-[11px] text-muted-foreground">
+          Adding and removing keys here is off. Set BRAHMASTRA_KEY_ADMIN=1 in .env on a machine only you can reach.
+        </p>
+      )}
+      {message && (
+        <p className={`text-[11px] ${message.tone === "ok" ? "text-green-400" : "text-destructive"}`}>{message.text}</p>
+      )}
+      <p className="text-[11px] text-muted-foreground">
+        A key is tested with Groq before it is saved. Keys set in .env can only be disabled here; remove them from .env to delete them.
+      </p>
+    </div>
   )
 }

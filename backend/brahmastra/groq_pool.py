@@ -306,16 +306,18 @@ _pool_lock = threading.Lock()
 
 
 def configured_keys() -> list[str]:
-    """GROQ_API_KEYS, then GROQ_API_KEY -- de-duplicated, order kept."""
-    import os
+    """
+    GROQ_API_KEYS, then GROQ_API_KEY -- de-duplicated, order kept -- less any
+    disabled from the dashboard, plus any added there (brahmastra/keys.py).
+    The pool is rebuilt when this changes, so an added key is used at once.
+    """
+    from brahmastra.keys import effective_groq_keys, env_groq_keys
 
-    listed = [k.strip() for k in (os.environ.get("GROQ_API_KEYS") or "").split(",")]
-    single = (os.environ.get("GROQ_API_KEY") or "").strip()
-    keys: list[str] = []
-    for key in listed + [single]:
-        if key and key not in keys:
-            keys.append(key)
-    return keys
+    try:
+        return effective_groq_keys()
+    except Exception:                                         # noqa: BLE001
+        # A broken key file must never take the environment's keys with it.
+        return env_groq_keys()
 
 
 def make_client(key: str) -> Any:

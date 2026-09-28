@@ -93,6 +93,9 @@ services:
       # Several keys, tried in turn -- see brahmastra/groq_pool.py.
       GROQ_API_KEYS: ${GROQ_API_KEYS:-}
       GROQ_MODEL: ${GROQ_MODEL:-}
+      # Add/remove Groq keys from the Diagnostics tab (brahmastra/keys.py).
+      # Off unless set: it writes secrets from an HTTP route.
+      BRAHMASTRA_KEY_ADMIN: ${BRAHMASTRA_KEY_ADMIN:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       # Reaches the host's Ollama from inside the container; a bare localhost
       # here would resolve to the container itself and always fail.
