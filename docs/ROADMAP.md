@@ -302,6 +302,32 @@ assigned. 0 wrong names in all runs.
 Next only with real audio: a diarizer (whisper + pyannote) in front of this. The
 text side is ready for it.
 
+### 11c. Grounded transcripts: modes, passages, statements — ADOPTED
+
+Branch `feat/grounded-transcript-graph`. Sessions have a mode (`ingest/modes.py`:
+meeting, lecture). Every mode gets meeting-scribe's per-part topic and key points,
+each point held to a verbatim quote, and an overview written from those notes.
+
+Measured end to end with `ingest/qa_eval.py`: each labelled session goes through
+ingestion and the pipeline into a scratch store, then 10–12 questions per session
+are graded by a second model. Item questions test the extracted record; detail
+questions test substance no item carries. Totals over the three meetings:
+
+| | item | detail |
+|---|---|---|
+| graph only, before | 11/15 | 5/15 |
+| graph + raw passages (`ingest/passages.py`, given to `/ask`) | 15/15 | 12/15 |
+| graph only, with statements (**adopted**) | 12/15 | 12/15 |
+| graph only, statements, summaries not extracted | 11/15 | 9/15 |
+| graph + passages, with statements | 14/15 | 14/15 |
+| raw transcript alone | 14/15 | 14/15 |
+
+- **Passages:** the raw transcript, indexed with speaker and time, no model involved.
+- **Statements:** key points declared whole into the graph, with `said_by`, `discussed_in` and `mentions` (cocoindex's conversation_to_knowledge shape, with our quote check).
+- **Summaries are still extracted** (`INGEST_EXTRACT_PART_NOTES=1`): dropping them measured worse.
+- **Lecture, same routes:** 7/12, 10/12 and 8/12.
+- **Open:** single runs; two lecture questions fail on every route; task status (open/done/blocked) not built.
+
 ### 11b. A whole-meeting pass (from meeting-scribe) — MEASURED, NOT ADOPTED
 
 Branch `feat/transcript-extraction-test`, `ingest/reconcile.py`. meeting-scribe
