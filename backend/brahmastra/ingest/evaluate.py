@@ -471,6 +471,17 @@ def run_case(case: dict[str, Any],
             speaker_of=lambda a: speaker_of(a.quote or "", by_index.get(a.chunk_index)))
         read_seconds += time.perf_counter() - started
         calls += 1
+    status_score = None
+    if any("status" in e for e in case["expected"]):
+        from brahmastra.ingest.passages import turns_of
+        from brahmastra.ingest.status import assign as assign_status
+
+        started = time.perf_counter()
+        final, status_report = assign_status(final, turns_of(chunks))
+        read_seconds += time.perf_counter() - started
+        calls += status_report.get("calls", 0)
+        status_score = score_status(case, final)
+        status_score["report"] = status_report
     scores = score_against(case["expected"], [a for a in final if a.kind in scored_kinds],
                            case.get("must_not_find"))
     score_seconds = time.perf_counter() - scoring
@@ -483,6 +494,7 @@ def run_case(case: dict[str, Any],
         "raw_artifacts": len(produced),
         "after_consolidation": len(reduced["artifacts"]),
         "reconciled": reconciled,
+        "status": status_score,
         "merged": reduced["merged"],
         "scores": scores,
         # Split, because the wall clock around this function is NOT the cost
@@ -496,6 +508,43 @@ def run_case(case: dict[str, Any],
         "read_seconds": read_seconds,
         "score_seconds": score_seconds,
     }
+
+
+def score_status(case: dict[str, Any], produced: list[Any]) -> dict[str, Any]:
+    """
+    For each labelled action item that was FOUND, is its status right? And
+    did any status trap fire -- a plan read as done, an unblocked task still
+    blocked? Scored only on found items, so it measures the status pass, not
+    comprehension's recall, which the rest of the scores already do.
+    """
+    labels = [e for e in case["expected"] if e["kind"] == "action_item" and "status" in e]
+    actions = [a for a in produced if a.kind == "action_item"]
+    compare, threshold = _matcher([e["statement"] for e in labels] + [a.statement for a in actions]
+                                  + [t["statement"] for t in case.get("status_traps", [])])
+    fn = for_kind(compare, "action_item")
+
+    def best(statement: str) -> Any:
+        scored = [(fn(statement, a.statement), a) for a in actions]
+        top = max(scored, key=lambda x: x[0], default=(0.0, None))
+        return top[1] if top[0] >= threshold else None
+
+    right, wrong, found = 0, [], 0
+    for e in labels:
+        a = best(e["statement"])
+        if a is None:
+            continue
+        found += 1
+        got = getattr(a, "status", None) or "open"
+        if got == e["status"]:
+            right += 1
+        else:
+            wrong.append(f"{e['statement'][:60]}: {got}, should be {e['status']}")
+    trapped = []
+    for t in case.get("status_traps", []):
+        a = best(t["statement"])
+        if a is not None and (getattr(a, "status", None) or "open") == t["wrong"]:
+            trapped.append(f"{t['statement'][:60]} read as {t['wrong']}")
+    return {"right": right, "of": found, "labelled": len(labels), "wrong": wrong, "trapped": trapped}
 
 
 def load_cases(directory: Path | None = None) -> list[dict[str, Any]]:

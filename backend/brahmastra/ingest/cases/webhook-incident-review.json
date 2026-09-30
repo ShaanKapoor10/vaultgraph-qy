@@ -18,17 +18,20 @@
     {
       "kind": "action_item",
       "statement": "Ben builds the dead letter queue by the end of next week",
-      "owner": "Ben"
+      "owner": "Ben",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Tomas changes the alerting threshold, by Thursday",
-      "owner": "Tomas"
+      "owner": "Tomas",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Aisha checks whether either affected customer hit a timeout and reports back",
-      "owner": "Aisha"
+      "owner": "Aisha",
+      "status": "open"
     },
     {
       "kind": "risk",

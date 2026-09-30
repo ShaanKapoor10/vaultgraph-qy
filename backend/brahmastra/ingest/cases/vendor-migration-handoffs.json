@@ -14,27 +14,32 @@
     {
       "kind": "action_item",
       "statement": "Omar runs the load test against Stripe's sandbox",
-      "owner": "Omar"
+      "owner": "Omar",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Omar rebuilds the invoice export by Wednesday",
-      "owner": "Omar"
+      "owner": "Omar",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Omar requests a raised limit from support",
-      "owner": "Omar"
+      "owner": "Omar",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Lena updates the runbook with the new cutover date today",
-      "owner": "Lena"
+      "owner": "Lena",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Omar emailed the three enterprise customers about the change",
-      "owner": "Omar"
+      "owner": "Omar",
+      "status": "done"
     },
     {
       "kind": "risk",

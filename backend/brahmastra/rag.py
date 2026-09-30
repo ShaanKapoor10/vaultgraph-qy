@@ -33,7 +33,10 @@ from brahmastra.llm import chat, llm_available
 MAX_MATCHED_ENTITIES = 6     # how many graph nodes a question can anchor to
 MAX_FACTS = 60               # cap subgraph facts sent to the LLM
 MIN_ENTITY_LEN = 3           # ignore 1-2 char tokens when matching ("a", "is")
-MAX_PASSAGES = 4             # raw transcript passages given beside the facts
+MAX_PASSAGES = 4             # raw transcript passages, used only as a fallback
+MAX_STATEMENTS = 6           # statement nodes a question can anchor to by meaning
+STATEMENT_MIN_COSINE = 0.35  # below this a "closest statement" is just the least unrelated
+NOT_IN_GRAPH = "NOT_IN_GRAPH"
 
 # Words that signal a broad/thematic question → prefer GLOBAL search.
 _GLOBAL_HINTS = {
@@ -146,6 +149,52 @@ def _match_entities_lexical(
     return [n for _, n in scored[:MAX_MATCHED_ENTITIES]]
 
 
+_statement_vectors: dict[str, Any] = {}
+
+
+def _match_statements(question: str, nodes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    Statement nodes the question is about, by MEANING -- whatever the backend.
+
+    A statement is named by its own sentence ("Payments is sixty percent done:
+    card flow finished..."), so a question almost never names it the way entity
+    matching needs. Neo4j's entity search fuses in vectors and could find it;
+    SQLite's is lexical, and there a question that named no entity went to the
+    cluster summaries and answered "none of the summaries mention a film". The
+    graph held the answer and was never searched for it.
+
+    Vectors are cached per process by statement text, so a question costs one
+    embedding plus whatever statements are new since the last question.
+    """
+    statements = [n for n in nodes if (n.get("type") or "") == "statement"]
+    if not statements:
+        return []
+    try:
+        from brahmastra.embeddings import embed
+
+        missing = [n["id"] for n in statements if n["id"] not in _statement_vectors]
+        if missing:
+            vectors = embed(missing)
+            if vectors is None:
+                return []
+            _statement_vectors.update(zip(missing, vectors))
+        q = embed([question])
+        if not q:
+            return []
+        qv = q[0]
+    except Exception:                                          # noqa: BLE001
+        return []
+    scored = []
+    for n in statements:
+        v = _statement_vectors.get(n["id"])
+        if v is not None:
+            cos = sum(a * b for a, b in zip(qv, v))
+            if cos >= STATEMENT_MIN_COSINE:
+                scored.append((cos, n))
+    scored.sort(key=lambda x: -x[0])
+    return [n for _, n in scored[:MAX_STATEMENTS]]
+
+
 # ---------------------------------------------------------------------------
 # Subgraph → facts
 # ---------------------------------------------------------------------------
@@ -219,10 +268,11 @@ def _cited_in(answer: str, available: set[str]) -> set[str]:
 
 def _is_global(question: str, matched: list[dict[str, Any]]) -> bool:
     q_tokens = set(_normalise(question).split())
-    if q_tokens & _GLOBAL_HINTS:
-        return True
-    # No specific entity anchored → fall back to a global/thematic answer.
-    return len(matched) == 0
+    # Only a question that ASKS for the big picture goes to the cluster
+    # summaries. "No entity matched" used to send it there too, which answered
+    # "what film did the trainer recommend?" from topic summaries that cannot
+    # hold a film -- local search now looks for statements by meaning first.
+    return bool(q_tokens & _GLOBAL_HINTS)
 
 
 # ---------------------------------------------------------------------------
@@ -230,13 +280,19 @@ def _is_global(question: str, matched: list[dict[str, Any]]) -> bool:
 # ---------------------------------------------------------------------------
 
 _LOCAL_SYSTEM = (
-    "You answer questions about a personal knowledge graph using ONLY the evidence "
-    "provided: numbered facts tagged with a source note id like [n:abc123], and, when "
-    "given, excerpts of what was actually said in meetings, tagged like [t:2]. "
-    "Write a concise, direct answer. After any claim, cite the supporting id(s) in "
-    "square brackets. Prefer the excerpts for who said what, numbers and reasons; they "
-    "are the words themselves. If the evidence does not contain the answer, say plainly "
-    "that the graph has no information on it. Do not invent facts."
+    "You answer questions about a personal knowledge graph using ONLY the facts "
+    "provided. Each fact is numbered and tagged with a source note id like [n:abc123]; "
+    "some facts are whole statements someone made, with who said them. "
+    "Write a concise, direct answer. After any claim, cite the supporting note id(s) in "
+    "square brackets. If the facts do not contain the answer, reply with exactly "
+    f"{NOT_IN_GRAPH} and nothing else. Do not invent facts."
+)
+
+_TRANSCRIPT_SYSTEM = (
+    "The knowledge graph had no answer to this question. Answer it using ONLY the "
+    "excerpts of what was actually said, tagged like [t:2], citing them after each "
+    "claim. If they do not contain the answer either, say plainly that nothing "
+    "recorded answers it. Do not invent facts."
 )
 
 
@@ -276,14 +332,22 @@ def _passage_citations(passages: list[dict[str, Any]], answer: str) -> list[dict
             for i, p in enumerate(passages, 1) if not cited or i in cited]
 
 
-def _answer_from_passages(question: str, passages: list[dict[str, Any]],
-                          entities: list[str]) -> dict[str, Any]:
-    """No graph fact to stand on, but the words were said: answer from those."""
+def _answer_from_passages(question: str, entities: list[str]) -> dict[str, Any]:
+    """
+    The FALLBACK: the graph had nothing, and the words may still have been said.
+
+    Marked `source: "transcript"` so the UI can say the answer is not in the
+    graph yet -- which is also a report that extraction missed something.
+    """
+    passages = _passages(question)
+    if not passages:
+        return {"mode": "local", "source": "none", "entities": entities, "citations": [],
+                "answer": "Nothing in the knowledge graph or the recorded transcripts answers that."}
     user = (f"Question: {question}\n\nExcerpts of what was said:\n\n"
             + "\n\n".join(_passage_lines(passages)))
-    answer = chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
-    return {"mode": "local", "answer": answer, "entities": entities, "citations": [],
-            "passages": _passage_citations(passages, answer), "facts_used": 0}
+    answer = chat(_TRANSCRIPT_SYSTEM, user, temperature=0.2).strip()
+    return {"mode": "local", "source": "transcript", "answer": answer, "entities": entities,
+            "citations": [], "passages": _passage_citations(passages, answer), "facts_used": 0}
 
 _GLOBAL_SYSTEM = (
     "You answer broad questions about a personal knowledge graph using the cluster "
@@ -305,28 +369,17 @@ def local_search(
     if depth is None:
         depth = 2 if _wants_multihop(question) else 1
     matched = _match_entities(question, nodes)
-    passages = _passages(question)
+    # Statements by meaning, beside entities by name: the graph's own search.
+    for n in _match_statements(question, nodes):
+        if all(m["id"] != n["id"] for m in matched):
+            matched.append(n)
     if not matched:
-        if passages:
-            return _answer_from_passages(question, passages, [])
-        return {
-            "mode": "local",
-            "answer": "I couldn't find any entity in your knowledge graph matching that question.",
-            "entities": [],
-            "citations": [],
-        }
+        return _answer_from_passages(question, [])
 
     entity_ids = {n["id"] for n in matched}
     facts = _subgraph_facts(entity_ids, depth=depth)
-    if not facts and passages:
-        return _answer_from_passages(question, passages, sorted(entity_ids))
     if not facts:
-        return {
-            "mode": "local",
-            "answer": f"I found {', '.join(sorted(entity_ids))} in the graph but no related facts.",
-            "entities": sorted(entity_ids),
-            "citations": [],
-        }
+        return _answer_from_passages(question, sorted(entity_ids))
 
     fact_lines = []
     for i, f in enumerate(facts, 1):
@@ -342,9 +395,10 @@ def local_search(
         f"Question: {question}\n\n"
         f"Facts from the knowledge graph:\n" + "\n".join(fact_lines)
     )
-    if passages:
-        user += "\n\nExcerpts of what was said:\n\n" + "\n\n".join(_passage_lines(passages))
     answer = chat(_LOCAL_SYSTEM, user, temperature=0.2).strip()
+    if NOT_IN_GRAPH in answer:
+        # The graph was searched and did not hold it. Only now the words.
+        return _answer_from_passages(question, sorted(entity_ids))
 
     # Prefer the notes the answer actually cited; fall back to all subgraph
     # notes only if the model emitted no [n:...] tags.
@@ -358,7 +412,7 @@ def local_search(
         # Surfaced so a caller can see whether the answer used chained facts.
         "depth": depth,
         "facts_used": len(facts),
-        "passages": _passage_citations(passages, answer) if passages else [],
+        "source": "graph",
     }
 
 

@@ -151,7 +151,8 @@ _ADDED_COLUMNS = {
     # What each part was about, from the notes pass.
     "transcript_chunks": {"topic": "TEXT"},
     # What a point is about ([{"name", "type"}], JSON) -- ingest/graph_record.py.
-    "meeting_artifacts": {"about": "TEXT"},
+    "meeting_artifacts": {"about": "TEXT", "status": "TEXT", "status_evidence": "TEXT",
+                          "blocked_on": "TEXT"},
 }
 
 _POSTGRES_SCHEMA = _SQLITE_SCHEMA.replace("INTEGER", "INTEGER")
@@ -583,7 +584,9 @@ class IngestStore:
                  a.kind, a.statement, a.owner, a.due, a.rationale, a.quote,
                  json.dumps(a.speakers), a.start_time, a.end_time,
                  getattr(a, "mentions", 1), getattr(a, "superseded_by", None),
-                 _now(), json.dumps(getattr(a, "about", None) or []))
+                 _now(), json.dumps(getattr(a, "about", None) or []),
+                 getattr(a, "status", None), getattr(a, "status_evidence", None),
+                 getattr(a, "blocked_on", None))
             )
         # IDEMPOTENT, because ownership requires it. `created_at` is
         # deliberately NOT overwritten: it records when this system first knew
@@ -595,8 +598,9 @@ class IngestStore:
                 INSERT INTO meeting_artifacts
                     (id, workspace_id, transcript_id, chunk_index, kind, statement,
                      owner, due, rationale, quote, speakers, start_time, end_time,
-                     mentions, superseded_by, created_at, about)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     mentions, superseded_by, created_at, about, status,
+                     status_evidence, blocked_on)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (workspace_id, id) DO UPDATE SET
                     transcript_id = excluded.transcript_id,
                     chunk_index = excluded.chunk_index,
@@ -611,7 +615,10 @@ class IngestStore:
                     end_time = excluded.end_time,
                     mentions = excluded.mentions,
                     superseded_by = excluded.superseded_by,
-                    about = excluded.about
+                    about = excluded.about,
+                    status = excluded.status,
+                    status_evidence = excluded.status_evidence,
+                    blocked_on = excluded.blocked_on
                 """), rows)
         return len(rows)
 

@@ -18,27 +18,32 @@
     {
       "kind": "action_item",
       "statement": "Sarah communicates the new release date to the wider team",
-      "owner": "Sarah"
+      "owner": "Sarah",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Mei revises the roadmap by Friday so the March date is gone",
-      "owner": "Mei"
+      "owner": "Mei",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Raj completes the reconciliation job by the 27th",
-      "owner": "Raj"
+      "owner": "Raj",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Mei escalates the staging environment to the infrastructure team",
-      "owner": "Mei"
+      "owner": "Mei",
+      "status": "open"
     },
     {
       "kind": "action_item",
       "statement": "Sarah passes on to Priya anything she needs to know while away",
-      "owner": "Sarah"
+      "owner": "Sarah",
+      "status": "open"
     },
     {
       "kind": "risk",

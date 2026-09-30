@@ -1,0 +1,21 @@
+{
+  "name": "sprint-standup-status",
+  "note": "Synthetic, written 2026-09-30 to measure task STATUS (open / done / blocked), labelled by hand from the transcript before any model saw it. Each action item carries the status the meeting ENDED on: (1) Nadia's login fix shipped yesterday -- done; (2) Tomas's export job is blocked on the data team's schema -- blocked; (3) Ivo's cache migration was blocked at the start, then Nadia unblocked it with the credentials -- open, not blocked; (4) Ivo's release notes are 'going to be done by Thursday' -- open, a plan is not a completion; (5) Nadia already wrote the onboarding doc and it only needs review -- done (review is Tomas's open item); (6) Tomas reviews that doc -- open. The traps are the wrong status stated as fact.",
+  "transcript": "[00:00:04] Nadia: Quick standup. I'll go first. The login fix shipped yesterday afternoon, it's live for everyone.\n[00:00:15] Tomas: Nice. Mine's the nightly export job. I'm stuck until the data team publishes the new schema, there's nothing I can build against.\n[00:00:29] Nadia: Did they give a date?\n[00:00:33] Tomas: No. I've asked twice. It's blocked on them.\n[00:00:41] Ivo: I'm on the cache migration. I was blocked this morning, I don't have the staging credentials.\n[00:00:52] Nadia: I can fix that now. There, I've just sent you the staging credentials.\n[00:01:02] Ivo: Got them, thanks. So that's unblocked, I'll carry on with the migration today.\n[00:01:12] Ivo: Also the release notes for 2.4. They're going to be done by Thursday.\n[00:01:22] Nadia: One more from me: I wrote the onboarding doc for new starters, it's finished. It just needs someone to review it.\n[00:01:34] Tomas: I'll review the onboarding doc tomorrow, since I'm waiting on the export anyway.\n[00:01:44] Nadia: Great. That's everyone.",
+  "expected": [
+    {"kind": "action_item", "statement": "Nadia ships the login fix", "owner": "Nadia", "status": "done"},
+    {"kind": "action_item", "statement": "Tomas builds the nightly export job", "owner": "Tomas", "status": "blocked"},
+    {"kind": "action_item", "statement": "Ivo carries on with the cache migration today", "owner": "Ivo", "status": "open"},
+    {"kind": "action_item", "statement": "Ivo finishes the 2.4 release notes by Thursday", "owner": "Ivo", "status": "open"},
+    {"kind": "action_item", "statement": "Nadia writes the onboarding doc for new starters", "owner": "Nadia", "status": "done"},
+    {"kind": "action_item", "statement": "Tomas reviews the onboarding doc tomorrow", "owner": "Tomas", "status": "open"},
+    {"kind": "risk", "statement": "The export job cannot proceed until the data team publishes the new schema, and they have given no date"}
+  ],
+  "must_not_find": [
+    {"kind": "decision", "statement": "The data team will publish the schema this week"}
+  ],
+  "status_traps": [
+    {"statement": "Ivo carries on with the cache migration today", "wrong": "blocked"},
+    {"statement": "Ivo finishes the 2.4 release notes by Thursday", "wrong": "done"}
+  ]
+}

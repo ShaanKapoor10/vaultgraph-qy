@@ -233,3 +233,6 @@ def _no_llm_session_passes(monkeypatch, request):
                         lambda *a, **k: ({"topic": "", "summary": "", "points": []}, None))
     monkeypatch.setattr(overview, "write_overview",
                         lambda *a, **k: {"headline": "", "summary": "", "themes": []})
+    from brahmastra.ingest import status
+
+    monkeypatch.setattr(status, "assign", lambda artifacts, turns, chat=None: (artifacts, {}))

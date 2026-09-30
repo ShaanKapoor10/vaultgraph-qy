@@ -85,3 +85,58 @@ def test_passages_can_be_switched_off(monkeypatch):
 
     monkeypatch.setenv("RAG_PASSAGES", "0")
     assert rag._passages("anything") == []
+
+
+# -- /ask is GRAPH FIRST: the transcript only when the graph has nothing ---------
+
+def _facts(monkeypatch, rag):
+    monkeypatch.setattr(rag, "_match_entities", lambda q, nodes: [{"id": "payments integration"}])
+    monkeypatch.setattr(rag, "_match_statements", lambda q, nodes: [])
+    monkeypatch.setattr(rag, "_subgraph_facts", lambda ids, depth=1: [
+        {"text": "Payments is sixty percent done said_by Mei", "note_id": "n1", "quote": "sixty percent"}])
+    monkeypatch.setattr(rag, "_citations", lambda ids: [{"note_id": i, "title": i} for i in ids])
+
+
+def test_the_graph_answers_and_the_transcript_is_never_read(monkeypatch):
+    from brahmastra import rag
+
+    _facts(monkeypatch, rag)
+    monkeypatch.setattr(rag, "_passages", lambda q: pytest.fail("read the transcript first"))
+    monkeypatch.setattr(rag, "chat", lambda system, user, **k: "About sixty percent [n:n1].")
+    out = rag.local_search("How far along is payments?", nodes=[{"id": "x"}])
+    assert out["source"] == "graph" and "sixty" in out["answer"]
+
+
+def test_the_transcript_is_read_only_when_the_graph_says_it_has_nothing(monkeypatch):
+    from brahmastra import rag
+
+    _facts(monkeypatch, rag)
+    monkeypatch.setattr(rag, "_passages", lambda q: [
+        {"transcript_id": "t1", "title": "Q3", "start_time": "00:01:34", "end_time": None,
+         "speakers": "Raj", "text": "[00:01:34] Raj: because of the audit."}])
+    replies = iter([rag.NOT_IN_GRAPH, "Because of the audit [t:1]."])
+    monkeypatch.setattr(rag, "chat", lambda system, user, **k: next(replies))
+    out = rag.local_search("Why is reconciliation required?", nodes=[{"id": "x"}])
+    assert out["source"] == "transcript" and out["passages"][0]["start_time"] == "00:01:34"
+
+
+def test_a_question_naming_no_entity_finds_a_statement_by_meaning(monkeypatch):
+    from brahmastra import embeddings, rag
+
+    film = "The trainer recommended watching The Big Short to see how a market view pays off"
+    nodes = [{"id": film, "type": "statement"}, {"id": "Swaps settle on the difference", "type": "statement"},
+             {"id": "Brent", "type": "concept"}]
+
+    def fake_embed(texts):
+        return [[1.0, 0.0] if ("film" in t.lower() or "Big Short" in t) else [0.0, 1.0] for t in texts]
+
+    monkeypatch.setattr(embeddings, "embed", fake_embed)
+    rag._statement_vectors.clear()
+    assert [n["id"] for n in rag._match_statements("What film did the trainer recommend?", nodes)] == [film]
+
+
+def test_no_match_is_not_sent_to_the_cluster_summaries():
+    from brahmastra import rag
+
+    assert rag._is_global("What film did the trainer recommend?", []) is False
+    assert rag._is_global("What are the main themes overall?", []) is True

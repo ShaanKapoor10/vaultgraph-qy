@@ -163,6 +163,11 @@ class Artifact:
     # What a point is ABOUT: [{"name", "type"}], each name found in the passage.
     # Becomes `mentions` edges from the statement (ingest/graph_record.py).
     about: list[dict[str, str]] = field(default_factory=list)
+    # Action items only: where it stands when the meeting ENDS (ingest/status.py),
+    # with the words that say so. None until the status pass has run.
+    status: str | None = None
+    status_evidence: str | None = None
+    blocked_on: str | None = None
     # Filled by the store when the artifact is written, and DERIVED from the
     # artifact rather than drawn at random -- so the same decision keeps the
     # same id across re-ingestions. None until then: an artifact that has been

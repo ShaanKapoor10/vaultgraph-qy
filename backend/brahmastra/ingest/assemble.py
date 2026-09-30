@@ -241,7 +241,8 @@ def rebuild_record(transcript_id: str, store: IngestStore | None = None) -> dict
     report: dict[str, Any] = {"transcript_id": transcript_id, "errors": []}
     chunks = _segment_with_speakers(record, report)
     fields = ("kind", "statement", "owner", "due", "rationale", "quote",
-              "chunk_index", "start_time", "end_time", "mentions", "superseded_by", "about")
+              "chunk_index", "start_time", "end_time", "mentions", "superseded_by", "about",
+              "status", "status_evidence", "blocked_on")
     artifacts = [Artifact(**{k: row.get(k) for k in fields if row.get(k) is not None})
                  for row in store.get_artifacts(transcript_id=transcript_id,
                                                 limit=1_000_000)]
@@ -368,7 +369,8 @@ def _settle_artifacts(ledger: ownership.Ledger, store: IngestStore,
                                   a.rationale, a.quote, a.chunk_index,
                                   getattr(a, "mentions", 1),
                                   getattr(a, "superseded_by", None),
-                                  json.dumps(getattr(a, "about", None) or [], sort_keys=True)),
+                                  json.dumps(getattr(a, "about", None) or [], sort_keys=True),
+                                  getattr(a, "status", None), getattr(a, "blocked_on", None)),
             a,
         )
         for aid, a in identified
@@ -849,6 +851,17 @@ def _process(
 
         reduced["artifacts"], presenter_drops = drop_presenter_questions(reduced["artifacts"], chunks)
         report["rejected"].extend(presenter_drops)
+
+    # Where each action item stands when the meeting ends (ingest/status.py):
+    # read from what was said about it, "done" and "blocked" only with the
+    # words that say so. Soft: a failure leaves everything open, and says so.
+    from brahmastra.ingest import passages as _passages
+    from brahmastra.ingest.status import assign as assign_status
+
+    reduced["artifacts"], status_report = assign_status(
+        reduced["artifacts"], _passages.turns_of(chunks))
+    report["status"] = {k: (len(v) if isinstance(v, list) else v)
+                        for k, v in status_report.items()}
 
     # The meeting record, declared straight into the graph from the verified
     # artifacts -- see ingest/graph_record.py for what the prose bridge lost.

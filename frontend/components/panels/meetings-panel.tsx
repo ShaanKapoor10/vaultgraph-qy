@@ -94,6 +94,9 @@ interface Item {
   kind: string
   statement: string
   rationale: string | null
+  status?: "open" | "done" | "blocked" | null
+  status_evidence?: string | null
+  blocked_on?: string | null
   owner: string | null
   said_by: string | null
   quote: string | null
@@ -765,6 +768,18 @@ function ItemCard({
     >
       <div className="flex items-start justify-between gap-3">
         <p className={`text-sm ${item.rejected ? "text-muted-foreground line-through" : "text-foreground"}`}>
+          {item.kind === "action_item" && (item.status === "done" || item.status === "blocked") && (
+            <span
+              title={item.status_evidence ? `"${item.status_evidence}"` : undefined}
+              className={`mr-1.5 inline-block rounded-full border px-1.5 py-px align-middle font-mono text-[10px] ${
+                item.status === "done"
+                  ? "border-green-500/30 bg-green-500/10 text-green-400"
+                  : "border-amber-500/30 bg-amber-500/10 text-amber-400"
+              }`}
+            >
+              {item.status}
+            </span>
+          )}
           {item.statement}
         </p>
         <button
@@ -789,6 +804,7 @@ function ItemCard({
           <span>assigned by {item.said_by}</span>
         )}
         {item.due && <span>due {item.due}</span>}
+        {item.status === "blocked" && item.blocked_on && <span className="text-amber-400">waiting on {item.blocked_on}</span>}
         {item.start_time && (
           <span className="flex items-center gap-1">
             <Clock className="h-3 w-3" />

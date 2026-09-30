@@ -166,6 +166,12 @@ def record_triples(meeting: str, participants: Iterable[str],
         owner = _person_for(artifact, kind)
         if owner and not is_anonymous(owner):
             add(statement, item_type, to_person, owner, "person", quote)
+        status = _field(artifact, "status")
+        if kind == "action_item" and status in ("done", "blocked"):
+            # Only the states worth asking about: "what is blocked?", "what got
+            # done?". Open is the default and would be one edge per item.
+            add(statement, item_type, "has_status", status, "status",
+                _field(artifact, "status_evidence") or quote)
         for about in (_field(artifact, "about") or []) if kind == "point" else []:
             name = _clean((about or {}).get("name"))
             if name and name.lower() != (owner or "").lower():
@@ -200,6 +206,9 @@ def record_body(meeting: str, participants: Iterable[str],
             line = f"- {_clean(_field(a, 'statement'))}"
             if _person_for(a, kind):
                 line += f" ({who[kind]} {_person_for(a, kind)})"
+            if kind == "action_item" and _field(a, "status") in ("done", "blocked"):
+                line += f" [{_field(a, 'status')}"
+                line += f": waiting on {_field(a, 'blocked_on')}]" if _field(a, "blocked_on") else "]"
             if _field(a, "quote"):
                 line += f' -- "{_clean(_field(a, "quote"))}"'
             lines.append(line)

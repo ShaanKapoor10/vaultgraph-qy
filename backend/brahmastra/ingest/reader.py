@@ -86,9 +86,10 @@ _NOTES_BRIEF = {
         "something TAUGHT: a definition, how something works, a rule, a worked "
         "example with its numbers, a comparison between two things. Write it so it "
         "is true on its own and could be studied from -- \"The buyer of a swap pays "
-        "fixed and receives floating\", not \"She explained swaps\". The presenter's "
-        "check-ins (\"Is this making sense?\"), quiz questions put to the class, and "
-        "stories that teach nothing are not points."
+        "fixed and receives floating\", not \"She explained swaps\". A resource the "
+        "presenter recommends -- a film, a book, a site, a tool -- is a point too, with "
+        "why it was recommended. The presenter's check-ins (\"Is this making sense?\"), "
+        "quiz questions put to the class, and stories that teach nothing are not points."
     ),
 }
 

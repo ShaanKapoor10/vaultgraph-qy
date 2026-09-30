@@ -160,7 +160,9 @@ def run(case_path: Path, qa_path: Path, judge_model: str = DEFAULT_JUDGE,
                     answer = _raw_answer(q["question"], passages)
                 else:
                     os.environ["RAG_PASSAGES"] = "0" if arm == "graph" else "1"
-                    answer = answer_question(q["question"])["answer"]
+                    asked = answer_question(q["question"])
+                    answer = asked["answer"]
+                    row.setdefault("source", {})[arm] = asked.get("source") or asked.get("mode")
             except Exception as exc:                           # noqa: BLE001
                 answer = f"(failed: {type(exc).__name__}: {exc})"[:300]
             row[arm] = {"answer": answer, **_judge(q["question"], q["answer"], answer, judge_model)}
@@ -171,6 +173,11 @@ def run(case_path: Path, qa_path: Path, judge_model: str = DEFAULT_JUDGE,
         for kind in ("item", "detail"):
             rows = [r for r in graded if r["kind"] == kind]
             summary[f"{arm}:{kind}"] = f"{sum(r[arm]['correct'] for r in rows)}/{len(rows)}"
+    # The point of a knowledge graph: how many answers it gave ITSELF, and how
+    # many had to fall back to the transcript (graph-first /ask, "graph+tx").
+    if "graph+tx" in arms:
+        sources = [str(r.get("source", {}).get("graph+tx")) for r in graded]
+        summary["graph+tx:answered_by"] = {s: sources.count(s) for s in sorted(set(sources))}
     return {
         "case": name, "mode": case.get("mode") or "meeting",
         "ingest_status": ingest.get("status"), "pipeline_status": pipeline.get("status"),
