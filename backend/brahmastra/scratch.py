@@ -81,6 +81,17 @@ def scratch_env(db_path: str | Path | None = None) -> dict[str, str]:
         "BRAHMASTRA_NO_DOTENV": "1",
         "GRAPH_BACKEND": "sqlite",
         "BRAHMASTRA_DB": str(resolved),
+        # Runtime state too, not only the database. The data directory holds
+        # the session CHECKPOINT QUEUE, and the pipeline drains it before it
+        # extracts -- so a scratch run of the pipeline took two real distilled
+        # session notes into a throwaway store and deleted their queue files
+        # (2026-09-28/30, found as "checkpoint-..." citations in an evaluation's
+        # answers). Pipeline locks, dirty markers and dashboard keys live here
+        # as well; none of them belong to a probe.
+        "BRAHMASTRA_DATA_DIR": str(resolved.parent / f"{resolved.stem}-data"),
+        # The queue has its own override and does NOT follow the data dir
+        # (checkpoint.queue_dir), so it is redirected by name as well.
+        "BRAHMASTRA_CHECKPOINT_DIR": str(resolved.parent / f"{resolved.stem}-data" / "checkpoints"),
         # A remote engine has nothing to stay awake for here, and a scratch run
         # vouching for the real one would be a lie the keepalive then believes.
         "GRAPH_KEEPALIVE": "0",

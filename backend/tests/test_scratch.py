@@ -133,3 +133,26 @@ def test_exactly_one_thing_to_run_is_required():
     proc = _run()
     assert proc.returncode != 0
     assert "exactly one" in proc.stderr
+
+
+def test_a_scratch_run_cannot_reach_the_real_checkpoint_queue(tmp_path):
+    """The pipeline drains the checkpoint queue; in scratch that queue must be its own."""
+    from pathlib import Path
+
+    from brahmastra.scratch import scratch_env
+
+    env = scratch_env(tmp_path / "probe.db")
+    real = (Path(__file__).resolve().parents[1] / "data").resolve()
+    assert Path(env["BRAHMASTRA_DATA_DIR"]).resolve() != real
+    assert Path(env["BRAHMASTRA_DATA_DIR"]).resolve().parent == tmp_path.resolve()
+
+
+def test_the_checkpoint_queue_itself_is_redirected(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from brahmastra import checkpoint
+    from brahmastra.scratch import scratch_env
+
+    for name, value in scratch_env(tmp_path / "probe.db").items():
+        monkeypatch.setenv(name, value)
+    assert tmp_path.resolve() in checkpoint.queue_dir().resolve().parents
