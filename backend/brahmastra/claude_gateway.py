@@ -40,6 +40,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -75,18 +76,58 @@ def _extract_json(text: str) -> str:
         return text
 
 
+def _unwrap(value: Any) -> Any:
+    """
+    Given only {"type": "object"}, Haiku wraps its real answer as a string in a
+    single field -- {"response": "{\\"decisions\\": [...]}"}. The object the
+    prompt asked for is that string; anything else is returned as it came.
+    """
+    if isinstance(value, dict) and len(value) == 1:
+        (inner,) = value.values()
+        if isinstance(inner, str):
+            try:
+                parsed = json.loads(_extract_json(inner))
+            except ValueError:
+                return value
+            if isinstance(parsed, dict):
+                return parsed
+    return value
+
+
 def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None,
                json_object: bool) -> dict[str, Any]:
-    """One headless call. Returns {text, usage, cost, ms} or raises RuntimeError."""
+    """
+    One headless call. Returns {text, usage, cost, ms} or raises RuntimeError.
+
+    The system prompt goes in a FILE. On Windows `claude` is a .cmd shim, and
+    an argument passed through cmd.exe is cut at its first newline: every
+    multi-line prompt arrived as its first sentence, so the model never saw
+    "Return ONLY a JSON object" and wrote Markdown minutes instead -- every
+    comprehension call failed on the first real run.
+
+    A json_object request is given a minimal schema ({"type": "object"}), so
+    the CLI's structured output GUARANTEES an object rather than the prompt
+    merely asking for one.
+    """
+    if json_object and schema is None:
+        schema = {"type": "object"}
+    with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
+        fh.write(system + (_JSON_ONLY if json_object else ""))
+        prompt_file = fh.name
     args = [claude_binary(), "-p", "--model", model, "--output-format", "json",
             "--no-session-persistence", "--tools", "", "--strict-mcp-config",
-            "--setting-sources", "",
-            "--system-prompt", system + (_JSON_ONLY if json_object and not schema else "")]
+            "--setting-sources", "", "--system-prompt-file", prompt_file]
     if schema is not None:
-        args += ["--json-schema", json.dumps(schema)]
+        args += ["--json-schema", json.dumps(schema, separators=(",", ":"))]
     started = time.perf_counter()
-    proc = subprocess.run(args, input=user, capture_output=True, text=True,
-                          encoding="utf-8", timeout=CALL_TIMEOUT)
+    try:
+        proc = subprocess.run(args, input=user, capture_output=True, text=True,
+                              encoding="utf-8", timeout=CALL_TIMEOUT)
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
     ms = int((time.perf_counter() - started) * 1000)
     try:
         out = json.loads(proc.stdout)
@@ -96,7 +137,7 @@ def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None
     if out.get("is_error"):
         raise RuntimeError(f"claude reported an error: {str(out.get('result'))[:400]}")
     if out.get("structured_output") is not None:
-        text = json.dumps(out["structured_output"])
+        text = json.dumps(_unwrap(out["structured_output"]))
     else:
         text = out.get("result") or ""
         if json_object:

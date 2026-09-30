@@ -676,12 +676,28 @@ def _cached_chat(system: str, user: str, **kwargs: Any) -> str:
         pass
 
     key = memo.key_for(user, "chat", model, system)
+    wants_json = bool(kwargs.get("json_mode") or kwargs.get("json_schema"))
+
+    def usable(reply: str) -> bool:
+        # A reply that was asked to be JSON and is not can never be read, and
+        # caching it makes every re-run fail the same way without asking the
+        # model again. Found when a gateway bug returned Markdown minutes: the
+        # fix could not take effect, because the Markdown was served from here.
+        if not wants_json:
+            return True
+        try:
+            _parse_reply(reply)
+            return True
+        except Exception:                                      # noqa: BLE001
+            return False
+
     hit = memo.load(key)
-    if hit is not None:
+    if hit is not None and usable(hit):
         return hit
 
     reply = chat(system, user, **kwargs)
-    memo.save(key, reply)
+    if usable(reply):
+        memo.save(key, reply)
     return reply
 
 

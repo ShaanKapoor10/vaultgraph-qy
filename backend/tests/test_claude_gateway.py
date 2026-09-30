@@ -66,3 +66,47 @@ def test_json_mode_is_passed_as_json_object(served, monkeypatch):
     monkeypatch.setenv("CLAUDE_GATEWAY_URL", url)
     llm.chat("sys", "u", json_mode=True, provider="gateway")
     assert calls[0]["json_object"] is True and calls[0]["schema"] is None
+
+
+def test_an_answer_wrapped_as_a_string_is_unwrapped():
+    wrapped = {"response": '{"decisions": [{"statement": "Ship April 15th"}]}'}
+    assert claude_gateway._unwrap(wrapped) == {"decisions": [{"statement": "Ship April 15th"}]}
+    assert claude_gateway._unwrap({"decisions": []}) == {"decisions": []}
+    assert claude_gateway._unwrap({"note": "just text"}) == {"note": "just text"}
+
+
+def test_the_system_prompt_goes_in_a_file_never_on_the_command_line(monkeypatch):
+    """cmd.exe cuts an argument at its first newline; a file cannot be cut."""
+    seen = {}
+
+    class Done:
+        returncode, stderr = 0, ""
+        stdout = json.dumps({"result": '{"ok": true}', "usage": {}, "total_cost_usd": 0})
+
+    def fake_run(args, **kw):
+        seen["args"] = args
+        path = args[args.index("--system-prompt-file") + 1]
+        seen["prompt"] = open(path, encoding="utf-8").read()
+        return Done()
+
+    monkeypatch.setattr(claude_gateway.subprocess, "run", fake_run)
+    monkeypatch.setattr(claude_gateway, "claude_binary", lambda: "claude")
+    claude_gateway.run_claude("line one\nline two\nReturn ONLY JSON.", "u", "haiku", None, True)
+    assert "line two" in seen["prompt"] and "--system-prompt" not in seen["args"]
+
+
+def test_an_unreadable_reply_is_never_served_from_the_cache(monkeypatch):
+    """A Markdown reply to a JSON request is not cached, and a cached one is ignored."""
+    from brahmastra.ingest import comprehend, memo
+
+    store: dict = {}
+    monkeypatch.setattr(memo, "load", lambda key: store.get(key))
+    monkeypatch.setattr(memo, "save", lambda key, reply: store.__setitem__(key, reply))
+    replies = iter(["# Meeting minutes\n- not json", '{"decisions": []}'])
+    monkeypatch.setattr("brahmastra.llm.chat", lambda *a, **k: next(replies))
+    assert comprehend._cached_chat("sys", "user", json_mode=True).startswith("#")
+    assert store == {}
+    assert comprehend._cached_chat("sys", "user", json_mode=True) == '{"decisions": []}'
+    store[next(iter(store))] = "# poisoned"
+    monkeypatch.setattr("brahmastra.llm.chat", lambda *a, **k: '{"decisions": [1]}')
+    assert comprehend._cached_chat("sys", "user", json_mode=True) == '{"decisions": [1]}'

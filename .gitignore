@@ -86,3 +86,6 @@ backend/data/eval-private/
 
 # The Claude gateway's per-call usage log (brahmastra/claude_gateway.py).
 backend/data/gateway-usage.jsonl
+
+# The test stack's host-side runtime state (the brahmastra-test MCP server).
+backend/data-test/
