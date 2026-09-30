@@ -195,6 +195,36 @@ def _match_statements(question: str, nodes: list[dict[str, Any]]) -> list[dict[s
     return [n for _, n in scored[:MAX_STATEMENTS]]
 
 
+def _with_related_statements(matched: list[dict[str, Any]], anchors: set[str],
+                             facts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """
+    A matched statement brings the other statements about what IT mentions.
+
+    Measured on Q3 planning (ingest/qa_eval.py): "who owns payments and when is
+    she back?" found "payments is sixty percent done and Priya will be out for
+    two weeks" and answered "two weeks" -- while "Priya is out until the 20th"
+    sat one hop further, on Priya. Half-answers like that were most of the
+    misses. So the entities a matched statement mentions become anchors too,
+    and their other statements come in: a two-hop walk through the graph,
+    which is what the graph is for.
+    """
+    if os.environ.get("RAG_RELATED_STATEMENTS", "1").strip() == "0":
+        return facts
+    statements = [n["id"] for n in matched if (n.get("type") or "") == "statement"]
+    if not statements or len(facts) >= MAX_FACTS:
+        return facts
+    mentioned: set[str] = set()
+    for sid in statements:
+        prefix = f"{sid} mentions "
+        mentioned.update(f["text"][len(prefix):] for f in facts if f["text"].startswith(prefix))
+    extra = mentioned - anchors
+    if not extra:
+        return facts
+    seen = {f["text"] for f in facts}
+    more = [f for f in _subgraph_facts(extra, depth=1) if f["text"] not in seen]
+    return facts + more[: MAX_FACTS - len(facts)]
+
+
 # ---------------------------------------------------------------------------
 # Subgraph → facts
 # ---------------------------------------------------------------------------
@@ -283,7 +313,10 @@ _LOCAL_SYSTEM = (
     "You answer questions about a personal knowledge graph using ONLY the facts "
     "provided. Each fact is numbered and tagged with a source note id like [n:abc123]; "
     "some facts are whole statements someone made, with who said them. "
-    "Write a concise, direct answer. After any claim, cite the supporting note id(s) in "
+    "Answer directly, and include the specifics the facts carry -- the reason, the "
+    "number or date, who said it or owns it -- rather than the gist; a partial "
+    "answer drops exactly what the question is usually after. After any claim, cite "
+    "the supporting note id(s) in "
     "square brackets. If the facts do not contain the answer, reply with exactly "
     f"{NOT_IN_GRAPH} and nothing else. Do not invent facts."
 )
@@ -378,6 +411,7 @@ def local_search(
 
     entity_ids = {n["id"] for n in matched}
     facts = _subgraph_facts(entity_ids, depth=depth)
+    facts = _with_related_statements(matched, entity_ids, facts)
     if not facts:
         return _answer_from_passages(question, sorted(entity_ids))
 

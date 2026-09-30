@@ -140,3 +140,36 @@ def test_no_match_is_not_sent_to_the_cluster_summaries():
 
     assert rag._is_global("What film did the trainer recommend?", []) is False
     assert rag._is_global("What are the main themes overall?", []) is True
+
+
+def test_a_matched_statement_brings_the_other_statements_about_what_it_mentions(monkeypatch):
+    from brahmastra import rag
+
+    s1 = "Payments is sixty percent done and Priya will be out for two weeks"
+    s2 = "Priya is out until the 20th"
+    calls = []
+
+    def neighbourhood(ids, depth=1):
+        calls.append(set(ids))
+        if s1 in ids:
+            return [{"text": f"{s1} mentions Priya", "note_id": "r", "quote": ""},
+                    {"text": f"{s1} said_by Mei", "note_id": "r", "quote": ""}]
+        if ids == {"Priya"}:
+            return [{"text": f"{s2} mentions Priya", "note_id": "r", "quote": ""},
+                    {"text": f"{s1} mentions Priya", "note_id": "r", "quote": ""}]
+        return []
+
+    monkeypatch.setattr(rag, "_subgraph_facts", neighbourhood)
+    facts = rag._with_related_statements([{"id": s1, "type": "statement"}], {s1},
+                                         neighbourhood({s1}))
+    texts = [f["text"] for f in facts]
+    assert f"{s2} mentions Priya" in texts and len(texts) == len(set(texts))
+    assert {"Priya"} in calls and {"Mei"} not in calls          # only what it MENTIONS
+
+
+def test_no_statement_matched_means_no_extra_walk(monkeypatch):
+    from brahmastra import rag
+
+    monkeypatch.setattr(rag, "_subgraph_facts", lambda ids, depth=1: pytest.fail("walked"))
+    facts = [{"text": "Raj owns reconciliation", "note_id": "", "quote": ""}]
+    assert rag._with_related_statements([{"id": "Raj", "type": "person"}], {"Raj"}, facts) == facts
