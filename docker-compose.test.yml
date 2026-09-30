@@ -1,0 +1,94 @@
+# A SEPARATE Brahmastra for experiments -- branch exp/haiku-gateway.
+#
+#   docker compose -f docker-compose.test.yml up -d --build
+#
+# Its own project name, ports, volumes and database: nothing here can reach the
+# production stack (Postgres :5433, Aura, Notion), and nothing is interpolated
+# from .env -- every value is written out, so a production setting in the
+# repo-root .env cannot leak in the way CLAUDE.md warns compose does.
+#
+# Every LLM call goes to the Claude gateway on the HOST
+# (python -m brahmastra.claude_gateway, port 8790), which answers with Claude
+# Haiku through Claude Code's own login. Start the gateway first.
+#
+#   dashboard  http://localhost:3001
+#   API        http://localhost:8011
+#   postgres   localhost:5434 (notes)       graph: SQLite in the test volume
+
+name: brahmastra-test
+
+services:
+  postgres-test:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    ports:
+      - "5434:5432"
+    environment:
+      POSTGRES_USER: brahmastra
+      POSTGRES_PASSWORD: brahmastra-test
+      POSTGRES_DB: brahmastra_test
+    volumes:
+      - test-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U brahmastra -d brahmastra_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend-test:
+    build:
+      context: ./backend
+    image: brahmastra-backend-test
+    restart: unless-stopped
+    ports:
+      - "8011:8001"
+    depends_on:
+      postgres-test:
+        condition: service_healthy
+    environment:
+      # ---- storage: notes in the test Postgres, the graph in SQLite -------
+      NOTE_BACKEND: postgres
+      GRAPH_BACKEND: sqlite
+      POSTGRES_HOST: postgres-test
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: brahmastra
+      POSTGRES_PASSWORD: brahmastra-test
+      POSTGRES_DB: brahmastra_test
+      BRAHMASTRA_DB: /data/concept_graph.db
+      BRAHMASTRA_DATA_DIR: /data
+      GRAPH_KEEPALIVE: "0"
+      # ---- the model: Claude Haiku through the host gateway ---------------
+      LLM_PROVIDER: gateway
+      GATEWAY_MODEL: haiku
+      CLAUDE_GATEWAY_URL: http://host.docker.internal:8790
+      # The merge judge and every other stage use the same model here.
+      RESOLUTION_LLM_MODEL: gateway:haiku
+      ENTITY_CONFIRM: "1"
+      GROQ_API_KEY: ""
+      GROQ_API_KEYS: ""
+      # ---- nothing outward-facing -----------------------------------------
+      NOTION_TOKEN: ""
+      NOTION_DATABASE_ID: ""
+      BRAHMASTRA_ALLOW_ANONYMOUS: "1"
+      BRAHMASTRA_KEY_ADMIN: ""
+    volumes:
+      - test-data:/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  frontend-test:
+    build:
+      context: ./frontend
+    image: brahmastra-frontend-test
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      BACKEND_URL: http://backend-test:8001
+    depends_on:
+      backend-test:
+        condition: service_started
+
+volumes:
+  test-postgres-data:
+  test-data:

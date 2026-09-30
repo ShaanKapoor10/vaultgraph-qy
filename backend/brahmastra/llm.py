@@ -188,7 +188,15 @@ _REGISTRY: tuple[Provider, ...] = (
     Provider("anthropic", "ANTHROPIC_API_KEY", "anthropic", "ANTHROPIC_MODEL",
              ANTHROPIC_DEFAULT_MODEL),
     Provider("ollama", "", "", "OLLAMA_MODEL", OLLAMA_MODEL),
+    # TESTING ONLY (branch exp/haiku-gateway): Claude Code's headless mode behind
+    # a local HTTP gateway, brahmastra/claude_gateway.py. Never chosen
+    # automatically and never a quota fallback -- only LLM_PROVIDER=gateway.
+    Provider("gateway", "", "", "GATEWAY_MODEL", "haiku"),
 )
+
+# Providers that must be ASKED for by name: automatic selection and the quota
+# fallback skip them, so an experiment's endpoint cannot quietly serve production.
+_EXPLICIT_ONLY = frozenset({"gateway"})
 
 PROVIDERS = tuple(p.name for p in _REGISTRY)
 
@@ -394,7 +402,9 @@ def provider_status() -> dict[str, bool]:
     """
     status: dict[str, bool] = {}
     for spec in _REGISTRY:
-        if spec.name == "groq":
+        if spec.name == "gateway":
+            status[spec.name] = gateway_available()
+        elif spec.name == "groq":
             # A LIST of keys counts as configured too -- a deployment that sets
             # only GROQ_API_KEYS must not look like it has no Groq at all.
             from brahmastra.groq_pool import configured_keys
@@ -421,7 +431,7 @@ def resolve_provider() -> str:
         return requested
 
     for name in PROVIDERS:  # registry order: cloud first, local last
-        if status[name]:
+        if status[name] and name not in _EXPLICIT_ONLY:
             return name
 
     keys = ", ".join(p.key_env for p in _REGISTRY if p.is_cloud)
@@ -524,7 +534,8 @@ def chat(
 def _next_usable_provider(exclude: str) -> str | None:
     """The next provider that can actually serve a request, or None."""
     status = provider_status()
-    return next((n for n in PROVIDERS if n != exclude and status.get(n)), None)
+    return next((n for n in PROVIDERS
+                 if n != exclude and n not in _EXPLICIT_ONLY and status.get(n)), None)
 
 
 def _dispatch(
@@ -564,6 +575,11 @@ def _dispatch(
     if name == "anthropic":
         return _anthropic_chat(
             system, user, temperature=temperature, max_tokens=max_tokens,
+        )
+    if name == "gateway":
+        return _gateway_chat(
+            system, user, json_mode=json_mode, json_schema=json_schema,
+            max_tokens=max_tokens, timeout=timeout, retries=retries,
         )
     raise LLMUnavailable(f"Unknown provider {name!r}; expected one of {PROVIDERS}")
 
@@ -632,6 +648,81 @@ def _openai_chat(
             time.sleep(retry_delay(e, attempt))
 
     raise LLMUnavailable(f"OpenAI request failed after {retries} attempts: {last_err}")
+
+
+_gateway_seen: dict[str, float] = {}
+
+
+def gateway_url() -> str:
+    return _env("CLAUDE_GATEWAY_URL", "").rstrip("/")
+
+
+def gateway_available() -> bool:
+    """The gateway answers /health. Cached for 30s: this is asked on every call."""
+    url = gateway_url()
+    if not url:
+        return False
+    now = time.time()
+    if now - _gateway_seen.get(url, 0.0) < 30:
+        return True
+    try:
+        import httpx
+
+        ok = httpx.get(f"{url}/health", timeout=3.0).status_code == 200
+    except Exception:                                          # noqa: BLE001
+        ok = False
+    if ok:
+        _gateway_seen[url] = now
+    return ok
+
+
+def _gateway_chat(
+    system: str,
+    user: str,
+    *,
+    json_mode: bool,
+    json_schema: dict[str, Any] | None = None,
+    max_tokens: int,
+    timeout: int,
+    retries: int,
+) -> str:
+    """
+    The Claude Code gateway (brahmastra/claude_gateway.py), OpenAI wire shape.
+
+    No SDK: the gateway is ours and local, and pulling in the openai package
+    for one experiment would make it a dependency of every deployment.
+    Temperature is not sent -- the CLI behind the gateway has no such setting.
+    """
+    import httpx
+
+    body: dict[str, Any] = {
+        "model": model_for("gateway"),
+        "max_tokens": max_tokens,
+        "messages": [{"role": "system", "content": system},
+                     {"role": "user", "content": user}],
+    }
+    if json_schema is not None:
+        body["response_format"] = {"type": "json_schema",
+                                   "json_schema": {"name": "record", "schema": json_schema}}
+    elif json_mode:
+        body["response_format"] = {"type": "json_object"}
+    headers = {}
+    token = _env("CLAUDE_GATEWAY_TOKEN", "")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    last_err: Exception | None = None
+    for attempt in range(retries):
+        try:
+            resp = httpx.post(f"{gateway_url()}/v1/chat/completions", json=body,
+                              headers=headers, timeout=max(timeout, 200))
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"] or ""
+            last_err = LLMUnavailable(f"gateway {resp.status_code}: {resp.text[:300]}")
+        except Exception as e:                                 # noqa: BLE001
+            last_err = e
+        time.sleep(2 * (attempt + 1))
+    raise LLMUnavailable(f"Claude gateway request failed after {retries} attempts: {last_err}")
 
 
 def _gemini_chat(

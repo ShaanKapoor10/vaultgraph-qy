@@ -83,3 +83,6 @@ backend/data/.graph-touch-*
 # Labelled eval cases built from REAL recordings (names, internal sessions):
 # kept on this machine, never committed. Synthetic cases live in ingest/cases/.
 backend/data/eval-private/
+
+# The Claude gateway's per-call usage log (brahmastra/claude_gateway.py).
+backend/data/gateway-usage.jsonl
