@@ -715,7 +715,7 @@ def _gateway_chat(
     for attempt in range(retries):
         try:
             resp = httpx.post(f"{gateway_url()}/v1/chat/completions", json=body,
-                              headers=headers, timeout=max(timeout, 200))
+                              headers=headers, timeout=max(timeout, 450))
             if resp.status_code == 200:
                 return resp.json()["choices"][0]["message"]["content"] or ""
             last_err = LLMUnavailable(f"gateway {resp.status_code}: {resp.text[:300]}")

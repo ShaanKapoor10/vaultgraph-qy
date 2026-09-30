@@ -49,7 +49,9 @@ from typing import Any
 
 DEFAULT_MODEL = "haiku"
 DEFAULT_PORT = 8790
-CALL_TIMEOUT = 180
+# The slowest 5% of calls took 2 minutes or more (max 2.8) on the first full run --
+# long lecture parts with long notes -- and a 180 s limit failed a whole session.
+CALL_TIMEOUT = 420
 
 _JSON_ONLY = ("\n\nRespond with ONE JSON object and nothing else: no prose before or "
               "after it, no code fences.")
