@@ -22,6 +22,7 @@ memo keys and the same findings. The notes pass is added beside them.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable
 
 from brahmastra.ingest.comprehend import (
@@ -39,6 +40,30 @@ AUDIENCE_BUDGET = 1800
 # How much of the previous part is repeated to the next. One part back is what
 # meeting-scribe found enough to stop repetition; more makes every prompt grow.
 RECAP_POINTS = 15
+
+
+def notes_temperature() -> float:
+    """INGEST_NOTES_TEMPERATURE, read per call. 0.1 until measured otherwise."""
+    try:
+        return float(os.environ.get("INGEST_NOTES_TEMPERATURE", "") or 0.1)
+    except ValueError:
+        return 0.1
+
+
+def notes_readings() -> int:
+    """
+    INGEST_NOTES_READINGS: independent readings of each part, merged.
+
+    Measured before this existed: one meeting's notes pass gave 4 statements on
+    one run and 9 on the next, another 17 then 5 -- and what the graph can
+    answer is bounded by it. Merging readings trades calls for coverage; the
+    merge is safe because every point is quote-checked on its own and
+    consolidate() folds restatements together.
+    """
+    try:
+        return max(1, min(3, int(os.environ.get("INGEST_NOTES_READINGS", "") or 1)))
+    except ValueError:
+        return 1
 
 NOTES_PROMPT = """\
 You take notes on one part of {session}. You get the notes already taken for
@@ -161,12 +186,30 @@ class SessionReader:
                                      brief=_NOTES_BRIEF.get(self.mode.id, _NOTES_BRIEF["meeting"]))
         # The recap goes in the same message as the passage, so the memo key
         # covers it: a different previous part is a different reading.
-        payload, err = _one_pass_with_prefix(
-            chunk, system, NOTES_BUDGET,
-            f"NOTES FROM THE PART BEFORE:\n{_recap(self._topic, self._points)}\n\n")
-        if payload is None:
-            return None, err
-        return build_understanding(payload, chunk, specs=POINT_SPECS), None
+        recap = f"NOTES FROM THE PART BEFORE:\n{_recap(self._topic, self._points)}\n\n"
+        merged: ChunkUnderstanding | None = None
+        error: str | None = None
+        for reading in range(notes_readings()):
+            # Later readings are marked, so each is its own memo entry rather
+            # than the first one served again.
+            marker = f"(Independent reading {reading + 1}.)\n" if reading else ""
+            payload, err = _one_pass_with_prefix(chunk, system, NOTES_BUDGET, marker + recap)
+            if payload is None:
+                error = error or err
+                continue
+            got = build_understanding(payload, chunk, specs=POINT_SPECS)
+            if merged is None:
+                merged = got
+            else:
+                seen = {a.statement.strip().lower() for a in merged.artifacts}
+                merged.artifacts.extend(a for a in got.artifacts
+                                        if a.statement.strip().lower() not in seen)
+                merged.rejected.extend(got.rejected)
+                merged.topic = merged.topic or got.topic
+                merged.summary = merged.summary or got.summary
+        if merged is None:
+            return None, error
+        return merged, None
 
     def _audience(self, chunk: Chunk) -> tuple[ChunkUnderstanding | None, str | None]:
         payload, err = _one_pass(chunk, AUDIENCE_PROMPT, AUDIENCE_BUDGET)
@@ -278,7 +321,7 @@ def _one_pass_with_prefix(chunk: Chunk, system: str, budget: int,
         raw = _cached_chat(
             system,
             f"{prefix}Part {chunk.index + 1} of the transcript (the NEW part):\n\n{chunk.text}",
-            json_mode=True, temperature=0.1, max_tokens=budget)
+            json_mode=True, temperature=notes_temperature(), max_tokens=budget)
     except Exception as exc:                                   # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"[:300]
     try:

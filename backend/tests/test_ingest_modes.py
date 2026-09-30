@@ -264,3 +264,31 @@ def test_part_notes_can_stay_out_of_extraction_and_are_settled(monkeypatch, tmp_
     assert out["extracted"] == 0
     assert db.get_note("t1-c0")["extraction_status"] == "done"
     assert not [t for t in db.get_all_triples() if t.get("source_note_id") == "t1-c0"]
+
+
+def test_two_readings_of_a_part_are_merged_without_duplicates(monkeypatch):
+    from brahmastra.ingest import comprehend
+    from brahmastra.ingest.comprehend import ChunkUnderstanding
+
+    replies = iter([
+        {"topic": "Swaps", "points": [
+            {"point": "The buyer of a swap pays fixed and receives floating",
+             "quote": "Buyer of the swap is always paying fixed and receiving float"}]},
+        {"topic": "", "points": [
+            {"point": "The buyer of a swap pays fixed and receives floating",
+             "quote": "Buyer of the swap is always paying fixed and receiving float"},
+            {"point": "Dealers bake in a margin",
+             "quote": "they will bake in the margin"}]}])
+    seen = []
+
+    def chat(system, user, **kw):
+        seen.append(user)
+        return json.dumps(next(replies))
+
+    monkeypatch.setattr(comprehend, "_cached_chat", chat)
+    monkeypatch.setenv("INGEST_NOTES_READINGS", "2")
+    reader = SessionReader("meeting", meeting_strategy=lambda c: ChunkUnderstanding(chunk_index=c.index))
+    u = reader(segment(LECTURE)[0])
+    points = [a.statement for a in u.artifacts if a.kind == "point"]
+    assert points == ["The buyer of a swap pays fixed and receives floating", "Dealers bake in a margin"]
+    assert "Independent reading 2" in seen[1] and "Independent reading" not in seen[0]

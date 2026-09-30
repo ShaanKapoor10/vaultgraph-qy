@@ -624,6 +624,25 @@ RULES:
 6. Empty arrays are correct when the passage holds none.
 """
 
+# Standups report work as much as they promise it. Without this rule "The login
+# fix shipped yesterday" is no commitment, so it is no action item, so it can
+# never be marked done (ingest/status.py): measured on the labelled standup, 1 of
+# 6 action items found. A separate prompt, switched by INGEST_COMMIT_REPORTED,
+# because this pass is measured and every meeting's items go through it.
+_REPORTED_WORK_RULE = """7. Work someone REPORTS is an action item too: finished ("the fix shipped
+   yesterday", "I already sent it") or under way ("I'm on the cache
+   migration", "I'm stuck on the export"). Its owner is whoever is doing or
+   did it. Record it with its quote; where it stands is decided later.
+"""
+COMMITMENTS_PROMPT_REPORTED = COMMITMENTS_PROMPT + _REPORTED_WORK_RULE
+
+
+def commitments_prompt() -> str:
+    if os.environ.get("INGEST_COMMIT_REPORTED", "0").strip() == "1":
+        return COMMITMENTS_PROMPT_REPORTED
+    return COMMITMENTS_PROMPT
+
+
 _COMMITMENT_KINDS = ("decision", "action_item")
 _CONCERN_KINDS = ("risk", "open_question")
 
@@ -701,7 +720,7 @@ def comprehend_chunk_focused(chunk: Chunk,
     """
     budget = max_tokens or int(os.environ.get("INGEST_COMPREHEND_TOKENS", "") or 1600)
 
-    commitments, err_a = _one_pass(chunk, COMMITMENTS_PROMPT, budget)
+    commitments, err_a = _one_pass(chunk, commitments_prompt(), budget)
     concerns, err_b = _one_pass(chunk, CONCERNS_PROMPT, budget)
 
     if commitments is None and concerns is None:
