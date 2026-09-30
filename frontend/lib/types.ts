@@ -69,6 +69,10 @@ export interface ConceptCluster {
   members: string[]
   /** One-line LLM-generated theme for the cluster. Empty if not yet summarised. */
   summary?: string
+  /** The cluster's NAME: 2-5 words. Empty on clusters summarised before labels existed. */
+  label?: string
+  /** Statements and meeting items attached to this topic (not part of its members). */
+  statements?: string[]
 }
 
 export interface Contradiction {

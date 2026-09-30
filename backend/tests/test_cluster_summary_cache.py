@@ -12,6 +12,8 @@ regenerate it.
 """
 from __future__ import annotations
 
+import json
+
 import importlib
 
 import pytest
@@ -51,7 +53,7 @@ def test_a_summary_is_carried_across_a_rebuild_when_membership_is_unchanged(temp
     _cache(temp_db, [{"id": 7, "members": ["a", "b"], "size": 2, "summary": "About A and B."}])
 
     carried = _previous_summaries_by_membership()
-    assert carried[_membership_key(["a", "b"])] == "About A and B."
+    assert carried[_membership_key(["a", "b"])]["summary"] == "About A and B."
 
 
 def test_a_cluster_without_a_summary_carries_nothing(temp_db):
@@ -124,7 +126,7 @@ def test_a_renumbered_cluster_still_reuses_its_summary(temp_db):
 
     carried = _previous_summaries_by_membership()
     # Same members, new id 88 -- the lookup must still hit.
-    assert carried.get(_membership_key(["y", "x"])) == "About X and Y."
+    assert carried.get(_membership_key(["y", "x"]))["summary"] == "About X and Y."
 
 
 # ---------------------------------------------------------------------------
@@ -187,3 +189,55 @@ def test_quota_stops_generation_after_the_first_refusal(temp_db, monkeypatch):
                      for i in range(5)])
     cs.run_cluster_summaries()
     assert len(calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Topics, not sessions (2026-09-30): statements and meeting items are placed
+# AFTER clustering, and a cluster is named with a short label.
+# ---------------------------------------------------------------------------
+
+def test_a_meeting_hub_does_not_become_its_own_cluster():
+    import networkx as nx
+
+    from brahmastra.concept_graph import _topic_partition
+
+    G = nx.DiGraph()
+    for n, t in [("swap", "concept"), ("Brent", "concept"), ("hedge", "concept"),
+                 ("NBP future", "concept"), ("ICE", "organisation"), ("lot size", "concept"),
+                 ("Lecture", "meeting")]:
+        G.add_node(n, type=t)
+    G.add_edges_from([("swap", "Brent"), ("swap", "hedge"), ("Brent", "hedge"),
+                      ("NBP future", "ICE"), ("NBP future", "lot size"), ("ICE", "lot size")])
+    statements = {"A swap buyer pays fixed": ["swap", "Brent"],
+                  "Refiners hedge with swaps": ["hedge", "swap"],
+                  "The NBP future trades on ICE": ["NBP future", "ICE"],
+                  "One lot is 1000 therms per day": ["lot size", "NBP future"]}
+    for s, mentions in statements.items():
+        G.add_node(s, type="statement")
+        G.add_edge(s, "Lecture")
+        for m in mentions:
+            G.add_edge(s, m)
+    part = _topic_partition(G)
+    assert part["A swap buyer pays fixed"] == part["swap"]
+    assert part["The NBP future trades on ICE"] == part["ICE"]
+    assert part["swap"] != part["ICE"]          # the session did not glue two topics together
+    assert "Lecture" in part
+
+
+def test_a_cluster_gets_a_short_label_and_a_sentence(monkeypatch):
+    import brahmastra.cluster_summary as cs
+
+    monkeypatch.setattr(cs, "chat", lambda *a, **k: json.dumps(
+        {"label": "Swap hedging", "summary": "How producers and refiners use swaps to fix prices."}))
+    out = cs._summarise_one(["swap", "Brent"], [])
+    assert out == {"label": "Swap hedging",
+                   "summary": "How producers and refiners use swaps to fix prices."}
+
+
+def test_a_label_that_is_really_a_sentence_is_dropped(monkeypatch):
+    import brahmastra.cluster_summary as cs
+
+    monkeypatch.setattr(cs, "chat", lambda *a, **k: json.dumps(
+        {"label": "AI driven bidirectional knowledge graph sync platform linking Notion and Neo4j",
+         "summary": "s"}))
+    assert cs._summarise_one(["a"], [])["label"] == ""

@@ -33,10 +33,15 @@ MAX_EDGES_IN_PROMPT = 40
 
 SYSTEM_PROMPT = (
     "You label clusters in a personal knowledge graph. Given the entities in one "
-    "cluster and the relationships among them, reply with a SINGLE sentence (max 25 "
-    "words) naming the theme that ties them together. No preamble, no quotes, no "
-    "markdown — just the sentence."
+    "cluster and the relationships among them, reply with JSON only: "
+    '{"label": "the theme in 2 to 5 words, like a section heading", '
+    '"summary": "one sentence (max 25 words) on what ties them together"}. '
+    "The label is a NAME, not a description: \"Swap hedging\", not \"How refiners "
+    "and producers use swaps to hedge\"."
 )
+
+# A label is a heading. Past this it is a description in the wrong field.
+MAX_LABEL_WORDS = 6
 
 
 def _build_user_message(members: list[str], internal_edges: list[dict[str, Any]]) -> str:
@@ -53,15 +58,32 @@ def _build_user_message(members: list[str], internal_edges: list[dict[str, Any]]
     )
 
 
-def _summarise_one(members: list[str], internal_edges: list[dict[str, Any]]) -> str:
+def _summarise_one(members: list[str], internal_edges: list[dict[str, Any]]) -> dict[str, str]:
+    """
+    {"label", "summary"}. The dashboard used the one-sentence summary as the
+    cluster's NAME, which is how a cluster came to be called "AI-driven
+    bidirectional knowledge-graph sync platform (Brahmastra) linking Notion,
+    Obsidian, Neo4j, and LLMs like Claude and Qwen2.5".
+    """
+    import json
+
     raw = chat(
         SYSTEM_PROMPT,
         _build_user_message(members, internal_edges),
+        json_mode=True,
         temperature=0.2,
         timeout=120,
     )
-    # Collapse to a single trimmed line — the model occasionally adds a newline.
-    return " ".join(raw.strip().split())
+    try:
+        data = json.loads(raw[raw.find("{"): raw.rfind("}") + 1])
+        summary = " ".join(str(data.get("summary") or "").split())
+        label = " ".join(str(data.get("label") or "").split()).rstrip(".")
+    except ValueError:
+        # Collapse to a single trimmed line — the model occasionally adds a newline.
+        summary, label = " ".join(raw.strip().split()), ""
+    if len(label.split()) > MAX_LABEL_WORDS:
+        label = ""
+    return {"label": label, "summary": summary}
 
 
 def summarise_clusters(
@@ -98,7 +120,8 @@ def summarise_clusters(
         # pipeline used to exceed a 30-minute timeout on this stage alone.
         carried = cluster.get("summary")
         if carried:
-            summaries[cluster["id"]] = carried
+            summaries[cluster["id"]] = ({"summary": carried, "label": cluster["label"]}
+                                        if cluster.get("label") else carried)
             continue
         if not can_generate:
             continue
@@ -150,7 +173,14 @@ def run_cluster_summaries() -> dict[str, Any]:
     # A carried summary outside the top MAX_CLUSTERS is still correct -- its
     # membership is unchanged by construction -- so it is kept, not blanked.
     for c in clusters:
-        c["summary"] = summaries.get(c["id"], c.get("summary") or "")
+        got = summaries.get(c["id"], c.get("summary") or "")
+        # A dict carries a short label; a plain string is a description alone
+        # (carried from before labels existed, or a stubbed summariser).
+        if isinstance(got, dict):
+            c["summary"], c["label"] = got.get("summary") or "", got.get("label") or ""
+        else:
+            c["summary"] = got
+            c.setdefault("label", "")
 
     db.cache_graph(cached["graph"], stats)
     generated = sum(1 for cid in summaries if cid not in carried_ids)

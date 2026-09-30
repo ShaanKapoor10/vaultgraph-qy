@@ -80,6 +80,8 @@ export interface BackendConceptCluster {
   members: string[]
   size: number
   summary?: string
+  label?: string
+  statements?: string[]
 }
 
 export interface BackendEntityCluster {
@@ -166,6 +168,8 @@ export function adaptBackendGraph(
     id: c.id,
     members: c.members,
     summary: c.summary ?? "",
+    label: c.label ?? "",
+    statements: c.statements ?? [],
   }))
 
   // -- Contradictions -------------------------------------------------------

@@ -39,9 +39,10 @@ def _membership_key(members: list[str]) -> str:
     return chr(0x1f).join(sorted(members))
 
 
-def _previous_summaries_by_membership() -> dict[str, str]:
+def _previous_summaries_by_membership() -> dict[str, dict[str, str]]:
     """
-    Summaries from the last cached graph, keyed by membership.
+    Summaries (and their short labels) from the last cached graph, keyed by
+    membership.
 
     Returns empty on any failure -- a missing cache just means everything gets
     resummarised, which is the old behaviour and merely slow.
@@ -52,13 +53,63 @@ def _previous_summaries_by_membership() -> dict[str, str]:
         return {}
     if not cached:
         return {}
-    out: dict[str, str] = {}
+    out: dict[str, dict[str, str]] = {}
     for cluster in (cached.get("stats") or {}).get("concept_clusters") or []:
         summary = cluster.get("summary")
         members = cluster.get("members")
         if summary and members:
-            out[_membership_key(members)] = summary
+            out[_membership_key(members)] = {"summary": summary,
+                                            "label": cluster.get("label") or ""}
     return out
+
+
+# Nodes that carry a meeting's CONTENT rather than a topic: whole statements and
+# the meeting record's items, and the meeting itself. Written by code from
+# transcripts (ontology.SYSTEM_ENTITY_TYPES).
+#
+# They are kept OUT of community detection and attached afterwards. Measured on
+# the live graph when statements arrived (2026-09-30): every statement is
+# discussed_in its meeting, so each meeting became a hub that Louvain turned
+# into one giant "cluster" of that session -- 127 members for one lecture, with
+# 194-character sentences as members. A topic cluster should say what things
+# are ABOUT; a session is not a topic.
+SCAFFOLD_TYPES = frozenset({"statement", "meeting", "decision", "action_item", "risk", "question"})
+
+
+def _topic_partition(G: nx.DiGraph) -> dict[str, int]:
+    """
+    Louvain over the ENTITY graph, then every scaffold node joins the cluster
+    most of its entity neighbours are in (a statement goes where the things it
+    mentions go). One that touches no entity follows its scaffold neighbours;
+    whatever is still unplaced gets a cluster of its own.
+    """
+    scaffold = {n for n, d in G.nodes(data=True) if d.get("type") in SCAFFOLD_TYPES}
+    if not scaffold:
+        return _louvain_partition(G)
+    entities = G.subgraph([n for n in G.nodes if n not in scaffold]).copy()
+    partition = _louvain_partition(entities) if entities.number_of_nodes() else {}
+    undirected = G.to_undirected(as_view=True)
+
+    for _ in range(3):                     # items -> statements -> meeting, at most
+        placed_any = False
+        for node in scaffold:
+            if node in partition:
+                continue
+            votes: dict[int, int] = defaultdict(int)
+            for nb in undirected.neighbors(node):
+                if nb in partition:
+                    votes[partition[nb]] += 1
+            if votes:
+                partition[node] = max(votes.items(), key=lambda kv: (kv[1], -kv[0]))[0]
+                placed_any = True
+        if not placed_any:
+            break
+    next_id = max(partition.values(), default=-1) + 1
+    for node in sorted(scaffold):
+        if node not in partition:
+            partition[node] = next_id
+            next_id += 1
+    return partition
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +124,9 @@ def _louvain_partition(G: nx.Graph) -> dict[str, int]:
     undirected = G.to_undirected()
     try:
         import community as community_louvain  # python-louvain package
-        return community_louvain.best_partition(undirected)
+        # Seeded: the same graph gives the same clusters, so an unchanged
+        # cluster keeps its membership -- and its summary -- run to run.
+        return community_louvain.best_partition(undirected, random_state=42)
     except ImportError:
         pass
     # Fallback: label propagation (built-in to networkx)
@@ -322,7 +375,10 @@ def run_build_graph() -> dict[str, Any]:
     # ------------------------------------------------------------------
     # 3. Louvain clustering
     # ------------------------------------------------------------------
-    partition = _louvain_partition(simple_G)
+    node_types = dict(G.nodes(data="type"))
+    for node in simple_G.nodes:
+        simple_G.nodes[node]["type"] = node_types.get(node, "unknown")
+    partition = _topic_partition(simple_G)
 
     # ------------------------------------------------------------------
     # 4. Contradiction detection
@@ -369,11 +425,18 @@ def run_build_graph() -> dict[str, Any]:
     previous = _previous_summaries_by_membership()
     concept_clusters = []
     for cid, members in sorted(cluster_members.items(), key=lambda x: -len(x[1])):
-        ordered = sorted(members)
-        cluster = {"id": cid, "members": ordered, "size": len(ordered)}
+        # `members` are the ENTITIES the topic is about; the statements and
+        # meeting items attached to it are listed apart, so a cluster card
+        # shows short names and its sentences separately.
+        ordered = sorted(m for m in members if node_types.get(m) not in SCAFFOLD_TYPES)
+        attached = sorted(m for m in members if node_types.get(m) in SCAFFOLD_TYPES)
+        if not ordered:
+            ordered, attached = attached, []
+        cluster = {"id": cid, "members": ordered, "size": len(ordered), "statements": attached}
         carried = previous.get(_membership_key(ordered))
         if carried:
-            cluster["summary"] = carried
+            cluster["summary"] = carried["summary"]
+            cluster["label"] = carried["label"]
         concept_clusters.append(cluster)
 
     # Entity resolution summary for the stats payload
