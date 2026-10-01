@@ -328,6 +328,19 @@ questions test substance no item carries. Totals over the three meetings:
 - **Lecture, same routes:** 7/12, 10/12 and 8/12.
 - **Open:** single runs; two lecture questions fail on every route; task status (open/done/blocked) not built.
 
+### 11d. Graph-first /ask, notes stability, statuses, topic clusters — 2026-10-01
+
+- **/ask is graph-first.** It answers from graph facts and statements (statements found by meaning), and reads transcript passages only when the graph has nothing. Such answers are marked `source: transcript`.
+  - Clean run, three meetings plus the lecture: 34/42 correct, 39/42 from the graph.
+  - Asking for the specifics the facts carry: 27/30 against 25/30 on the same graphs.
+- **The notes pass reads every part twice** (`INGEST_NOTES_READINGS=2`). It covered 59/90 expected answers against 51/90, and its worst run went from 7 statements to 16. Temperature 0 did not help (45/90).
+- **Not adopted:**
+  - the related-statements walk: no gain (`RAG_RELATED_STATEMENTS`, off);
+  - the reported-work rule for standups: no gain (`INGEST_COMMIT_REPORTED`, off). A standup's reported work is still missed.
+- **Task status (open, done, blocked)** comes from what was said: 14/16 right where the item was found, 0 traps.
+- **Topic clusters** run on entities only, with statements attached afterwards, plus a short label. The lecture's 143-node session cluster split into 4 topics; modularity went from 0.859 to 0.864.
+- **Haiku through Claude Code** is on branch `exp/haiku-gateway`, as a separate test stack. Its first numbers measured gateway bugs, not the model; see that branch.
+
 ### 11b. A whole-meeting pass (from meeting-scribe) — MEASURED, NOT ADOPTED
 
 Branch `feat/transcript-extraction-test`, `ingest/reconcile.py`. meeting-scribe

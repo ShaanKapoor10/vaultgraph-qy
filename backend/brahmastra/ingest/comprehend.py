@@ -624,6 +624,11 @@ RULES:
 6. Empty arrays are correct when the passage holds none.
 """
 
+# MEASURED 2026-10-01 (gpt-oss-120b, 4 labelled meetings x 2 runs): standup
+# action items found 2 and 3 of 6 without the rule, 3 and 2 with it; recall
+# 69% -> 66%, precision 70% -> 63%. No gain, so it stays off. The standup's
+# reported work is still missed -- an open problem, not a solved one.
+#
 # Standups report work as much as they promise it. Without this rule "The login
 # fix shipped yesterday" is no commitment, so it is no action item, so it can
 # never be marked done (ingest/status.py): measured on the labelled standup, 1 of
@@ -681,7 +686,7 @@ def _cached_chat(system: str, user: str, **kwargs: Any) -> str:
     def usable(reply: str) -> bool:
         # A reply that was asked to be JSON and is not can never be read, and
         # caching it makes every re-run fail the same way without asking the
-        # model again. Found when a gateway bug returned Markdown minutes: the
+        # model again. Found when a provider returned Markdown minutes: the
         # fix could not take effect, because the Markdown was served from here.
         if not wants_json:
             return True

@@ -119,9 +119,13 @@ def summarise_clusters(
         # incremental run from ~25 calls into, typically, none: one run of the
         # pipeline used to exceed a 30-minute timeout on this stage alone.
         carried = cluster.get("summary")
-        if carried:
-            summaries[cluster["id"]] = ({"summary": carried, "label": cluster["label"]}
-                                        if cluster.get("label") else carried)
+        # A summary carried from before labels existed has no short name, and
+        # the dashboard shows "(no label)" for it until it is regenerated once.
+        if carried and cluster.get("label"):
+            summaries[cluster["id"]] = {"summary": carried, "label": cluster["label"]}
+            continue
+        if carried and not can_generate:
+            summaries[cluster["id"]] = carried
             continue
         if not can_generate:
             continue
@@ -138,8 +142,12 @@ def summarise_clusters(
             # loop: a `break` here dropped every carried summary ranked below
             # this cluster, and the caller then blanked them.
             can_generate = False
+            if carried:                     # a label refresh that failed keeps the old text
+                summaries[cluster["id"]] = carried
         except Exception:
             # Fail soft per-cluster: one bad/empty response shouldn't drop the rest.
+            if carried:
+                summaries[cluster["id"]] = carried
             continue
 
     return summaries

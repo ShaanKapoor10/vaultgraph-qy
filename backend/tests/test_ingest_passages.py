@@ -143,6 +143,7 @@ def test_no_match_is_not_sent_to_the_cluster_summaries():
 
 
 def test_a_matched_statement_brings_the_other_statements_about_what_it_mentions(monkeypatch):
+    monkeypatch.setenv("RAG_RELATED_STATEMENTS", "1")          # off by default since measured
     from brahmastra import rag
 
     s1 = "Payments is sixty percent done and Priya will be out for two weeks"
