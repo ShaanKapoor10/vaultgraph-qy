@@ -110,3 +110,16 @@ def test_an_unreadable_reply_is_never_served_from_the_cache(monkeypatch):
     store[next(iter(store))] = "# poisoned"
     monkeypatch.setattr("brahmastra.llm.chat", lambda *a, **k: '{"decisions": [1]}')
     assert comprehend._cached_chat("sys", "user", json_mode=True) == '{"decisions": [1]}'
+
+
+def test_json_hidden_inside_strings_is_repaired():
+    raw = {"summary": "[not json] just prose", "decisions": '[{"statement": "Ship Monday"}]',
+           "risks": "[]"}
+    out = claude_gateway._repair(raw)
+    assert out["decisions"] == [{"statement": "Ship Monday"}] and out["risks"] == []
+    assert out["summary"] == "[not json] just prose"
+
+
+def test_a_schema_echoed_back_is_not_an_answer():
+    assert claude_gateway._is_schema_echo({"type": "object"})
+    assert not claude_gateway._is_schema_echo({"risks": [], "open_questions": []})

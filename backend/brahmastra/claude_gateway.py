@@ -53,6 +53,13 @@ DEFAULT_PORT = 8790
 # long lecture parts with long notes -- and a 180 s limit failed a whole session.
 CALL_TIMEOUT = 420
 
+# Claude Code turns extended thinking ON by default, and on a comprehension
+# prompt Haiku spent 10,457 thinking tokens to write 605 of answer: 99 s a call,
+# against 7.5 s with thinking off and much the same output. Set per gateway
+# (--thinking N, passed to the CLI as MAX_THINKING_TOKENS) so the effect of
+# thinking can be measured rather than assumed. 0 = off.
+THINKING_TOKENS = int(os.environ.get("CLAUDE_GATEWAY_THINKING", "0") or 0)
+
 _JSON_ONLY = ("\n\nRespond with ONE JSON object and nothing else: no prose before or "
               "after it, no code fences.")
 
@@ -96,6 +103,33 @@ def _unwrap(value: Any) -> Any:
     return value
 
 
+def _repair(value: Any) -> Any:
+    """
+    Undo JSON encoded INSIDE a string: {"decisions": "[{...}]"} becomes
+    {"decisions": [{...}]}. Seen on Haiku's structured output; ingestion reads
+    a list of objects and silently drops a string. Only a string that parses as
+    a list or an object is touched -- prose stays prose.
+    """
+    if isinstance(value, dict):
+        return {k: _repair(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_repair(v) for v in value]
+    if isinstance(value, str) and value[:1] in "[{":
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return value
+        if isinstance(parsed, (list, dict)):
+            return _repair(parsed)
+    return value
+
+
+def _is_schema_echo(value: Any) -> bool:
+    """{"type": "object"} or {"type": ..., "properties": ...}: a schema, not an answer."""
+    return isinstance(value, dict) and "type" in value and set(value) <= {
+        "type", "properties", "required", "additionalProperties", "items", "$schema"}
+
+
 def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None,
                json_object: bool) -> dict[str, Any]:
     """
@@ -107,12 +141,13 @@ def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None
     "Return ONLY a JSON object" and wrote Markdown minutes instead -- every
     comprehension call failed on the first real run.
 
-    A json_object request is given a minimal schema ({"type": "object"}), so
-    the CLI's structured output GUARANTEES an object rather than the prompt
-    merely asking for one.
+    A json_object request is NOT given a schema. A minimal {"type": "object"}
+    was tried and measured as harmful: Haiku answered one meeting's whole
+    concerns pass with the schema itself ('{"type": "object"}' -- zero risks,
+    zero questions) and another's with every list JSON-encoded inside a string,
+    which ingestion drops. With the prompt now arriving whole, asking is enough;
+    `_repair` handles what still slips through.
     """
-    if json_object and schema is None:
-        schema = {"type": "object"}
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as fh:
         fh.write(system + (_JSON_ONLY if json_object else ""))
         prompt_file = fh.name
@@ -124,7 +159,8 @@ def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None
     started = time.perf_counter()
     try:
         proc = subprocess.run(args, input=user, capture_output=True, text=True,
-                              encoding="utf-8", timeout=CALL_TIMEOUT)
+                              encoding="utf-8", timeout=CALL_TIMEOUT,
+                              env={**os.environ, "MAX_THINKING_TOKENS": str(THINKING_TOKENS)})
     finally:
         try:
             os.unlink(prompt_file)
@@ -139,11 +175,21 @@ def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None
     if out.get("is_error"):
         raise RuntimeError(f"claude reported an error: {str(out.get('result'))[:400]}")
     if out.get("structured_output") is not None:
-        text = json.dumps(_unwrap(out["structured_output"]))
+        text = json.dumps(_repair(_unwrap(out["structured_output"])))
     else:
         text = out.get("result") or ""
         if json_object:
             text = _extract_json(text)
+            try:
+                text = json.dumps(_repair(json.loads(text)))
+            except ValueError:
+                pass
+    if json_object or schema is not None:
+        try:
+            if _is_schema_echo(json.loads(text)):
+                raise RuntimeError("the model returned the schema instead of an answer")
+        except ValueError:
+            pass
     return {"text": text, "usage": out.get("usage") or {},
             "cost": out.get("total_cost_usd"), "ms": ms}
 
@@ -179,7 +225,8 @@ def make_handler(concurrency: int, token: str | None):
 
         def do_GET(self) -> None:
             if self.path.rstrip("/") in ("/health", "/v1/health"):
-                self._send(200, {"ok": True, "model": DEFAULT_MODEL, "concurrency": concurrency})
+                self._send(200, {"ok": True, "model": DEFAULT_MODEL, "concurrency": concurrency,
+                                 "thinking_tokens": THINKING_TOKENS})
             else:
                 self._send(404, {"error": "not found"})
 
@@ -228,11 +275,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--concurrency", type=int, default=3)
+    parser.add_argument("--thinking", type=int, default=None,
+                        help="extended-thinking budget in tokens per call (default 0 = off)")
     args = parser.parse_args(argv)
+    global THINKING_TOKENS
+    if args.thinking is not None:
+        THINKING_TOKENS = max(0, args.thinking)
     claude_binary()                                   # fail now, not on the first request
     token = os.environ.get("CLAUDE_GATEWAY_TOKEN") or None
     server = ThreadingHTTPServer((args.host, args.port), make_handler(args.concurrency, token))
     print(f"claude gateway on http://{args.host}:{args.port} (model {DEFAULT_MODEL}, "
+          f"thinking {THINKING_TOKENS or 'off'}, "
           f"{args.concurrency} at a time{', token required' if token else ''})", flush=True)
     try:
         server.serve_forever()
