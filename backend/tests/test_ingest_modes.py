@@ -104,7 +104,8 @@ def test_each_part_is_told_what_the_part_before_noted(monkeypatch):
     reader(chunks[1])
     notes_calls = [user for system, user in seen if "take notes" in system]
     assert "first part" in notes_calls[0]
-    assert "The buyer of a swap pays fixed" in notes_calls[1]
+    part_two = next(u for u in notes_calls if "Part 2 of the transcript" in u)
+    assert "The buyer of a swap pays fixed" in part_two
 
 
 def test_a_meeting_keeps_its_measured_passes_and_gains_points(monkeypatch):
@@ -292,3 +293,24 @@ def test_two_readings_of_a_part_are_merged_without_duplicates(monkeypatch):
     points = [a.statement for a in u.artifacts if a.kind == "point"]
     assert points == ["The buyer of a swap pays fixed and receives floating", "Dealers bake in a margin"]
     assert "Independent reading 2" in seen[1] and "Independent reading" not in seen[0]
+
+
+def test_an_unreadable_reply_is_never_served_from_the_cache(monkeypatch):
+    """A non-JSON reply to a JSON request is not cached, and a cached one is ignored."""
+    from brahmastra.ingest import memo
+
+    store: dict = {}
+    monkeypatch.setattr(memo, "load", lambda key: store.get(key))
+    monkeypatch.setattr(memo, "save", lambda key, reply: store.__setitem__(key, reply))
+    replies = iter(["# Meeting minutes\n- not json", '{"decisions": []}'])
+    monkeypatch.setattr("brahmastra.llm.chat", lambda *a, **k: next(replies))
+    assert comprehend._cached_chat("sys", "user", json_mode=True).startswith("#")
+    assert store == {}
+    assert comprehend._cached_chat("sys", "user", json_mode=True) == '{"decisions": []}'
+
+
+def test_two_notes_readings_are_the_default(monkeypatch):
+    from brahmastra.ingest.reader import notes_readings
+
+    monkeypatch.delenv("INGEST_NOTES_READINGS", raising=False)
+    assert notes_readings() == 2

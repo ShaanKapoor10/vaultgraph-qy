@@ -208,7 +208,10 @@ def _with_related_statements(matched: list[dict[str, Any]], anchors: set[str],
     and their other statements come in: a two-hop walk through the graph,
     which is what the graph is for.
     """
-    if os.environ.get("RAG_RELATED_STATEMENTS", "1").strip() == "0":
+    # MEASURED 2026-10-01, answering only on fixed graphs, 2 runs x 3 meetings:
+    # off 8,8 / 9,9 / 10,10 and on 8,7 / 9,9 / 10,10 -- no gain. Off by
+    # default; RAG_RELATED_STATEMENTS=1 turns it back on to measure again.
+    if os.environ.get("RAG_RELATED_STATEMENTS", "0").strip() != "1":
         return facts
     statements = [n["id"] for n in matched if (n.get("type") or "") == "statement"]
     if not statements or len(facts) >= MAX_FACTS:

@@ -59,11 +59,24 @@ def notes_readings() -> int:
     answer is bounded by it. Merging readings trades calls for coverage; the
     merge is safe because every point is quote-checked on its own and
     consolidate() folds restatements together.
+
+    MEASURED 2026-10-01 on gpt-oss-120b, notes pass only, 3 meetings x 3 runs,
+    scored by how many of the question sets' 90 expected answers some
+    statement covers:
+
+                              statements per meeting      answers covered
+        1 reading, t=0.1      14.1 (min 7, max 19)        51 / 90
+        1 reading, t=0        13.1 (min 3, max 19)        45 / 90
+        2 readings merged     24.8 (min 16, max 32)       59 / 90
+
+    Temperature 0 did not steady it. Two readings did, and lifted the worst
+    case most -- which is the run that decides what a meeting loses. Two is
+    the default; it costs one extra call per part.
     """
     try:
-        return max(1, min(3, int(os.environ.get("INGEST_NOTES_READINGS", "") or 1)))
+        return max(1, min(3, int(os.environ.get("INGEST_NOTES_READINGS", "") or 2)))
     except ValueError:
-        return 1
+        return 2
 
 NOTES_PROMPT = """\
 You take notes on one part of {session}. You get the notes already taken for
