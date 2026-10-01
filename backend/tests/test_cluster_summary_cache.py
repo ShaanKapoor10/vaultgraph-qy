@@ -84,12 +84,12 @@ def test_an_unchanged_cluster_costs_no_llm_call(temp_db, monkeypatch):
     monkeypatch.setattr(cs, "MIN_CLUSTER_SIZE", 1)
 
     clusters = [
-        {"id": 1, "members": ["a", "b"], "size": 2, "summary": "carried over"},
+        {"id": 1, "members": ["a", "b"], "size": 2, "summary": "carried over", "label": "A and B"},
         {"id": 2, "members": ["c", "d"], "size": 2},          # never summarised
     ]
     out = cs.summarise_clusters(clusters, edges=[])
 
-    assert out[1] == "carried over", "an unchanged cluster must reuse its summary"
+    assert out[1] == {"summary": "carried over", "label": "A and B"},         "an unchanged cluster must reuse its summary"
     assert out[2] == "fresh summary"
     assert calls == [["c", "d"]], f"only the new cluster may cost a call, got {calls}"
 
@@ -241,3 +241,42 @@ def test_a_label_that_is_really_a_sentence_is_dropped(monkeypatch):
         {"label": "AI driven bidirectional knowledge graph sync platform linking Notion and Neo4j",
          "summary": "s"}))
     assert cs._summarise_one(["a"], [])["label"] == ""
+
+
+def test_a_summary_from_before_labels_is_refreshed_once(monkeypatch):
+    """Carried without a label, the dashboard would show "(no label)" forever."""
+    from brahmastra import cluster_summary as cs
+
+    calls = []
+    monkeypatch.setattr(cs, "llm_available", lambda: True)
+    monkeypatch.setattr(cs, "_summarise_one",
+                        lambda m, e: calls.append(m) or {"label": "A and B", "summary": "s"})
+    monkeypatch.setattr(cs, "MIN_CLUSTER_SIZE", 1)
+    out = cs.summarise_clusters([{"id": 1, "members": ["a", "b"], "size": 2,
+                                  "summary": "old sentence"}], edges=[])
+    assert calls == [["a", "b"]] and out[1]["label"] == "A and B"
+
+
+def test_without_a_model_an_unlabelled_summary_is_kept_not_lost(monkeypatch):
+    from brahmastra import cluster_summary as cs
+
+    monkeypatch.setattr(cs, "llm_available", lambda: False)
+    monkeypatch.setattr(cs, "MIN_CLUSTER_SIZE", 1)
+    out = cs.summarise_clusters([{"id": 1, "members": ["a"], "size": 1,
+                                  "summary": "old sentence"}], edges=[])
+    assert out[1] == "old sentence"
+
+
+def test_a_failed_label_refresh_keeps_the_old_summary(monkeypatch):
+    from brahmastra import cluster_summary as cs
+    from brahmastra.llm import LLMQuotaExhausted
+
+    def spent(m, e):
+        raise LLMQuotaExhausted("daily cap")
+
+    monkeypatch.setattr(cs, "llm_available", lambda: True)
+    monkeypatch.setattr(cs, "_summarise_one", spent)
+    monkeypatch.setattr(cs, "MIN_CLUSTER_SIZE", 1)
+    out = cs.summarise_clusters([{"id": 1, "members": ["a"], "size": 1,
+                                  "summary": "old sentence"}], edges=[])
+    assert out[1] == "old sentence"
