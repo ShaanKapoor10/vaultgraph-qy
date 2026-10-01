@@ -1,0 +1,37 @@
+{
+  "mcpServers": {
+    "brahmastra-test": {
+      "command": "C:\\Users\\shaan\\Desktop\\ai\\vaultgraph-qy\\backend\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "brahmastra.mcp_server"],
+      "cwd": "C:\\Users\\shaan\\Desktop\\ai\\vaultgraph-qy\\backend",
+      "env": {
+        "BRAHMASTRA_NO_DOTENV": "1",
+        "NOTE_BACKEND": "postgres",
+        "GRAPH_BACKEND": "neo4j",
+        "POSTGRES_HOST": "localhost",
+        "POSTGRES_PORT": "5434",
+        "POSTGRES_USER": "brahmastra",
+        "POSTGRES_PASSWORD": "brahmastra-test",
+        "POSTGRES_DB": "brahmastra_test",
+        "NEO4J_URI": "neo4j://localhost:7688",
+        "NEO4J_USER": "neo4j",
+        "NEO4J_PASSWORD": "brahmastra-test",
+        "NEO4J_ENCRYPTED": "0",
+        "BRAHMASTRA_WORKSPACE": "default",
+        "BRAHMASTRA_DATA_DIR": "C:\\Users\\shaan\\Desktop\\ai\\vaultgraph-qy\\backend\\data-test",
+        "BRAHMASTRA_CHECKPOINT_DIR": "C:\\Users\\shaan\\Desktop\\ai\\vaultgraph-qy\\backend\\data-test\\checkpoints",
+        "BRAHMASTRA_DB": "C:\\Users\\shaan\\Desktop\\ai\\vaultgraph-qy\\backend\\data-test\\concept_graph.db",
+        "GRAPH_KEEPALIVE": "0",
+        "LLM_PROVIDER": "gateway",
+        "GATEWAY_MODEL": "haiku",
+        "CLAUDE_GATEWAY_URL": "http://127.0.0.1:8790",
+        "RESOLUTION_LLM_MODEL": "gateway:haiku",
+        "ENTITY_CONFIRM": "1",
+        "GROQ_API_KEY": "",
+        "GROQ_API_KEYS": "",
+        "NOTION_TOKEN": "",
+        "NOTION_DATABASE_ID": ""
+      }
+    }
+  }
+}
