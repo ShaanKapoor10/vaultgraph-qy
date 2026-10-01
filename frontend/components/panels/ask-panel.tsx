@@ -1,11 +1,20 @@
 "use client"
 
 import { useState } from "react"
-import { Sparkles, Loader2, CornerDownLeft } from "lucide-react"
+import { Sparkles, Loader2, CornerDownLeft, Network, MessageSquareQuote, CircleSlash } from "lucide-react"
 
 interface Citation {
   note_id: string
   title: string
+}
+
+/** A raw transcript passage an answer was read from (only when the graph had nothing). */
+interface Passage {
+  transcript_id: string
+  title: string | null
+  start_time: string | null
+  end_time: string | null
+  speakers: string | null
 }
 
 interface AskResult {
@@ -13,7 +22,43 @@ interface AskResult {
   answer: string
   entities: string[]
   citations: Citation[]
+  /**
+   * Where the answer came from. "graph": the knowledge graph answered.
+   * "transcript": the graph had nothing, so it was read from what was said --
+   * which also means extraction missed it. "none": nothing answered it.
+   * Absent on global (cluster summary) answers.
+   */
+  source?: "graph" | "transcript" | "none"
+  passages?: Passage[]
 }
+
+const SOURCE: Record<string, { label: string; title: string; cls: string; Icon: typeof Network }> = {
+  graph: {
+    label: "from the graph",
+    title: "Answered from facts and statements in the knowledge graph.",
+    cls: "border-green-500/30 bg-green-500/10 text-green-400",
+    Icon: Network,
+  },
+  transcript: {
+    label: "from the transcript, not in the graph yet",
+    title:
+      "The graph had no answer, so this was read from what was actually said in a meeting. " +
+      "That also means extraction missed it.",
+    cls: "border-amber-500/30 bg-amber-500/10 text-amber-400",
+    Icon: MessageSquareQuote,
+  },
+  none: {
+    label: "no answer found",
+    title: "Neither the graph nor any recorded transcript answers this.",
+    cls: "border-border bg-secondary text-muted-foreground",
+    Icon: CircleSlash,
+  },
+}
+
+/** HH:MM:SS, without the milliseconds a VTT file carries. */
+const clock = (ts: string | null) => (ts ? ts.replace(/[.,]\d+$/, "") : null)
+/** An anchor can be a whole statement; the header shows the start of it. */
+const short = (name: string, max = 60) => (name.length > max ? `${name.slice(0, max - 1).trimEnd()}…` : name)
 
 const EXAMPLES = [
   "What do I know about the Apollo project?",
@@ -135,14 +180,49 @@ export function AskPanel({ backendAvailable = false }: { backendAvailable?: bool
             >
               {result.mode} search
             </span>
-            {result.entities.length > 0 && (
-              <span className="font-mono text-[11px] text-muted-foreground">
-                anchored to: {result.entities.join(", ")}
-              </span>
-            )}
+            {result.source && SOURCE[result.source] && (() => {
+              const s = SOURCE[result.source!]
+              return (
+                <span
+                  title={s.title}
+                  className={`flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] ${s.cls}`}
+                >
+                  <s.Icon className="h-3 w-3" />
+                  {s.label}
+                </span>
+              )
+            })()}
           </div>
+          {result.entities.length > 0 && (
+            <p className="font-mono text-[11px] text-muted-foreground" title={result.entities.join("\n")}>
+              anchored to: {result.entities.map((e) => short(e)).join(" · ")}
+            </p>
+          )}
 
           <p className="whitespace-pre-wrap text-sm leading-relaxed text-foreground">{result.answer}</p>
+
+          {result.passages && result.passages.length > 0 && (
+            <div className="flex flex-col gap-1.5 border-t border-border pt-3">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                Read from what was said
+              </span>
+              <ul className="flex flex-col gap-1">
+                {result.passages.map((p, i) => (
+                  <li key={i} className="font-mono text-xs text-secondary-foreground">
+                    [t:{i + 1}] {p.title ?? "a session"}
+                    {p.start_time && (
+                      <span className="text-muted-foreground">
+                        {" "}
+                        · {clock(p.start_time)}
+                        {p.end_time && p.end_time !== p.start_time ? `–${clock(p.end_time)}` : ""}
+                      </span>
+                    )}
+                    {p.speakers && <span className="text-muted-foreground"> · {p.speakers}</span>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
 
           {result.citations.length > 0 && (
             <div className="flex flex-col gap-1.5 border-t border-border pt-3">

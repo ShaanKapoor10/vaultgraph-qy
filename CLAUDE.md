@@ -31,6 +31,10 @@ only makes the tools available; using them is on you, every time.
    reached `extraction_status='done'` before considering it stored.
 
 ### Available MCP tools (12)
+
+Use the PRODUCTION Brahmastra MCP (`brahmastra_*` from the Brahmastra plugin) for memory.
+A `brahmastra-test` server exists for the Haiku experiment and is not plugged in; never
+store memory there.
 Core: `brahmastra_add_note`, `brahmastra_search_entities`, `brahmastra_search_notes`,
 `brahmastra_search_sessions`, `brahmastra_search_code`,
 `brahmastra_get_entity_details`, `brahmastra_get_graph_stats`,
@@ -129,8 +133,10 @@ Knowledge graph engine that replaces Obsidian — turns notes into a queryable g
   Run from `backend/`: `uvicorn main:app --reload --port 8001` (NOT `brahmastra.main`,
   which does not exist).
 - **Frontend:** Next.js + React + D3, **port 3000**. Run `pnpm dev` from `frontend/`.
-- **Tests:** `python -m pytest tests/ -q` from `backend/` (201 passing; 14 of them
-  need a reachable Postgres and skip cleanly without one).
+- **Tests:** `python -m pytest tests/ -q` from `backend/` (~1040 passing; 14 of them
+  need a reachable Postgres and skip cleanly without one). Tests never call an LLM:
+  `tests/conftest.py` stubs the notes pass, the overview and the status pass;
+  a test that exercises them is marked `real_session_passes` and fakes the chat.
 - **Full stack:** `docker compose up --build` **from the repo root** — postgres,
   neo4j, backend, frontend. Dashboard :3000, API :8001.
 
@@ -438,6 +444,48 @@ GraphRAG, cluster summaries), so they can never disagree about which provider is
 
 ---
 
+## Meetings and lectures: how a session becomes knowledge (2026-10-01)
+
+Everything here was measured end to end before adoption; `docs/ROADMAP.md` items 11c
+and 11d hold the numbers, and so does each module's docstring. In order:
+
+- **Parsing** (`ingest/segment.py`): plain `Speaker:` lines, SRT and WebVTT, including
+  Teams' `<v Name>` voice tags. Cue IDs are never speech, one speaker's consecutive
+  cues are joined into whole sentences, and doubled line endings (`\r\r\n`) still
+  parse.
+- **Mode** (`ingest/modes.py`): `meeting` (decisions, action items, risks, open
+  questions) or `lecture` (what was taught, audience questions with answers,
+  follow-ups). It is chosen when a session is added; "process again as" switches it.
+- **Reading** (`ingest/reader.py`): the meeting passes in `comprehend.py` are unchanged
+  and measured. Every mode also gets a **notes pass**: a topic plus key points, each
+  point quoting the transcript or dropped. Each part is told what the part before
+  noted, and is **read twice and merged** (`INGEST_NOTES_READINGS=2`: 59/90 expected
+  answers covered against 51/90 for one reading).
+- **Raw passages** (`ingest/passages.py`): the transcript indexed as it was said, with
+  speaker and time, secrets redacted, no model. `GET /ingest/passages`, plus the search
+  box on each session.
+- **Statements into the graph** (`ingest/graph_record.py`): every key point is declared
+  WHOLE as a `statement` node, with `said_by` (the speaker of its quote),
+  `discussed_in` and `mentions`. The part summaries are still extracted as well:
+  dropping them measured worse.
+- **Task status** (`ingest/status.py`): open, done or blocked, decided from what was said
+  about each action item. Done and blocked must quote the words that say so.
+- **Overview** (`ingest/overview.py`): headline, summary and themes, written from the
+  part notes and never turned into graph triples.
+- **Progress:** `GET /ingest/transcripts/{id}/meeting` returns `progress` (which part is
+  being read) and `parts` (each part's topic, summary and points) while a session runs.
+
+**Measuring it:** `ingest/evaluate.py` scores what comprehension finds against labelled
+cases (`ingest/cases/`, plus `status` on action items). `ingest/qa_eval.py` follows a
+session all the way to `/ask` and grades the answers with a second model:
+
+```
+python -m brahmastra.scratch --db data/eval-private/x.db -c "from brahmastra.ingest.qa_eval import main; main(['CASE.json','QA.json'])"
+```
+
+Cases built from REAL recordings live in `backend/data/eval-private/` (gitignored) and
+are never committed.
+
 ## Diarized transcripts: voices are named before anything reads them
 
 `ingest/speakers.py` replaces diarizer labels (`Speaker A`, `SPEAKER_01`) with names
@@ -630,9 +678,19 @@ leak made 18 tests take 29 seconds; stubbing it took them to 0.10s.
 - **Embeddings**: `backend/brahmastra/embeddings.py`, `all-MiniLM-L6-v2`, 384-dim, cached
   to `backend/.cache` (absolute path — a relative one previously landed the 87MB model in
   `backend/backend/.cache`). Changing the model means rebuilding the vector indexes.
-- **GraphRAG** (`/ask`): local (entity subgraph) or global (cluster summaries) mode, with
-  citations. **Multi-hop** — depth 2 is chosen automatically for chained questions
-  ("Sarah's manager's other reports"); `POST /ask {"depth": 1..3}` overrides.
+- **GraphRAG** (`/ask`) is **GRAPH FIRST**. Local search matches entities by name and
+  `statement` nodes by meaning, then answers from graph facts alone. Only when the model
+  reports the graph lacks the answer does it read raw transcript passages, and then the
+  answer carries `source: "transcript"` (the dashboard shows it, since it also means
+  extraction missed something). Global (cluster summary) search is used only for
+  big-picture questions: a question that matches nothing is no longer sent there.
+  **Multi-hop**: depth 2 is chosen automatically for chained questions ("Sarah's
+  manager's other reports"); `POST /ask {"depth": 1..3}` overrides. The answer prompt
+  asks for the reasons, numbers and names the facts carry (27/30 against 25/30).
+- **Topic clusters** (`concept_graph._topic_partition`): Louvain runs on ENTITIES only.
+  Statements and meeting items join the cluster of what they mention afterwards: a
+  meeting hub had turned one lecture into a single 143-node "cluster". Louvain is seeded.
+  Each cluster has a 2-5 word `label` beside its one-sentence `summary`.
 - **Connection finder** (`GET /paths?source=X&target=Y`): shortest path between entities.
   Hops state the fact **as stored**, with `walk_from`/`walk_to` for traversal order.
 
@@ -640,12 +698,20 @@ leak made 18 tests take 29 seconds; stubbing it took them to 0.10s.
 
 ## Dashboard tabs worth knowing
 
-**Meetings** (each finding with speaker, quote and time; Reject survives re-processing)
-and **Diagnostics** (`GET /diagnostics`: what is waiting, what failed and whether it
-will fix itself, key state, queues, with safe action buttons). Check Diagnostics before
-digging through logs; it computes the verdicts the logs only imply.
+- **Meetings:** each finding with speaker, quote and time, and statuses on action items;
+  Reject survives re-processing. Also live progress, part-by-part summaries and points,
+  the overview, "search what was said", and a mode and workspace picker.
+- **Diagnostics** (`GET /diagnostics`): what is waiting, what failed and whether it will
+  fix itself, key state and queues, with safe action buttons. It also manages Groq keys:
+  add, test, disable or remove, stored in `data_dir()/llm-keys.json` beside `.env`.
+  Changing keys needs `BRAHMASTRA_KEY_ADMIN=1`, and no response ever contains a whole
+  key. Check Diagnostics before digging through logs; it computes the verdicts the logs
+  only imply.
+- **Ask:** each answer says whether it came from the graph or, failing that, from the
+  transcript, with the passages it read.
+- **Notes:** hybrid search, newest first, long notes folded.
 
-## API routes (22)
+## API routes (40)
 
 ```
 /health  /health/ready
@@ -657,7 +723,17 @@ digging through logs; it computes the verdicts the logs only imply.
 /ask
 /paths
 /workspaces  /workspaces/{workspace_id}  /workspaces/search
+/ingest/modes  /ingest/stats  /ingest/passages
+/ingest/transcripts  /ingest/transcripts/upload  /ingest/transcripts/{id}
+/ingest/transcripts/{id}/meeting  /ingest/transcripts/{id}/reprocess   (?mode=lecture)
+/ingest/artifacts  /ingest/artifacts/{id}/reject
+/diagnostics  /diagnostics/notes/{id}/retry  /diagnostics/notes/retry-errors
+/diagnostics/checkpoints/drain
+/diagnostics/keys  /diagnostics/keys/{kid}  /diagnostics/keys/{kid}/enable  /diagnostics/keys/{kid}/test
 ```
+
+`/graph/clusters` returns the ENTITY-RESOLUTION groups (canonical names), not the topic
+clusters. Those travel in `GET /graph` as `stats.concept_clusters`.
 
 Verify against reality rather than this list: `main.app.openapi()["paths"]`. The routers
 are `_IncludedRouter` objects, so `app.routes` does NOT flatten them — reading that
@@ -722,6 +798,18 @@ They previously did inherit it, and the moment `.env` named the deployed arrange
 suite started building a `CompositeStore` against real infrastructure.
 
 ---
+
+## Experiment: Claude Haiku as the LLM (branch `exp/haiku-gateway`, NOT on brahmastra-v3)
+
+`brahmastra/claude_gateway.py` serves an OpenAI-shaped endpoint on the host
+(`127.0.0.1:8790`) by running Claude Code headless (`claude -p --model haiku`) on Shaan's
+login. `LLM_PROVIDER=gateway` selects it, and only that: automatic selection and the quota
+fallback skip it. `docker-compose.test.yml` (project `brahmastra-test`) is a complete
+second Brahmastra on :3001/:8011/:5434/:7688 whose LLM calls all go there. Its MCP twin's
+config is in `brahmastra-test.mcp.json`, deliberately NOT loaded, so the only Brahmastra
+MCP is the production one. Read the gateway module before trusting a comparison. Its first
+results measured gateway bugs, not Haiku: cmd.exe cutting multi-line arguments, a
+minimal schema that Haiku echoed back, and Claude Code's default extended thinking.
 
 ## Important runtime note
 
