@@ -328,6 +328,30 @@ questions test substance no item carries. Totals over the three meetings:
 - **Lecture, same routes:** 7/12, 10/12 and 8/12.
 - **Open:** single runs; two lecture questions fail on every route; task status (open/done/blocked) not built.
 
+### 11e. Backlog, parked 2026-10-01 for Shaan to pick up later
+
+Each item is measured or observed, not guessed:
+
+1. **Standups' reported work** ("the login fix shipped yesterday") is not captured as an
+   action item, so it cannot be marked done. The reported-work rule
+   (`INGEST_COMMIT_REPORTED`) found 2–3 of 6 either way. The labelled case is
+   `ingest/cases/sprint-standup-status.json`.
+2. **Item finding varies run to run.** A reprocess of the Q3 demo lost two action items
+   (Raj's reconciliation, Mei's staging escalation). Reading twice fixed this for notes;
+   try the same for the commitments and concerns passes, and measure it.
+3. **Audience answers that span later turns** are not attached to their question (the
+   lecture's one question). **Restated follow-ups** ("release" / "launch questionnaire")
+   are not merged as duplicates.
+4. **Lecture session cluster:** extraction of the summary notes links participants and
+   course material to a "Session N" event node, which still forms a session-level
+   cluster (28 entities) next to the real topic ("Swap Hedging").
+5. **Haiku, still open** (branch `exp/haiku-gateway`): does extended thinking help
+   (`--thinking N`), and how does Haiku score with two notes readings? Its numbers so far
+   used one reading. Then decide whether Haiku becomes a real, optional provider.
+6. **The `exp/haiku-gateway` branch** is local and unpushed: keep, push or merge.
+7. **Proposal A (any source, not just meetings)** and **real audio** (a diarizer in front
+   of `ingest/speakers.py`) wait until meetings are finished.
+
 ### 11d. Graph-first /ask, notes stability, statuses, topic clusters — 2026-10-01
 
 - **/ask is graph-first.** It answers from graph facts and statements (statements found by meaning), and reads transcript passages only when the graph has nothing. Such answers are marked `source: transcript`.
