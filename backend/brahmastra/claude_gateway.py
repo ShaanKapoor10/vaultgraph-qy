@@ -23,8 +23,20 @@ and settings each request carried 16,087 tokens of its own setup for a
 settings files: 1,311 tokens, $0.003, 3.0 s. `--bare` would strip more but
 refuses the OAuth login and wants an API key, so it is not an option here.
 
-WHAT IT DOES NOT DO: temperature (the CLI has no such flag -- recorded, and
-ignored), streaming, or tools. Every call is logged, with tokens, cost and
+HOW CLOSE TO THE API IT IS (2026-10-01):
+
+    system prompt   yours, plus ~500 tokens of environment Claude Code adds
+                    (cwd, platform, account, date) -- run from an empty
+                    directory so it says nothing about this repository;
+                    removable only with --bare, which refuses the login
+    max_tokens      enforced (CLAUDE_CODE_MAX_OUTPUT_TOKENS). Unlike the API,
+                    an over-long answer is an ERROR, not a truncated reply;
+                    for JSON the two fail the same way
+    temperature     not settable in the CLI -- ignored
+    thinking        off unless --thinking N (Claude Code's default is on)
+    tools/MCP/settings/session   none
+
+WHAT IT DOES NOT DO: temperature, streaming, or tools. Every call is logged, with tokens, cost and
 time, to <data dir>/gateway-usage.jsonl, so the cost of an experiment is a
 number rather than a guess.
 
@@ -45,6 +57,7 @@ import threading
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 DEFAULT_MODEL = "haiku"
@@ -130,8 +143,19 @@ def _is_schema_echo(value: Any) -> bool:
         "type", "properties", "required", "additionalProperties", "items", "$schema"}
 
 
+# Every call runs from this EMPTY directory. Claude Code adds an environment
+# block to the context -- working directory, whether it is a git repository,
+# platform, a scratchpad path, the account, the date: ~500 tokens the real API
+# would never send. Run from the repository, that block described the repo the
+# model was being asked about. From an empty directory it describes nothing;
+# the rest of it cannot be removed without --bare, which refuses the OAuth
+# login. Measured: 566 input tokens for a one-line prompt from backend/, 545
+# from an empty directory.
+_NEUTRAL_CWD = Path(tempfile.gettempdir()) / "brahmastra-claude-gateway"
+
+
 def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None,
-               json_object: bool) -> dict[str, Any]:
+               json_object: bool, max_tokens: int | None = None) -> dict[str, Any]:
     """
     One headless call. Returns {text, usage, cost, ms} or raises RuntimeError.
 
@@ -158,9 +182,15 @@ def run_claude(system: str, user: str, model: str, schema: dict[str, Any] | None
         args += ["--json-schema", json.dumps(schema, separators=(",", ":"))]
     started = time.perf_counter()
     try:
+        env = {**os.environ, "MAX_THINKING_TOKENS": str(THINKING_TOKENS)}
+        if max_tokens:
+            # Honoured, as the API would: Brahmastra's budgets are part of
+            # every stage's contract, and Groq enforces them.
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(int(max_tokens))
+        _NEUTRAL_CWD.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(args, input=user, capture_output=True, text=True,
-                              encoding="utf-8", timeout=CALL_TIMEOUT,
-                              env={**os.environ, "MAX_THINKING_TOKENS": str(THINKING_TOKENS)})
+                              encoding="utf-8", timeout=CALL_TIMEOUT, env=env,
+                              cwd=str(_NEUTRAL_CWD))
     finally:
         try:
             os.unlink(prompt_file)
@@ -250,7 +280,8 @@ def make_handler(concurrency: int, token: str | None):
             model = body.get("model") or DEFAULT_MODEL
             with gate:
                 try:
-                    out = run_claude(system, user, model, schema, fmt.get("type") == "json_object")
+                    out = run_claude(system, user, model, schema, fmt.get("type") == "json_object",
+                                     max_tokens=body.get("max_tokens"))
                 except Exception as exc:                       # noqa: BLE001
                     log.write({"at": time.time(), "model": model, "error": str(exc)[:300]})
                     self._send(502, {"error": {"message": f"claude gateway: {exc}"[:500]}})

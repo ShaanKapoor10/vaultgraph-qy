@@ -36,7 +36,7 @@ def test_json_is_dug_out_of_a_chatty_reply():
 def served(monkeypatch):
     calls = []
 
-    def fake(system, user, model, schema, json_object):
+    def fake(system, user, model, schema, json_object, max_tokens=None):
         calls.append({"system": system, "user": user, "model": model, "schema": schema,
                       "json_object": json_object})
         return {"text": '{"ok": true}', "usage": {"input_tokens": 10, "output_tokens": 3},
